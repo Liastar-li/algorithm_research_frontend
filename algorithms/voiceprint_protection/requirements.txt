@@ -1,0 +1,82 @@
+# ============================================================================
+# 语音声纹主动防御 · 统一依赖清单
+# 目标论文：Imperceptible Voiceprint Protection via Human-Machine Perception
+#           Discrepancy Feature Disentanglement (Interspeech 2026)
+#
+# 用法（两人必须用完全相同的命令）：
+#   conda create -n vpp python=3.9 -y
+#   conda activate vpp
+#   python -m pip install --upgrade pip
+#   pip install -r requirements.txt
+#   python check_env.py            # 输出环境指纹，两人互相比对
+#
+# 安装完成后，务必再执行一次并把结果提交到仓库：
+#   pip freeze > requirements.lock.txt
+#   requirements.lock.txt 是"真正统一"的文件，requirements.txt 是"期望统一"的文件。
+# ============================================================================
+
+# ----------------------------------------------------------------------------
+# PyTorch 官方 CUDA 轮子索引
+#
+# 为什么用 --extra-index-url 而不是 --index-url：
+#   --index-url 会"顶掉" PyPI，装 torch 时可能连带找不到 PyPI 上的依赖。
+#   --extra-index-url 是"多一个源"，PyPI 仍然是主源。
+#
+# 为什么写 torch==2.4.1+cu121 这种带 +cu121 的完整版本号：
+#   PyPI 上的 torch 是 2.4.1（不带 CUDA 标记），本机 +cu121 的轮子只存在于
+#   PyTorch 官方索引。写死 +cu121 可以保证绝不会误装成 CPU 版或 CUDA 12.4 版。
+#
+# 关于 cu121 与本机驱动：cu121 轮子要求 NVIDIA 驱动 >= 525.60.13。
+#   本机实测 Driver 566.24 / CUDA 12.7 -> 满足要求，可以直接用。
+#   若换机器报 "CUDA driver version is insufficient"，见 README.md 的换卡说明。
+# ----------------------------------------------------------------------------
+--extra-index-url https://download.pytorch.org/whl/cu121
+
+# --- 深度学习主干（版本号已对照 PyTorch 官方索引确认存在 cp39/win_amd64 轮子）---
+torch==2.4.1+cu121
+torchaudio==2.4.1+cu121
+
+# --- 数值与音频 ---
+numpy==1.26.4            # 必须 <2.1：numba 0.60 要求 numpy<2.1；且 librosa 0.10 需 numpy<2
+scipy==1.13.1            # numpy<2.3，与 numpy 1.26.4 兼容
+librosa==0.10.2.post1    # 音频读取、mel、STFT
+soundfile==0.12.1        # wav 读写（比 librosa 的 io 更少依赖）
+soxr==0.3.7              # 高质量重采样，librosa resample 可选后端
+
+# --- 训练与可视化 ---
+tqdm==4.66.4
+tensorboard==2.16.2      # torch 2.4 要求 tensorboard >=2.14,<2.17
+matplotlib==3.8.4        # 训练曲线、t-SNE 图（复现论文 Figure 2 / Figure 3）
+
+# --- 服务化（平台算法服务）---
+fastapi==0.110.3
+uvicorn[standard]==0.30.1
+python-multipart==0.0.9 # FastAPI 接收 UploadFile 必需，漏装会报 "Form data requires python-multipart"
+pydantic==2.7.4
+requests==2.32.3
+
+# --- 语音识别（算 WER 用）---
+#
+# 默认用 faster-whisper 而不是 openai-whisper，原因：
+#   openai-whisper 的 setup.py 无条件依赖 triton>=2.0.0，PyPI 没有 Windows 轮子，
+#   Windows 上直接 pip install openai-whisper 会在解析 triton 时失败。
+#   faster-whisper 是 CTranslate2 实现，模型与论文一致（large-v3），纯 pip 可装，
+#   转写结果与 openai-whisper 等价，足够计算 WER。
+huggingface_hub==0.24.6  # 同时也用于 torch.hub.load('NVIDIA/torch.hifi_gan', ...)
+tokenizers==0.19.1
+ctranslate2==4.5.0
+faster-whisper==1.1.0
+jiwer==3.0.4             # WER 计算（论文用 Whisper-large 算 WER）
+numba==0.60.0            # librosa 依赖
+llvmlite==0.43.0         # numba 0.60 的后端
+
+# ----------------------------------------------------------------------------
+# 可选：官方 openai-whisper（Windows 需绕开 triton）
+#
+#   pip install --no-deps openai-whisper==20231117
+#   pip install more-itertools tiktoken
+#
+# whisper 的 triton 依赖只在 Linux 的 GPU 推理加速路径上用得上，Windows 不用它，
+# 所以 --no-deps 跳过 triton 后可以正常运行。
+# 模型权重与 faster-whisper 通用（large-v3），二者算出的 WER 可以互相校验。
+# ----------------------------------------------------------------------------
