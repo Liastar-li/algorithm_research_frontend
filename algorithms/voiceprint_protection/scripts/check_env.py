@@ -67,10 +67,43 @@ def check_torch():
     print(f"  CUDA 编译版本    : {torch.version.cuda}")
 
     if torch.version.cuda is None:
-        print("  [失败] 这是 CPU 版 PyTorch！GPU 无法使用。")
-        print("         重新安装：")
-        print("         pip install --force-reinstall torch==2.4.1+cu121 torchaudio==2.4.1+cu121 \\")
-        print("           --extra-index-url https://download.pytorch.org/whl/cu121")
+        print("  [提示] 当前是 CPU 版 PyTorch（" + torch.__version__ + "）。")
+        print()
+        print("         这**不阻塞开发**：本项目的 L0（平台打通）、L1（推理链）、")
+        print("         评测与文档都可以在 CPU 上完成。只有 Stage 1/2 训练需要 GPU。")
+        print()
+        print("         若确实要本地跑训练，按下面任一方式换成 CUDA 版：")
+        print()
+        print("         方式一：先探测国内源（PowerShell 里运行）：")
+        print("             $urls = @(")
+        print("               'https://mirrors.huaweicloud.com/pytorch-wheels/cu121/torch/',")
+        print("               'https://mirrors.cloud.tencent.com/pytorch-wheels/cu121/torch/',")
+        print("               'https://mirror.nju.edu.cn/pytorch/whl/cu121/torch/',")
+        print("               'https://mirrors.ustc.edu.cn/pytorch-wheels/cu121/torch/',")
+        print("               'https://download.pytorch.org/whl/cu121/torch/'")
+        print("             )")
+        print("             foreach ($u in $urls) {")
+        print("               $html = curl.exe -s --max-time 25 $u")
+        print("               if (-not $html) { Write-Host \"$u  -> 访问失败\"; continue }")
+        print("               $hit = $html | findstr /i \"torch-2.4.1\" | findstr /i \"cp39-cp39-win_amd64\"")
+        print("               if ($hit) { Write-Host \"$u  -> [命中] 可用\" }")
+        print("               else { Write-Host \"$u  -> 可访问但无目标轮子\" }")
+        print("             }")
+        print()
+        print("         方式二：命中后安装（torchaudio 要单独一个 -f）：")
+        print("             pip install --force-reinstall torch==2.4.1+cu121 torchaudio==2.4.1+cu121 `")
+        print("               -f https://mirror.nju.edu.cn/pytorch/whl/cu121/torch/ `")
+        print("               -f https://mirror.nju.edu.cn/pytorch/whl/cu121/torchaudio/ `")
+        print("               -i https://pypi.tuna.tsinghua.edu.cn/simple")
+        print("             （南京大学镜像已实测可用，sha256 与官方一致）")
+        print()
+        print("         方式三：官方索引 + 下载器手动拉（pip 不支持断点续传）：")
+        print("             curl.exe -s https://download.pytorch.org/whl/cu121/torch/ `")
+        print("               | findstr /i \"torch-2.4.1\" | findstr /i \"cp39-cp39-win_amd64\"")
+        print("             用 IDM / Motrix 下载后本地 pip install 该 .whl")
+        print()
+        print("         方式四（推荐）：训练放云上。华为云 ECS 选「PyTorch 预置镜像」，")
+        print("         CUDA 版 torch 开箱即用、零下载。本地只做开发。")
         return None
 
     print(f"  [OK] 是 CUDA 版（cu{torch.version.cuda.replace('cuda', '')}）。")
@@ -143,18 +176,53 @@ def check_packages():
     for name in names:
         try:
             module = __import__(name)
-            version = getattr(module, "__version__", "unknown")
+            version = getattr(module, "__version__", None)
+            if not version:
+                # 有些包（如 jiwer）不设 __version__，改从包元数据取
+                try:
+                    from importlib.metadata import version as _meta_version
+
+                    version = _meta_version(name.replace("_", "-"))
+                except Exception:  # noqa: BLE001
+                    version = "unknown"
             versions[name] = str(version)
             print(f"  {name:<22} {version}")
         except ImportError:
             versions[name] = "MISSING"
             missing.append(name)
             print(f"  {name:<22} [缺失]")
+
+    # python-multipart 的模块名陷阱：
+    #   <= 0.0.9 提供模块名 multipart；>= 0.0.10 才提供 python_multipart。
+    #   FastAPI 0.110.3 依赖的 starlette 0.37 只会 `import python_multipart`，
+    #   所以装了 0.0.9 会表现为"pip 显示已安装、import 却失败"。
+    if "python_multipart" in missing:
+        legacy = False
+        try:
+            import multipart as _legacy_multipart
+
+            legacy = True
+        except ImportError:
+            legacy = False
+        print()
+        print("  [警告] python_multipart 无法导入。")
+        if legacy:
+            print("         诊断：当前装的是 python-multipart <= 0.0.9，它提供的模块名是")
+            print("               老名字 multipart，而 FastAPI 0.110.3 依赖的 starlette 0.37")
+            print("               只会 `import python_multipart` —— 装了也用不上，")
+            print("               起服务时会报 'Form data requires \"python-multipart\"'。")
+            print("         修复：pip install -U \"python-multipart==0.0.20\"")
+        else:
+            print("         安装：pip install \"python-multipart==0.0.20\"")
+            print("         这是 FastAPI 接收上传文件与表单的必需依赖。")
+
     if missing:
-        print(f"\n  [警告] 缺失 {len(missing)} 个包：{', '.join(missing)}")
-        print("         执行：pip install -r requirements.txt")
+        print()
+        print(f"  [警告] 缺失 {len(missing)} 个包：{', '.join(missing)}")
+        print("         或一次装齐：pip install -r requirements.txt")
     else:
-        print("\n  [OK] 全部依赖就位。")
+        print()
+        print("  [OK] 全部依赖就位。")
 
 
 def check_mel():
@@ -178,43 +246,25 @@ def check_mel():
      否则 x_adv 和 x 的帧轴对不上，L_mel 会恒为一个巨大的常数，模型学不到东西。
   3. GE2E 内部自己的 mel（40 维）不要去改——它只用来提 h，
      我们外部的 80 维 mel 只用于 L_mel / L_cd / 解码器。
-  4. HiFi-GAN 声码器必须用 16 kHz 版本配置，否则输出的波形采样率不对。
+  4. 声码器权重的采样率必须和你的模型输出对得上：
+     HiFi-GAN 官方主推 22.05 kHz 权重；要用 16 kHz 就必须换成对应的 16 k 权重，
+     不能拿 22.05 k 的权重去合成 16 k 的 mel。
   5. 全部封装到 algorithms/voiceprint_protection/audio_utils.py，
      任何地方都不许再手写 mel 参数。
 
-  下面的检查只验证 librosa / torchaudio 两条路径算出来的一致性，
-  具体数值请在 audio_utils.py 里固定后，再由 tests/ 里的用例锁住。
+  下面的检查已由 scripts/test_audio_utils.py 承担（那里有可自动失败的断言）。
+  本脚本只做环境层面的提醒。
 """)
-    try:
-        import librosa
-        import numpy as np
-        import torch
-        import torchaudio
-
-        sample_rate = 16000
-        n_fft, hop, n_mels = 1024, 256, 80
-        audio = np.random.RandomState(0).randn(sample_rate * 2).astype(np.float32) * 0.05
-
-        librosa_mel = librosa.feature.melspectrogram(
-            y=audio, sr=sample_rate, n_fft=n_fft, hop_length=hop,
-            n_mels=n_mels, fmin=40, fmax=7600,
-        )
-        tensor = torch.from_numpy(audio).unsqueeze(0)
-        torch_mel = torchaudio.transforms.MelSpectrogram(
-            sample_rate=sample_rate, n_fft=n_fft, hop_length=hop,
-            n_mels=n_mels, fmin=40, fmax=7600,
-        )(tensor)[0]
-
-        print(f"  librosa mel 形状   : {librosa_mel.shape}")
-        print(f"  torchaudio mel 形状: {tuple(torch_mel.shape)}")
-
-        if librosa_mel.shape == tuple(torch_mel.shape):
-            print("  [OK] 两条路径形状一致（数值仍需注意 power/htk 差异，"
-                  "务必在 audio_utils.py 中固定同一套参数）。")
-        else:
-            print("  [警告] 两条路径形状不同 —— 必须选定其中一条并写进 audio_utils.py。")
-    except ImportError as error:
-        print(f"  [警告] 无法导入音频库：{error}")
+    print("  -> 运行 python algorithms/voiceprint_protection/scripts/test_audio_utils.py")
+    print("     该脚本会验证：两个预设只差采样率、mel 形状与帧数、")
+    print("     与 librosa 原生调用数值完全一致、论文超参值、张量维度约定。")
+    print()
+    print("  [重要] 模型侧 mel 与声码器侧 mel 约定不同，不要混用：")
+    print("     模型侧(AutoVC/本项目): fmin 40 / fmax 7600, power=2, log10(mel)")
+    print("     声码器侧(HiFi-GAN)   : fmin 0  / fmax 8000, power=1, log10|STFT|,")
+    print("                          再做 (x + 4.5) / 5.0 归一化")
+    print("     两者混用会让声码器输出变成噪音，且不报错。")
+    print("     见 audio_utils.py 的 mel() 与 vocoder_mel() 两个函数。")
 
 
 def fingerprint():

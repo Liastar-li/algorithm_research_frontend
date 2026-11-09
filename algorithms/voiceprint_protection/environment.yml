@@ -9,9 +9,8 @@ dependencies:
   - pip>=23.0
   - ffmpeg            # 系统级音频工具：whisper/faster-whisper 读非 wav 格式时需要
   - pip:
-      - --extra-index-url https://download.pytorch.org/whl/cu121
-      - torch==2.4.1+cu121
-      - torchaudio==2.4.1+cu121
+      # 注意：torch / torchaudio 单独装，见 requirements.txt 顶部说明。
+      # 预置镜像里已自带 CUDA 版 torch 时，更不要用 pip 覆盖它。
       - numpy==1.26.4
       - scipy==1.13.1
       - librosa==0.10.2.post1
