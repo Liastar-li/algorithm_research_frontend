@@ -4,17 +4,10 @@
     conda activate vpp
     python algorithms/voiceprint_protection/scripts/test_audio_utils.py
 
+★ 另有一个更重要的脚本：scripts/verify_autovc_mel.py
+  它用 AutoVC 官方原始代码与本项目实现做逐元素对照，**那个才是关键**。
+
 通过标准：所有检查项输出 [通过]，最后显示"契约锁定成功"。
-
-为什么需要它：
-  mel 参数一旦在多处不一致，x 与 x_adv 的帧轴会对不上，
-  L_mel 会退化成恒定大常数，模型学不到东西 —— 而且**不报错**。
-  这个脚本把"一致性"变成一条自动断言。
-
-注意：
-  * 本脚本只校验**我们自己这一侧**的契约（预设、形状、帧数、超参）。
-  * "与 AutoVC / HiFi-GAN 官方权重的数值对照"属于 L1 阶段的任务，
-    因为那需要真的把它们的仓库和权重拉下来才能做。
 """
 
 from __future__ import annotations
@@ -39,29 +32,30 @@ def check(title: str, condition: bool, detail: str = "") -> None:
         FAILURES.append(title)
 
 
-def test_preset_consistency() -> None:
-    print("\n【两个预设的一致性】")
-    paper = config.MEL_PRESETS["paper16k"]
-    autovc = config.MEL_PRESETS["autovc22k"]
-    differing = [key for key in paper if paper[key] != autovc[key]]
-    check(
-        "两个预设只在 sample_rate 上不同",
-        differing == ["sample_rate"],
-        f"实际差异字段: {differing}",
-    )
-    check("论文预设为 16 kHz", paper["sample_rate"] == 16000)
-    check("AutoVC 预设为 22.05 kHz", autovc["sample_rate"] == 22050)
-    check("mel 为 80 维", paper["n_mels"] == 80)
-    check("hop 256 / n_fft 1024 / win 1024",
-          paper["hop_length"] == 256 and paper["n_fft"] == 1024 and paper["win_length"] == 1024)
-    check("fmin 40 / fmax 7600", paper["fmin"] == 40 and paper["fmax"] == 7600)
+def test_preset_values() -> None:
+    print("\n【模型侧 mel 预设（实测对齐 AutoVC 官方）】")
+    preset = config.MEL_PRESETS[config.DEFAULT_PRESET]
+    check("默认预设为 model16k", config.DEFAULT_PRESET == "model16k")
+    check("采样率 16000（AutoVC 官方权重就是 16k）", preset["sample_rate"] == 16000,
+          f"实际 {preset['sample_rate']}")
+    check("mel 80 维", preset["n_mels"] == 80)
+    check("fmin 90（取自 make_spect.py，不是 hparams.py 的 125）", preset["fmin"] == 90,
+          f"实际 {preset['fmin']}")
+    check("fmax 7600", preset["fmax"] == 7600)
+    check("n_fft 1024 / hop 256 / win 1024",
+          preset["n_fft"] == 1024 and preset["hop_length"] == 256 and preset["win_length"] == 1024)
+    check("预处理链标记为 autovc", preset["chain"] == "autovc")
 
 
 def test_paper_hyperparameters() -> None:
-    print("\n【接口契约（第 8 章）与论文超参】")
+    print("\n【接口契约与论文超参】")
     check("FRAME_DIM = 80", config.FRAME_DIM == 80)
-    check("CONTENT_DIM = 32", config.CONTENT_DIM == 32)
+    check("CONTENT_DIM(dim_neck) = 32", config.CONTENT_DIM == 32)
+    check("CONTENT_ACTUAL_DIM = 64（双向拼接后）", config.CONTENT_ACTUAL_DIM == 64)
+    check("CONTENT_DOWNSAMPLE(freq) = 32", config.CONTENT_DOWNSAMPLE == 32)
     check("SPEAKER_DIM = 256", config.SPEAKER_DIM == 256)
+    check("AutoVC dim_emb = 256", config.AUTOVC_MODEL["dim_emb"] == 256)
+    check("AutoVC dim_pre = 512", config.AUTOVC_MODEL["dim_pre"] == 512)
     check("Stage1 λ_cd = 1.0（论文值）", config.STAGE1["lambda_cd"] == 1.0)
     check("Stage1 λ_dis = 0.01（论文值）", config.STAGE1["lambda_dis"] == 0.01)
     check("Stage1 迭代 500k（论文值）", config.STAGE1["iterations"] == 500_000)
@@ -72,101 +66,87 @@ def test_paper_hyperparameters() -> None:
     check("Stage2 迭代 200k（论文值）", config.STAGE2["iterations"] == 200_000)
 
 
-def test_mel_shapes(name: str) -> None:
-    print(f"\n【预设 {name} 的 mel 计算】")
-    spec = audio_utils.MelSpec(name)
+def test_speaker_encoders() -> None:
+    print("\n【说话人编码器（两套权重不可混用）】")
+    autovc = config.SPEAKER_ENCODERS["autovc_bl"]
+    ge2e = config.SPEAKER_ENCODERS["ge2e_rtc"]
+    check("AutoVC BL 输入 80 维 mel", autovc["dim_input"] == 80)
+    check("GE2E(RTC) 输入 40 维 mel", ge2e["dim_input"] == 40)
+    check("两者输出都是 256 维", autovc["dim_emb"] == 256 and ge2e["dim_emb"] == 256)
+    check(
+        "两者输入维度不同（所以权重不能混用）",
+        autovc["dim_input"] != ge2e["dim_input"],
+    )
+
+
+def test_mel_chain() -> None:
+    print("\n【模型侧 mel 计算】")
+    spec = audio_utils.MelSpec()
+    sample_rate = spec.sample_rate
     seconds = 2.0
-    wav = np.random.RandomState(0).randn(int(spec.sample_rate * seconds)).astype(np.float32) * 0.05
+    t = np.arange(int(sample_rate * seconds), dtype=np.float32) / sample_rate
+    wav = (
+        0.25 * np.sin(2 * np.pi * 140 * t)
+        + 0.15 * np.sin(2 * np.pi * 420 * t) * np.sin(2 * np.pi * 3.1 * t)
+    ).astype(np.float32)
 
     mel = spec.mel(wav)
-    check(
-        "mel 形状为 (T, 80)",
-        mel.ndim == 2 and mel.shape[1] == config.FRAME_DIM,
-        f"实际 {mel.shape}",
-    )
+    check("mel 形状为 (T, 80)", mel.ndim == 2 and mel.shape[1] == config.FRAME_DIM,
+          f"实际 {mel.shape}")
     check("mel 数值有限", bool(np.isfinite(mel).all()))
+    check("mel 取值在 [0,1]（AutoVC 归一化约定）",
+          float(mel.min()) >= 0.0 and float(mel.max()) <= 1.0,
+          f"[{mel.min():.4f}, {mel.max():.4f}]")
     check("mel 非全零", float(np.abs(mel).sum()) > 0)
     check(
-        "帧数与 librosa 实际输出一致（frames() 公式正确）",
+        "帧数与 frames() 预测一致",
         mel.shape[0] == spec.frames(len(wav)),
         f"mel={mel.shape[0]} 预测={spec.frames(len(wav))}",
     )
 
-    # 直接用 librosa 的原生接口复核一次，确认预设参数被正确传下去
-    import librosa
+    # 固定 seed 必须可复现
+    again = spec.mel(wav)
+    check("固定 seed 时结果可复现", float(np.max(np.abs(mel - again))) < 1e-6)
 
-    preset = config.MEL_PRESETS[name]
-    raw = librosa.feature.melspectrogram(
-        y=wav,
-        sr=preset["sample_rate"],
-        n_fft=preset["n_fft"],
-        hop_length=preset["hop_length"],
-        win_length=preset["win_length"],
-        n_mels=preset["n_mels"],
-        fmin=preset["fmin"],
-        fmax=preset["fmax"],
-        power=preset["power"],
-    )
-    if preset["log_base"]:
-        raw = np.log10(np.clip(raw, preset["log_floor"], None))
-    difference = float(np.max(np.abs(raw.T - mel)))
-    check(
-        "与 librosa 原生调用数值完全一致",
-        difference < 1e-6,
-        f"最大绝对差 {difference:.3e}",
-    )
+    # 关闭噪声后也应稳定
+    quiet = audio_utils.autovc_mel(wav, noise_seed=None)
+    check("关闭噪声也能正常计算", quiet.shape == mel.shape and bool(np.isfinite(quiet).all()))
 
-    # 变长批次不应报错
-    shorter = wav[: spec.sample_rate]
-    batch = spec.mel_batch([wav, shorter])
+    # 变长批次
+    batch = spec.mel_batch([wav, wav[: sample_rate]])
     check("mel_batch 支持变长输入", len(batch) == 2 and batch[0].shape[0] > batch[1].shape[0])
-
-    # 太短的音频应给出明确错误，而不是静默出错
-    try:
-        spec.mel(wav[:100])
-        too_short_ok = False
-    except ValueError:
-        too_short_ok = True
-    check("过短音频抛出明确错误", too_short_ok)
 
 
 def test_vocoder_mel() -> None:
     print("\n【HiFi-GAN 声码器侧的 mel】")
     import librosa
 
-    spec = audio_utils.MelSpec("autovc22k")
-    wav = np.random.RandomState(2).randn(spec.sample_rate).astype(np.float32) * 0.05
+    settings = config.VOCODER_MEL
+    spec = audio_utils.MelSpec()
+    wav = np.random.RandomState(2).randn(22050).astype(np.float32) * 0.05
     mel = audio_utils.vocoder_mel(wav)
     check("vocoder_mel 形状为 (T, 80)", mel.ndim == 2 and mel.shape[1] == 80, f"实际 {mel.shape}")
     check("vocoder_mel 数值有限", bool(np.isfinite(mel).all()))
 
-    # 独立复算一遍，确认实现严格符合 HiFi-GAN 的 (x + 4.5) / 5.0 约定
-    mel_basis = librosa.filters.mel(sr=8000, n_fft=1024, n_mels=80)
+    mel_basis = librosa.filters.mel(sr=settings["mel_basis_sr"], n_fft=settings["n_fft"], n_mels=80)
     spectrum = librosa.stft(
-        y=wav, n_fft=1024, hop_length=256, win_length=1024, window="hann", center=True
+        y=wav, n_fft=settings["n_fft"], hop_length=settings["hop_length"],
+        win_length=settings["win_length"], window="hann", center=True,
     )
-    raw = mel_basis @ np.log10(np.clip(np.abs(spectrum), 1e-5, None))
-    expected = ((raw + 4.5) / 5.0).T
+    raw = mel_basis @ np.log10(np.clip(np.abs(spectrum), settings["log_floor"], None))
+    expected = ((raw + settings["offset"]) / settings["scale"]).T
     difference = float(np.max(np.abs(expected - mel)))
-    check(
-        "严格符合 HiFi-GAN 的 (x + 4.5) / 5.0 约定",
-        difference < 1e-6,
-        f"最大绝对差 {difference:.3e}",
-    )
+    check("严格符合 HiFi-GAN 的 (x + 4.5) / 5.0 约定", difference < 1e-6,
+          f"最大绝对差 {difference:.3e}")
+    check("归一化后数值范围合理",
+          float(mel.min()) > -2.0 and float(mel.max()) < 2.0,
+          f"实际范围 [{mel.min():.3f}, {mel.max():.3f}]")
 
-    # 归一化后应落在大致 [-2, 2] 的区间（真实语音通常在 [-1.2, 1.0] 附近）
-    check(
-        "归一化后数值范围合理",
-        float(mel.min()) > -2.0 and float(mel.max()) < 2.0,
-        f"实际范围 [{mel.min():.3f}, {mel.max():.3f}]",
-    )
-
-    # 模型侧与声码器侧的约定必须不同，否则说明参数被写串了
+    # 模型侧与声码器侧必须不同，防止将来写串
     model_mel = spec.mel(wav)
-    check(
-        "模型侧与声码器侧的 mel 明显不同（约定没有被混用）",
-        float(np.max(np.abs(model_mel - mel[: model_mel.shape[0]]))) > 0.1,
-    )
+    length = min(model_mel.shape[0], mel.shape[0])
+    check("模型侧与声码器侧的 mel 明显不同（约定没被混用）",
+          float(np.max(np.abs(model_mel[:length] - mel[:length]))) > 0.1)
 
 
 def test_waveform_tools() -> None:
@@ -192,28 +172,28 @@ def test_waveform_tools() -> None:
 
 
 def main() -> int:
-    print("=" * 64)
+    print("=" * 70)
     print("  mel 参数契约自检")
-    print("=" * 64)
+    print("=" * 70)
 
-    test_preset_consistency()
+    test_preset_values()
     test_paper_hyperparameters()
-    for name in config.MEL_PRESETS:
-        test_mel_shapes(name)
+    test_speaker_encoders()
+    test_mel_chain()
     test_vocoder_mel()
     test_waveform_tools()
 
     print()
-    print("=" * 64)
+    print("=" * 70)
     if FAILURES:
         print(f"  契约未锁定：{len(FAILURES)} 项失败")
         for item in FAILURES:
             print(f"    - {item}")
-        print("=" * 64)
+        print("=" * 70)
         return 1
-    print("  契约锁定成功：mel 参数与形状约定已一致，可以开始写 Stage 1。")
-    print("  提醒：与 AutoVC / HiFi-GAN 官方权重的数值对照属于 L1 阶段，仍需完成。")
-    print("=" * 64)
+    print("  契约锁定成功。")
+    print("  ★ 还要跑 scripts/verify_autovc_mel.py —— 那个才是与官方权重的关键对照。")
+    print("=" * 70)
     return 0
 
 

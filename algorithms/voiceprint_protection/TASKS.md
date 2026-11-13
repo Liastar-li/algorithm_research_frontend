@@ -40,10 +40,23 @@
 | 环境（conda `vpp` + torch 2.4.1+cu121 + GPU） | ✅ 已就绪 |
 | mel 参数契约（`scripts/test_audio_utils.py`，35 项断言） | ✅ 已锁定 |
 | 环境指纹 | `36370ba987e72a4b`（两人必须一致） |
-| `config.py` / `audio_utils.py` | ✅ 已写好 |
+| `config.py` / `audio_utils.py` | ✅ 已写好（★ 已按 AutoVC 官方实测对齐） |
+| `third_party/AutoVC` | ✅ 已克隆，commit `c1827a6` |
 | **当前阶段** | **W2 · 指南第 3 步 + 第 4 步** |
 | **下一个里程碑** | **M1：L1 推理链跑通**（产出保护后音频） |
 | **待补依赖** | `python-multipart` 升到 0.0.20（起服务前必须） |
+
+### ★ 本周已取得的关键结论（2026-11-13 实测，详见 [docs/notes/autovc_alignment.md](docs/notes/autovc_alignment.md)）
+
+| # | 结论 | 影响 |
+|---|---|---|
+| 1 | AutoVC 官方仓库是 **`auspicious3000/autovc`**（原 `cyqxiaozhen/AutoVC` 已 404） | D1-1 已完成 |
+| 2 | **AutoVC 官方权重是 16 kHz 的**（不是 22.05 kHz） | **全程 16 kHz**，原"22.05k 预设"取消 |
+| 3 | **AutoVC 的 mel 不是 librosa**（reflect 填充 + 幅度 + dB + clip[0,1] + fmin=90 + 30Hz 高通） | 已实现 `autovc_mel()`，必须跑对照脚本验证 |
+| 4 | content code 实际 **64 维**（dim_neck 32 × 双向），下采样 `freq=32` | 契约已更正 |
+| 5 | AutoVC 的说话人嵌入用 `D_VECTOR`（**输入 80 维** mel）；论文脚注的 GE2E 用 **40 维** mel | **两套权重不可混用**，L1 用前者、最终系统用后者 |
+| 6 | AutoVC 官方权重在 **IBM Box**（不是 Google Drive）；Google Drive 直连不通 | 需代理或找镜像 |
+
 
 ---
 
@@ -69,12 +82,13 @@
 
 | # | 负责人 | 任务 | 🔗 前置 | 📦 产出 | 验收标准 |
 |---|---|---|---|---|---|
-| D1-1 | A | 克隆 AutoVC 官方仓库 → `third_party/AutoVC`，记下 **commit hash** | — | `third_party/AutoVC/` | 目录存在，commit 已记录 |
-| D1-2 | A | 读它的 `hparams.py`，把 **mel 参数**（`sample_rate / n_fft / hop / win / n_mels / mel_fmin / mel_fmax`）抄进 `docs/notes/autovc_hparams.md` | D1-1 | `docs/notes/autovc_hparams.md` | 六个参数齐全，和 `config.py` 的 `autovc22k` 预设**逐项相同或写明差异** |
+| D1-1 | A | 克隆 AutoVC 官方仓库 → `third_party/AutoVC`，记下 **commit hash** | — | `third_party/AutoVC/` | ✅ **已完成** `c1827a6`，仓库见 `third_party/README.md` |
+| D1-2 | A | 读它的 `hparams.py`，把 **mel 参数**抄进 `docs/notes/` | D1-1 | `docs/notes/autovc_alignment.md` | ✅ **已完成**，实测参数已记录 |
 | D1-3 | B | 克隆 `CorentinJ/Real-Time-Voice-Cloning` → `third_party/RTC`，记 commit | — | `third_party/RTC/` | 目录存在，commit 已记录 |
 | D1-4 | B | 下载 VCTK（Edinburgh DataShare）→ `data/raw/`，解压 | — | `data/raw/` | 解压完成，能看到 `wav48_silence_trimmed/` 或 `wav/` |
 | D1-5 | B | 勘察 VCTK 目录：**统计说话人数、每个说话人的句子数、有多少 `p*_eval` 目录** | D1-4 | `docs/notes/vctk_layout.md` | 说话人数 ≈ 110；`p*_eval` 数量已统计 |
-| D1-6 | **共同** | 建 `third_party/README.md`：每个组件的 **URL + commit + 许可证 + 用途** | D1-1, D1-3 | `third_party/README.md` | 四个组件（AutoVC / RTC-GE2E / HiFi-GAN / VCTK）都有条目 |
+| D1-6 | **共同** | 建 `third_party/README.md`：每个组件的 **URL + commit + 许可证 + 用途** | D1-1, D1-3 | `third_party/README.md` | ✅ **已完成**（待 D1-3 后补 RTC 条目） |
+| **D1-7** | **A** | **下载 AutoVC 官方权重**（IBM Box，主模型 + WaveNet 声码器）；`3000000-BL.ckpt` 也要 | D1-1 | `algorithms/voiceprint_protection/weights/` | 权重文件就位，**不提交到 git**（`.gitignore` 已忽略 `*.pt`） |
 
 > ⚠️ **D1-5 的坑（指南第 3 步原文）**：VCTK 的说话人文件夹名是 `p225`、`p292` 这种
 > （对应论文 t-SNE 图里的 p225/p252/p292/p315/p318）；
@@ -88,12 +102,12 @@
 
 | # | 负责人 | 任务 | 🔗 前置 | 📦 产出 | 验收标准 |
 |---|---|---|---|---|---|
-| D2-1 | A | **AutoVC mel 对照**：同一段音频，分别用 AutoVC 仓库的原始 mel 代码 与 我们的 `audio_utils.MelSpec("autovc22k").mel()` 计算 | D1-2 | 对照脚本 + 结论 | **最大绝对差 < 1e-4**；有差异则**改我们的实现**，不是改组件 |
-| D2-2 | A | **HiFi-GAN mel 对照**：组件的 mel 处理 与 我们的 `audio_utils.vocoder_mel()` | D1-1 | 对照脚本 + 结论 | 同上；确认 `(x+4.5)/5` 归一化一致 |
-| D2-3 | A | **验证 16 kHz 声码器**：`torch.hub.load('NVIDIA/torch.hifi_gan', 'hifigan_melbins_16k')` 能否加载并合成 | — | 合成样例 wav | 能出声；**若可用则 16 kHz 全路线无障碍**（论文本来就是 16k+VCTK） |
-| D2-4 | B | **GE2E 输入约定确认**：采样率是多少？内部 mel 是几维、什么参数？输出 `h` 是否已 L2 归一化？ | D1-3 | `docs/notes/ge2e_interface.md` | 四个问题都有明确答案 + 代码位置引用 |
+| D2-1 | A | **AutoVC mel 对照**：用官方 `make_spect.py` 原始代码 与 我们的 `audio_utils.autovc_mel()` 比较 | D1-2 | ✅ `scripts/verify_autovc_mel.py` | **最大绝对差 < 1e-5**；脚本已就绪，**待运行** |
+| D2-2 | A | **HiFi-GAN mel 对照**：组件 mel 处理 与 我们的 `vocoder_mel()` | D1-1 | 对照脚本 + 结论 | 同上；确认 `(x+4.5)/5` 归一化一致 |
+| D2-3 | A | **验证 16 kHz 声码器**：`torch.hub.load('NVIDIA/torch.hifi_gan', 'hifigan_melbins_16k')` 能否加载并合成 | — | 合成样例 wav | 能出声；**若可用则 16 kHz 全路线无障碍** |
+| D2-4 | B | **GE2E 输入约定确认**：采样率？内部 mel 几维、什么参数？输出 `h` 是否已 L2 归一化？ | D1-3 | `docs/notes/ge2e_interface.md` | 四个问题都有明确答案 + 代码位置引用（已知：16 kHz / 40 维 mel / 已 L2 归一化，**仍需核对代码确认**） |
 | D2-5 | B | **写 `scripts/prepare_data.py`**（详见下方 §1.3 规格） | D1-5 | `scripts/prepare_data.py` | 能跑出 `data/train.txt` / `val.txt` / `test.txt` / `spk2id.txt` |
-| D2-6 | **共同** | 把对照结论写进 `audio_utils.py` 的文件头注释 + `docs/notes/mel_convention.md` | D2-1, D2-2, D2-4 | 两个文件已更新 | 三方 mel 约定在文档里能对照着看 |
+| D2-6 | **共同** | 把对照结论写进 `audio_utils.py` 注释 + `docs/notes/autovc_alignment.md` | D2-1, D2-2, D2-4 | 两个文件 | ✅ 主体已完成，D2-1/D2-2 通过后补最终结论 |
 
 #### W2-D3 · 写桥接模块与接口签名
 
@@ -251,13 +265,67 @@ cut -d' ' -f2 data/train.txt | sort -u | wc -l
 
 ---
 
-## 8. 待决事项（需要组内拍板）
+## 8. 云端算力预算（华为云体验代金券 500 元）
 
-- [ ] **代金券适用产品**：能否开 ECS（NVIDIA 卡）？还是只有昇腾 ModelArts？
-      → 决定训练是否需要额外做 NPU 迁移（**越早查越好，直接影响排期**）
-- [ ] **采样率方案**：L1 用 `autovc22k`(22.05k) 还是全程 `paper16k`(16k)？
-      - 倾向：**L1 用 22.05k（能直接用现成权重，最快看到东西）→ 最终系统用 16k**
-      - 若 **D2-3** 验证 `hifigan_melbins_16k` 可用，则 16k 路线全程无障碍
+> **已知**：华为云体验代金券 500 元。
+> **未知（需在控制台确认）**：① 适用产品是否包含 ECS（NVIDIA 卡）还是只有 ModelArts（昇腾）
+> ② 有效期多长 ③ 能否用于按需/竞价实例。
+
+### 8.1 500 元够不够？够，但必须精打细算
+
+本地 RTX 4060（8 GB）能跑**缩减版**训练，但要跑论文量级（Stage 1 500k + Stage 2 200k 迭代）
+必须有云上 GPU。500 元大约能覆盖 **1–2 次完整训练**，前提是：
+
+| 规则 | 原因 |
+|---|---|
+| **只在真正要训练时才开机** | 开发、调试、评测全在本地（推理单条 <1s，CPU 也够） |
+| **训练完立刻释放实例** | 按需实例"关机"仍收存储费，"释放"才彻底停收 |
+| **优先用竞价实例** | 便宜 50–80%；训练配 checkpoint 续训，被抢占也不怕 |
+| **先在小卡上跑通流程** | 别一上来就开 A100 烧钱 |
+| **VCTK 下载在本地做** | 数据 11 GB，别在云机上慢慢下 |
+
+### 8.2 花钱顺序（按这个来，别乱开）
+
+| 阶段 | 是否需要云 | 说明 |
+|---|---|---|
+| W2 L1 推理链 | ❌ | 本地 CPU/GPU 都够 |
+| W3 平台打通 | ❌ | 推理服务本地跑 |
+| W4 Stage 1 训练 | ✅ **第一次开云** | 先用 5k 迭代验证能收敛（几分钟），确认无误再放长训 |
+| W5 Stage 2 训练 | ✅ | Stage 1 冻结后显存压力小，可与 Stage 1 用同一台 |
+| W6 评测 | ❌ | 本地跑 |
+| **云上常驻推理服务** | ❌ **不要** | 本地起服务即可（除非演示需要外网访问） |
+
+### 8.3 建议的云上配置
+
+- **实例**：先开中等规格（能放下 AutoVC + 8 GB 显存即可），跑通再换大的
+- **镜像**：**选 PyTorch 预置镜像**（CUDA 版 torch 开箱即用，**零下载**，省掉 2GB 的安装折腾）
+- **代码同步**：`git push` 到 GitHub → 云机 `git clone`（顺便保证两人同一份代码）
+- **数据**：VCTK 在云机上重新下载，或先在本地下载后传 OBS
+- **断线保护**：**必须用 `tmux`**（SSH 断了训练不能停）
+- **结果回收**：训练完把 checkpoint + 指标 `scp` 回本地，再释放实例
+
+### 8.4 如果券只能开昇腾（ModelArts）
+
+⚠️ 那就要额外评估迁移成本：**本项目是纯 CUDA 栈**（torch cu121 / torch.hub 拉 HiFi-GAN /
+AutoVC 权重），迁到昇腾要装 CANN + `torch_npu`，并把 `.cuda()` 改成 `.npu`，
+而 AutoVC / GE2E / HiFi-GAN **都没有人在昇腾上验证过**，出问题难定位。
+
+**对策**：这时优先考虑用券的**其他用途**（如 ECS 的 NVIDIA 卡、或折算成别的服务），
+实在不行就走"本地 4060 缩减规模训练 + 诚实写明配置差距"的路线 ——
+**平台能展示 + 有一组真实指标 > 训练规模做全**。
+
+---
+
+## 9. 待决事项（需要组内拍板）
+
+- [ ] **代金券适用产品**（控制台确认）：能否开 ECS（NVIDIA 卡）？还是只有昇腾 ModelArts？
+      → 决定 W4–W5 的训练路线，**W3 结束前必须有答案**
+- [ ] **代金券有效期** → 训练排期必须卡在有效期内
+- [ ] **采样率方案**：~~L1 用 22.05k~~ → **已定：全程 16 kHz**（AutoVC 官方权重就是 16k）
+- [ ] **说话人编码器选型**：
+      - L1 用 AutoVC 自带 `D_VECTOR`（80 维输入，与官方权重配套）
+      - 最终系统用论文脚注的 **GE2E / RTC**（40 维输入）
+      → **建议就按此执行，待组内确认**
 - [ ] **组号与选题名称** → 确定后统一改方法 ID、目录名、README 标题
 - [ ] **MOS 听测人数**：论文是 50 人，我们做多少？（如实写明即可）
-- [ ] **W4–W5 是否真的交换主责**（W6 起交换是必须的，W4–W5 是否也换需组内定）
+- [ ] **W4–W5 是否也交换主责**（W6 起交换是必须的）

@@ -13,3 +13,29 @@ models/
 *.pt
 *.pth
 *.safetensors
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.venv/
+venv/
+
+# --- 本项目的算法目录 ---
+# 权重（已由 *.pt / *.pth 覆盖，这里再兜底一层，避免误提交）
+algorithms/voiceprint_protection/weights/
+# 推理产物与中间结果
+algorithms/voiceprint_protection/results/
+algorithms/voiceprint_protection/data/
+
+# --- 第三方官方代码 ---
+# 这是"借来的书"，不进入成果仓库；版本与获取方式记录在 third_party/README.md
+# （里面写明了每个组件的仓库地址、commit、许可证）
+third_party/*/
+!third_party/README.md
+
+# --- 本地工具 ---
+.claude/
+.vscode/
+.idea/

@@ -17,8 +17,55 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 PROJECT_ROOT = ROOT.parent.parent          # 仓库根
 DATA_ROOT = Path("data")                    # VCTK 处理后的清单与音频
-WEIGHTS_DIR = ROOT / "weights"              # checkpoint
-RESULTS_DIR = ROOT / "results"              # 评测输出
+WEIGHTS_DIR = ROOT / "weights"              # checkpoint（不提交到 git）
+RESULTS_DIR = ROOT / "results"              # 推理产物（不提交到 git）
+
+# ---------------------------------------------------------------------------
+# 第三方组件清单（唯一真源）
+#
+# ★ 为什么不把 third_party/ 提交进仓库：
+#   那里是**第三方官方仓库**，提交进来会把别人的代码和许可证混进我们的成果仓库。
+#   代价是每个人/每台机器要自己拉一次 —— 所以用 scripts/setup_third_party.ps1
+#   （Linux 用 .sh）一键拉取，版本由下面的 SHA 钉死，保证两人完全一致。
+#
+#   B 需要的"信息"（mel 约定、张量形状）都在本仓库里：
+#     · algorithms/voiceprint_protection/config.py      ← 本文件
+#     · algorithms/voiceprint_protection/audio_utils.py ← mel 实现
+#     · algorithms/voiceprint_protection/docs/notes/autovc_alignment.md ← 实测记录
+# ---------------------------------------------------------------------------
+THIRD_PARTY_COMPONENTS = [
+    {
+        "name": "AutoVC",
+        "url": "https://github.com/auspicious3000/autovc.git",
+        "sha": "c1827a60e83e6d26030b8953843b2f7cf2bd36db",
+        "license": "MIT",
+        "usage": "Stage 1 模型（Generator）+ 说话人嵌入 D_VECTOR + 官方权重 + 声码器封装",
+    },
+    {
+        # ★ 必须是 d4333546：最后一个还含 builder.py 的提交。
+        #   AutoVC 的 synthesis.py 依赖 `from wavenet_vocoder import builder`，
+        #   而 2019-08-26 之后的新版删掉了它且模型结构有变 -> 权重加载失败。
+        "name": "wavenet_vocoder",
+        "url": "https://github.com/r9y9/wavenet_vocoder.git",
+        "sha": "d4333546eccd3b681b7092e4f52160ad7e62dcc9",
+        "license": "MIT",
+        "usage": "WaveNet 声码器（与 AutoVC 的 mel 格式配套）",
+    },
+    {
+        "name": "Real-Time-Voice-Cloning",
+        "url": "https://github.com/CorentinJ/Real-Time-Voice-Cloning.git",
+        "sha": "",     # 用默认分支
+        "license": "MIT",
+        "usage": "GE2E 说话人编码器（论文脚注引用），最终系统使用",
+    },
+]
+
+# 期望的权重文件（AutoVC 官方 README 提供的 IBM Box 链接）
+WEIGHT_FILES = {
+    "autovc": "autovc.ckpt",                        # 主模型：Generator + 说话人嵌入
+    "speaker_bl": "3000000-BL.ckpt",                # D_VECTOR 说话人编码器（80 维输入）
+    "vocoder": "checkpoint_step001000000_ema.pth",  # WaveNet 声码器
+}
 
 # ---------------------------------------------------------------------------
 # 随机性：固定 seed 才能复现
@@ -26,50 +73,101 @@ RESULTS_DIR = ROOT / "results"              # 评测输出
 SEED = 42
 
 # ---------------------------------------------------------------------------
-# 音频 / mel 参数（两个预设，见 audio_utils.py）
+# 音频 / mel 参数
 #
-#   paper16k   —— 论文配置：16 kHz / 80 mel / hop 256 / n_fft 1024 / 40~7600
-#                 用于最终系统（Stage 1 自己训练、评测、平台演示）
-#   autovc22k  —— AutoVC + HiFi-GAN 官方预训练权重的原生配置：22.05 kHz
-#                 用于 L1 阶段快速跑通推理链（能直接加载现成权重）
+# ★ 2026-11 已按 AutoVC 官方仓库（third_party/AutoVC, commit c1827a6）实测对齐。
+#   AutoVC 官方 make_spect.py 的预处理链是自定义的，不是 librosa.feature.melspectrogram：
+#     30Hz 高通 -> ×0.96 + 1e-6 噪声 -> STFT(reflect 填充, 幅度)
+#     -> librosa.filters.mel(16000, 1024, fmin=90, fmax=7600, 80)
+#     -> 20*log10(max(1e-5, mel)) - 16 -> clip((x+100)/100, 0, 1)
+#   实现见 audio_utils.autovc_mel()。
 #
-# 两者除采样率外完全一致，方便切换时只改一行。
+#   ⚠️ AutoVC 内部不一致：hparams.py 写 fmin=125，而真正生成训练数据的
+#      make_spect.py 用 fmin=90。以 make_spect.py 为准（它才是生效的那个）。
+#
+#   关键结论：**AutoVC 官方权重本身就是 16 kHz 的**，与论文一致，
+#   因此全程用 16000 Hz，不需要 22.05 kHz 预设。
+#
+#   采样率 22050 的 HiFi-GAN 官方权重只属于"声码器侧"约定，
+#   见 audio_utils.vocoder_mel()。
 # ---------------------------------------------------------------------------
 MEL_PRESETS = {
-    "paper16k": {
+    # 模型侧（AutoVC 链）：喂给 AutoVC / 我们自己的 Stage 1
+    "model16k": {
         "sample_rate": 16000,
         "n_fft": 1024,
         "hop_length": 256,
         "win_length": 1024,
         "n_mels": 80,
-        "fmin": 40,
+        "fmin": 90,          # ★ 取自 make_spect.py（不是 hparams.py 的 125）
         "fmax": 7600,
-        "power": 2.0,       # 与 librosa.feature.melspectrogram 默认一致（幅度平方）
-        "log_base": 10.0,   # AutoVC 使用 log10；置 None 则输出线性幅度
-        "log_floor": 1e-10,
-    },
-    "autovc22k": {
-        "sample_rate": 22050,
-        "n_fft": 1024,
-        "hop_length": 256,
-        "win_length": 1024,
-        "n_mels": 80,
-        "fmin": 40,
-        "fmax": 7600,
-        "power": 2.0,
-        "log_base": 10.0,
-        "log_floor": 1e-10,
+        "chain": "autovc",   # 30Hz 高通 + reflect 幅度 STFT + dB + clip[0,1]
     },
 }
 
-DEFAULT_PRESET = "paper16k"
+DEFAULT_PRESET = "model16k"
+
+# 声码器侧（HiFi-GAN）单独一组，不与模型侧混用
+VOCODER_MEL = {
+    "sample_rate": 22050,   # HiFi-GAN 官方权重
+    "n_fft": 1024,
+    "hop_length": 256,
+    "win_length": 1024,
+    "n_mels": 80,
+    "mel_basis_sr": 8000,   # ★ HiFi-GAN 的怪癖：mel 基用 sr=8000
+    "log_floor": 1e-5,
+    "offset": 4.5,
+    "scale": 5.0,
+}
 
 # ---------------------------------------------------------------------------
 # 张量形状约定（与第 8 章"双人接口契约"逐条对应）
+#
+# ⚠️ content code 的实际维度：AutoVC 的 Encoder 用 dim_neck=32 的**双向** LSTM，
+#    前向 32 + 后向 32 拼接 -> **64 维**。论文写的 "c ∈ R^(T'×32)" 指的是
+#    LSTM 每个方向的维度（dim_neck=32），不是拼接后的宽度。
+#    论文的"瓶颈维度 32"说的也是 dim_neck。
+#    下采样因子 freq=32 -> T' = T // 32。
 # ---------------------------------------------------------------------------
 FRAME_DIM = 80          # x / x_adv : (T, 80)
-CONTENT_DIM = 32        # c         : (T', 32)，T' = T // 2
-SPEAKER_DIM = 256       # h / h_adv : (256,)
+CONTENT_DIM = 32        # dim_neck（论文"瓶颈维度 32"）
+CONTENT_ACTUAL_DIM = 64 # 拼接后实际维度 = dim_neck * 2
+CONTENT_DOWNSAMPLE = 32  # freq，T' = T // 32
+SPEAKER_DIM = 256       # h / h_adv : (256,)  已 L2 归一化
+
+# AutoVC 官方模型的构造参数（见 third_party/AutoVC/conversion.ipynb）
+AUTOVC_MODEL = {
+    "dim_neck": 32,       # LSTM 每方向维度
+    "dim_emb": 256,       # 说话人嵌入维度
+    "dim_pre": 512,       # Decoder 中间维度
+    "freq": 32,           # 时间下采样因子
+    "pad_base": 32,       # 推理时 mel 需 pad 到 32 的倍数
+}
+
+# 说话人编码器的两套权重（★ 不可混用，输入维度不同）
+SPEAKER_ENCODERS = {
+    # AutoVC 官方链：3000000-BL.ckpt，模型是 model_bl.D_VECTOR
+    #   3 层单向 LSTM(dim_input=80) + Linear(768->256) + L2 归一化
+    #   输入是 80 维 mel（AutoVC 的 spmel）
+    "autovc_bl": {
+        "source": "AutoVC 官方 3000000-BL.ckpt",
+        "dim_input": 80,
+        "dim_cell": 768,
+        "dim_emb": 256,
+        "num_layers": 3,
+        "bidirectional": False,
+    },
+    # 论文脚注明确引用的 GE2E（Real-Time-Voice-Cloning）
+    #   输入是 40 维 mel（16kHz / hop160 / win400）
+    "ge2e_rtc": {
+        "source": "CorentinJ/Real-Time-Voice-Cloning pretrained.pt",
+        "dim_input": 40,
+        "dim_cell": 256,
+        "dim_emb": 256,
+        "num_layers": 3,
+        "bidirectional": False,
+    },
+}
 
 # ---------------------------------------------------------------------------
 # Stage 1 超参（论文 §2.2 / §3.1）
