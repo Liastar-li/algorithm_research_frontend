@@ -1,29 +1,49 @@
 """音频与 mel 频谱处理 —— 全项目唯一的实现入口。
 
 【为什么这个文件必须存在】
-论文要求 16 kHz / 80 维 mel，但三个第三方组件的原生配置互不相同
-（AutoVC 22.05k、GE2E 16k/40维、HiFi-GAN 22.05k）。
+论文要求 16 kHz / 80 维 mel，但三个第三方组件的原生配置互不相同。
 如果 mel 参数在多处手写，出现不一致时：
   * x_adv 与 x 的帧轴对不上
   * L_mel 变成一个恒定的大常数，模型什么都学不到
   * **而且不报错** —— 这是最难查的一类 bug。
 所以：任何地方都不许再手写 mel 参数，一律调用本模块。
 
-【设计原则：不做"看起来等价"的重新实现】
-第一版这里自己重写了 STFT，但 librosa 内部有窗口归一化、padding 方式、
-mel 刻度等一堆细节，一旦猜错就会和 AutoVC 官方权重对不上，且不报错。
-现在改成**直接调用 librosa 自己算**：
-  * mel()         —— 与 AutoVC 官方代码路径完全一致（都用 librosa.feature.melspectrogram）
-  * vocoder_mel() —— HiFi-GAN 声码器的 mel 约定（与上面不同，见该函数注释）
-这样"mel 契约"就不依赖我们对第三方库的猜测。
+【★ 2026-11 实测对齐结论（来自 AutoVC 官方仓库，见 third_party/AutoVC）】
+AutoVC 官方 `make_spect.py` 的 mel 预处理链**不是 librosa.feature.melspectrogram**，
+而是一条自定义链。本模块的 `autovc_mel()` 逐行复刻它：
+
+  1. 30 Hz Butterworth 高通（filtfilt 双向，五阶）
+  2. 幅度缩放 ×0.96，再叠加 1e-6 量级随机噪声（AutoVC 训练时按说话人固定 seed）
+  3. STFT：n_fft=1024, hop=256, **reflect 填充**（librosa 是 constant！），输出**幅度**（不是功率）
+  4. mel 滤波器组：librosa.filters.mel(16000, 1024, fmin=90, fmax=7600, n_mels=80)
+  5. D_db = 20*log10(max(1e-5, D_mel)) - 16
+  6. S = clip((D_db + 100) / 100, 0, 1)   ← 归一化到 [0,1]
+
+  ⚠️ 注意 AutoVC 自己内部不一致：`hparams.py` 写 fmin=125，`make_spect.py` 实际用 fmin=90。
+     真正生效的是 make_spect.py（训练数据由它生成），所以 **fmin=90** 才是对的。
+
+  ⚠️ 帧数：AutoVC 的 pySTFT 给出 (N+256)//256 帧，与 librosa center=True 的
+     1 + N//256 **相同**，所以帧轴能对上，差别只在数值。
+
+【三个 mel 约定，别混用】
+  ┌──────────────┬────────────────────────┬──────────────────────────────┐
+  │ 约定          │ 模型侧（本项目/AutoVC）  │ 声码器侧（HiFi-GAN）          │
+  ├──────────────┼────────────────────────┼──────────────────────────────┤
+  │ 采样率        │ 16000                  │ 22050（官方权重）             │
+  │ fmin/fmax    │ 90 / 7600              │ 0 / 8000（mel 基用 sr=8000） │
+  │ STFT 幅度    │ 幅度（非功率）          │ 幅度                        │
+  │ 填充          │ reflect                │ reflect（librosa stft）      │
+  │ 取对数        │ 20*log10 - 16          │ log10|STFT|，下限 1e-5       │
+  │ 归一化        │ clip((x+100)/100,0,1)  │ (x + 4.5) / 5.0             │
+  └──────────────┴────────────────────────┴──────────────────────────────┘
+
+  混用会让声码器输出变成噪音，且**不报错**。
 
 【⚠️ 接入预训练权重时的必做动作】
-AutoVC / HiFi-GAN 的 mel 约定各不相同（见下方两个函数）。
-**第一次真正加载它们的权重时，必须用它们仓库里的原始 mel 代码做一次数值对照**
-（同一段音频，两边算出来的 mel 应当逐元素接近），并把对照结论写进本文件注释。
-本项目当前的两个 preset 是"按论文配置"和"按 AutoVC 公开配置"填的，
-属于"文献与通行配置"，**以实际权重仓库的代码为准**。
+`scripts/verify_autovc_mel.py` 会用 AutoVC 官方 `make_spect.py` 的原始代码
+与本模块的 `autovc_mel()` 做逐元素对照。**先跑它，再动模型。**
 """
+
 
 from __future__ import annotations
 
@@ -99,33 +119,117 @@ def duration_seconds(wav: np.ndarray, sample_rate: int) -> float:
 
 
 # ---------------------------------------------------------------------------
-# mel 频谱：模型侧（与 AutoVC 一致）
+# mel 频谱：模型侧（AutoVC 链，★ 实测对齐后的唯一实现）
 # ---------------------------------------------------------------------------
-def mel_filterbank(name: str | None = None) -> np.ndarray:
-    """mel 滤波器组，形状 (n_mels, n_fft//2+1)。
+def _butter_highpass(cutoff: float, fs: int, order: int = 5):
+    """30 Hz 高通滤波器系数。复刻 AutoVC make_spect.py。"""
+    from scipy import signal
 
-    用 librosa.filters.mel 的默认约定（Slaney 刻度 + Slaney 归一化），
-    与 AutoVC 官方实现保持一致。
+    nyq = 0.5 * fs
+    normal_cutoff = cutoff / nyq
+    return signal.butter(order, normal_cutoff, btype="high", analog=False)
+
+
+def _py_stft(x: np.ndarray, fft_length: int = 1024, hop_length: int = 256) -> np.ndarray:
+    """AutoVC 的 pySTFT：reflect 填充 + 幅度谱。
+
+    与 librosa.stft 的两点关键差异：
+      * 填充用 **reflect**（librosa 的 center=True 用 constant）
+      * 输出 **幅度** |X|（librosa.feature.melspectrogram 默认 power=2）
+
+    ⚠️ 返回形状是 **(n_fft//2+1, frames) = (513, T)**，**不是 (T, 513)**。
+    这是因为官方源码里 rfft 之后做了 `.T`（转置最后两维）。
+    官方 make_spect.py 里的 `D = pySTFT(wav).T` 会再转一次得到 (T, 513)，
+    然后 `np.dot(D, mel_basis)`。我们这里保持函数返回值与官方一致，
+    在 autovc_mel() 里做同样的 `.T`。
     """
-    import librosa
+    from scipy.signal import get_window
 
-    preset = config.MEL_PRESETS[name or config.DEFAULT_PRESET]
-    return librosa.filters.mel(
+    x = np.pad(x, int(fft_length // 2), mode="reflect")
+    noverlap = fft_length - hop_length
+    shape = x.shape[:-1] + ((x.shape[-1] - noverlap) // hop_length, fft_length)
+    strides = x.strides[:-1] + (hop_length * x.strides[-1], x.strides[-1])
+    result = np.lib.stride_tricks.as_strided(x, shape=shape, strides=strides)
+    fft_window = get_window("hann", fft_length, fftbins=True)
+    result = np.fft.rfft(fft_window * result, n=fft_length).T
+    return np.abs(result)
+
+
+def autovc_mel_filterbank() -> np.ndarray:
+    """AutoVC 的 mel 滤波器组，形状 (n_fft//2+1, n_mels) = (513, 80)。
+
+    注意 AutoVC 内部不一致：`hparams.py` 写 fmin=125，但真正生成训练数据的
+    `make_spect.py` 用的是 **fmin=90**，以它为准。
+
+    ⚠️ **与官方源码的一处等价改写**：AutoVC 原文写的是
+        `mel(16000, 1024, fmin=90, fmax=7600, n_mels=80)`（位置参数），
+        但 **librosa 0.10 起 `filters.mel` 的参数全部变成关键字专用**，
+        照抄位置参数会报
+        `TypeError: mel() takes 0 positional arguments but 2 positional arguments ...`。
+        这里改成等价的关键字写法，数值完全一致。
+    """
+    from librosa.filters import mel
+
+    preset = config.MEL_PRESETS[config.DEFAULT_PRESET]
+    return mel(
         sr=preset["sample_rate"],
         n_fft=preset["n_fft"],
-        n_mels=preset["n_mels"],
         fmin=preset["fmin"],
         fmax=preset["fmax"],
-    ).astype(np.float32)
+        n_mels=preset["n_mels"],
+    ).T.astype(np.float32)
+
+
+def autovc_mel(wav: np.ndarray, noise_seed: int | None = 0) -> np.ndarray:
+    """AutoVC 官方 mel 预处理链的逐行复刻，输出 (T, 80)，取值 [0, 1]。
+
+    对应 third_party/AutoVC/make_spect.py 的第 58-66 行。
+
+    参数
+    ----
+    wav : 原始波形（float32，采样率须为 16000）
+    noise_seed : AutoVC 训练时按说话人用固定 seed 叠加 1e-6 噪声以增强鲁棒性。
+                 这里默认固定 seed=0 以保证可复现；传 None 可关闭噪声。
+    """
+    from scipy import signal
+
+    preset = config.MEL_PRESETS[config.DEFAULT_PRESET]
+    sample_rate = preset["sample_rate"]
+    n_fft = preset["n_fft"]
+    hop = preset["hop_length"]
+
+    x = np.asarray(wav, dtype=np.float32)
+
+    # 1) 30 Hz 高通，去除漂移噪声
+    b, a = _butter_highpass(30, sample_rate, order=5)
+    y = signal.filtfilt(b, a, x)
+
+    # 2) 幅度缩放 + 1e-6 随机噪声
+    y = y * 0.96
+    if noise_seed is not None:
+        generator = np.random.RandomState(noise_seed)
+        y = y + (generator.rand(y.shape[0]) - 0.5) * 1e-06
+
+    # 3) STFT（幅度）。官方 pySTFT 返回 (513, frames)，这里同样转成 (frames, 513)
+    spectrum = _py_stft(y, fft_length=n_fft, hop_length=hop).T
+
+    # 4) mel：(frames, 513) @ (513, n_mels) -> (frames, n_mels)
+    mel_energy = spectrum @ autovc_mel_filterbank()
+
+    # 5) dB
+    min_level = np.exp(-100 / 20 * np.log(10))   # = 1e-5
+    decibels = 20 * np.log10(np.maximum(min_level, mel_energy)) - 16
+
+    # 6) 归一化到 [0, 1]
+    return np.ascontiguousarray(np.clip((decibels + 100) / 100, 0, 1), dtype=np.float32)
 
 
 class MelSpec:
-    """一个 mel 预设的可复用计算器。
+    """模型侧 mel 的可复用计算器（AutoVC 链）。
 
     用法：
-        spec = MelSpec("paper16k")
-        mel = spec.mel(wav)              # (samples,) -> (T, 80)
-        batch = spec.mel_batch([w1, w2]) # 变长时返回 list
+        spec = MelSpec()
+        mel = spec.mel(wav)              # (samples,) -> (T, 80)，取值 [0,1]
     """
 
     def __init__(self, name: str | None = None):
@@ -138,80 +242,89 @@ class MelSpec:
         self.n_mels = self.preset["n_mels"]
         self.fmin = self.preset["fmin"]
         self.fmax = self.preset["fmax"]
-        self.power = self.preset["power"]
-        self.log_base = self.preset["log_base"]
-        self.log_floor = self.preset["log_floor"]
 
-    # -- 主路径：直接用 librosa，保证与 AutoVC 官方一致 ------------------
     def mel(self, wav: np.ndarray) -> np.ndarray:
-        """numpy 波形 -> mel 频谱，形状 (T, n_mels)。"""
-        import librosa
-
-        wav = np.asarray(wav, dtype=np.float32)
-        if len(wav) < self.win_length:
-            raise ValueError(
-                f"音频太短（{len(wav)} 采样点），至少需要 {self.win_length} 点。"
-            )
-        mel = librosa.feature.melspectrogram(
-            y=wav,
-            sr=self.sample_rate,
-            n_fft=self.n_fft,
-            hop_length=self.hop_length,
-            win_length=self.win_length,
-            n_mels=self.n_mels,
-            fmin=self.fmin,
-            fmax=self.fmax,
-            power=self.power,
-        )
-        if self.log_base:
-            mel = np.log10(np.clip(mel, self.log_floor, None))
-        return np.ascontiguousarray(mel.T, dtype=np.float32)  # (T, n_mels)
+        """numpy 波形 -> 模型侧 mel，形状 (T, n_mels)。"""
+        return autovc_mel(wav)
 
     def mel_batch(self, waveforms: list[np.ndarray]) -> list[np.ndarray]:
         """批量计算。变长语音不 padding，直接返回 list（Stage 1 训练用）。"""
         return [self.mel(wav) for wav in waveforms]
 
     def frames(self, num_samples: int) -> int:
-        """给定采样点数，输出帧数 T（用于与 librosa 的实际输出做对齐检查）。"""
-        import librosa
+        """给定采样点数，输出帧数 T。
 
-        padded = num_samples + self.n_fft  # center=True 时前后各补 n_fft//2
-        return 1 + (padded - self.win_length) // self.hop_length
+        AutoVC 的 pySTFT 给 (N+256)//256 帧，与 librosa center=True 的
+        1 + N//256 相同 —— 所以帧轴能对上，差别只在数值。
+        """
+        return (num_samples + self.hop_length) // self.hop_length
+
+
+# ---------------------------------------------------------------------------
+# mel 频谱：参照实现（librosa 口径，仅用于对照，不用于喂模型）
+# ---------------------------------------------------------------------------
+def librosa_mel(wav: np.ndarray, name: str | None = None) -> np.ndarray:
+    """用 librosa.feature.melspectrogram 算 mel，形状 (T, n_mels)。
+
+    ⚠️ **不要用它喂模型** —— 它的数值约定与 AutoVC 官方权重不兼容。
+       保留它是为了：(1) 与 AutoVC 官方链做数值对照；(2) 论文式参考实现。
+    """
+    import librosa
+
+    preset = config.MEL_PRESETS[name or config.DEFAULT_PRESET]
+    mel = librosa.feature.melspectrogram(
+        y=np.asarray(wav, dtype=np.float32),
+        sr=preset["sample_rate"],
+        n_fft=preset["n_fft"],
+        hop_length=preset["hop_length"],
+        win_length=preset["win_length"],
+        n_mels=preset["n_mels"],
+        fmin=preset["fmin"],
+        fmax=preset["fmax"],
+        power=2.0,
+    )
+    return np.ascontiguousarray(mel.T, dtype=np.float32)
 
 
 # ---------------------------------------------------------------------------
 # mel 频谱：声码器侧（HiFi-GAN 的约定，与模型侧不同！）
 # ---------------------------------------------------------------------------
-def vocoder_mel(wav: np.ndarray, n_mels: int = 80) -> np.ndarray:
+def vocoder_mel(wav: np.ndarray, n_mels: int | None = None) -> np.ndarray:
     """HiFi-GAN 声码器使用的 mel，形状 (T, n_mels)。
 
-    ⚠️ **HiFi-GAN 的 mel 约定和 AutoVC 不一样**，不要混用：
-      | 约定      | AutoVC / 模型侧           | HiFi-GAN / 声码器侧        |
-      |-----------|---------------------------|---------------------------|
-      | fmin/fmax | 40 / 7600                 | 0 / 8000（mel 基用 sr=8000）|
-      | 幅度      | 幅度平方 (power=2)         | 幅度 (power=1)             |
-      | 取对数    | log10(mel)，下限 1e-10    | log10(|STFT|)，下限 1e-5   |
-      | 归一化    | 无                        | (x + 4.5) / 5.0           |
-      | 输入采样率| 16k 或 22.05k（按预设）   | 22.05k（官方权重）        |
+    ⚠️ **HiFi-GAN 的 mel 约定和模型侧不一样**，不要混用：
+      | 约定      | 模型侧（AutoVC / 本项目）    | 声码器侧（HiFi-GAN）          |
+      |-----------|-----------------------------|-------------------------------|
+      | 采样率    | 16000                       | 22050（官方权重）             |
+      | fmin/fmax | 90 / 7600                   | 0 / 8000（mel 基用 sr=8000） |
+      | 幅度      | 幅度（非功率）                | 幅度                        |
+      | 填充      | reflect                     | reflect（librosa stft）      |
+      | 取对数    | 20*log10(max(1e-5,·)) - 16  | log10(|STFT|)，下限 1e-5     |
+      | 归一化    | clip((x+100)/100, 0, 1)      | (x + 4.5) / 5.0             |
 
-    本函数按 HiFi-GAN 官方 mel_processing.py 的写法实现。
-    **真正接入其权重时，必须与其仓库代码做一次数值对照**（见文件头说明）。
+    实现按 HiFi-GAN 官方 mel_processing.py 的写法。
+    **真正接入其权重时，必须与其仓库代码做一次数值对照。**
     """
     import librosa
 
+    settings = config.VOCODER_MEL
     wav = np.asarray(wav, dtype=np.float32)
-    mel_basis = librosa.filters.mel(sr=8000, n_fft=1024, n_mels=n_mels).astype(np.float32)
+    mel_basis = librosa.filters.mel(
+        sr=settings["mel_basis_sr"],
+        n_fft=settings["n_fft"],
+        n_mels=n_mels or settings["n_mels"],
+    ).astype(np.float32)
     spectrum = librosa.stft(
         y=wav,
-        n_fft=1024,
-        hop_length=256,
-        win_length=1024,
+        n_fft=settings["n_fft"],
+        hop_length=settings["hop_length"],
+        win_length=settings["win_length"],
         window="hann",
         center=True,
     )
-    log_spectrum = np.log10(np.clip(np.abs(spectrum), 1e-5, None))
+    log_spectrum = np.log10(np.clip(np.abs(spectrum), settings["log_floor"], None))
     mel = mel_basis @ log_spectrum
-    mel = (mel + 4.5) / 5.0
+    mel = (mel + settings["offset"]) / settings["scale"]
     return np.ascontiguousarray(mel.T, dtype=np.float32)
 
 

@@ -1,45 +1,36 @@
-"""端到端冒烟测试 —— 成员 B 主责（任务板 W2-D4-3）。
+"""L1 冒烟测试 —— 一条命令跑完整条推理链。
 
-【本脚本回答一个问题】
-"整条推理链到底通不通？"
-
-    wav → mel x (T,80) → GE2E h (256,) → h_adv = h + α·δ
-        → 内容码 c (T',32) → 解码 x_adv (T,80) → 声码器 → protected.wav
-
-【与成员 A 的接口约定】
-本脚本优先调用 A 写的 `infer.py`，约定它暴露一个函数：
-
-    protect(wav_path: str, alpha: float = 0.10, output_path: str | None = None) -> dict
-
-返回字典至少包含：
-    {
-      "protected_path": "输出 wav 路径",
-      "alpha": 0.10,
-      "shapes": {"x": (T,80), "h": (256,), "c": (T',32), "x_adv": (T,80)},
-    }
-
-如果 `infer.py` 还不存在，本脚本会退化成"只跑说话人分支"，
-把 B 侧能验证的都验证掉，并明确告诉你还差谁的东西。
-**它不会假装成功。**
-
-【用法】
+用法：
     conda activate vpp
-    python algorithms/voiceprint_protection/scripts/smoke_test.py
-    python algorithms/voiceprint_protection/scripts/smoke_test.py --wav 某条.wav --alpha 0.1
+    python algorithms/voiceprint_protection/scripts/smoke_test.py --audio path/to/input.wav
+
+它做四件事：
+  0. 检查三个权重是否就位（缺了就明确告诉你去哪儿下）
+  1. 单独测 **GE2E 说话人分支**（只需 `encoder.pt`）—— 论文路线的核心
+  2. 跑通"重建"（不加扰动）—— 这验证 AutoVC 权重 + 我们的 mel 是否配套
+  3. 跑通"保护"（加随机扰动）—— 这验证整条链
+
+【为什么要分 2 和 3 两步】
+重建输出是噪音 -> 问题在 mel 或权重（跟保护逻辑无关）
+重建正常但保护后是噪音 -> 问题在扰动或解码路径
+分两步测，能立刻定位是哪一环坏了。
+
+【为什么第 1 步单独拎出来】
+论文路线的说话人嵌入来自 **上游 GE2E**（`encoder.pt`，17 MB），
+而第 2/3 步要的是 **AutoVC 全家桶**（`autovc.ckpt` / `3000000-BL.ckpt` / WaveNet 声码器）。
+两套权重独立，缺哪套就跳过对应步骤，**不要因为 AutoVC 权重没下就连说话人分支都测不了**。
 """
 
 from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
 from pathlib import Path
 
 import numpy as np
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))   # config / audio_utils / infer
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 try:
     import audio_utils  # noqa: E402
@@ -51,175 +42,201 @@ except ImportError as error:  # 依赖缺失时给个能看懂的原因（多半
     _paths.print_env_hint(error)
     raise SystemExit(1) from error
 
-# 方法 ID：组号尚未最终确定（见 TASKS.md §8），先用分支名对应的 group_n005，
-# 组号定下来后用环境变量覆盖，或统一改到 config.py 里。
-# ⚠️ 必须全小写：平台契约的标识符正则 /^[a-z][a-z0-9_]{1,63}$/ 不接受大写字母。
-METHOD_ID = os.environ.get("VPP_METHOD_ID", "group_n005_voiceprint_protection")
-
-REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+METHOD_ID = "group_n005_voiceprint_protection"
 
 
-def find_input_wav(explicit: str | None) -> Path:
-    """按优先级挑一条测试音频。"""
+def pick_input(explicit: str | None) -> Path | None:
+    """挑一条测试音频：命令行 > 平台样例 > 清单里的第一条。"""
     if explicit:
-        path = Path(explicit)
-        if not path.exists():
-            raise FileNotFoundError(f"指定的音频不存在：{path}")
-        return path
+        return Path(explicit)
 
     sample = paths.sample_dir(METHOD_ID) / "input.wav"
     if sample.exists():
         return sample
 
-    data_root = paths.data_root()
-    manifest = data_root / "test.txt"
+    manifest = paths.data_root() / "test.txt"
     if manifest.exists():
         with manifest.open("r", encoding="utf-8") as handle:
             for line in handle:
                 parts = line.split()
                 if parts:
-                    candidate = data_root / parts[0]
+                    candidate = paths.data_root() / parts[0]
                     if candidate.exists():
                         return candidate
-
-    raise FileNotFoundError(
-        "找不到测试音频。请用 --wav 指定一条，或先跑 prepare_data.py 生成 data/test.txt。"
-    )
+    return None
 
 
-def print_shapes(shapes: dict) -> None:
-    """按接口契约的形状打印。"""
-    expected = {
-        "x": (None, config.FRAME_DIM),
-        "h": (config.SPEAKER_DIM,),
-        "c": (None, config.CONTENT_DIM),
-        "x_adv": (None, config.FRAME_DIM),
-    }
-    print("\n【张量形状（接口契约）】")
-    for key in ("x", "h", "c", "x_adv"):
-        actual = shapes.get(key)
-        if actual is None:
-            print(f"  {key:<6} : 缺失")
-            continue
-        actual = tuple(actual)
-        want = expected.get(key)
-        ok = "?" if want is None else ("✓" if (
-            (want[0] is None or actual[0] == want[0]) and actual[1:] == want[1:]
-        ) else "✗")
-        print(f"  {key:<6} : {str(actual):<14} {ok}")
+def check_speaker_branch(wav_path: Path | None, sample_rate: int) -> bool:
+    """第 1 步：单独测 GE2E 说话人分支（只需 encoder.pt）。
 
-
-def run_speaker_branch(wav_path: Path, alpha: float) -> int:
-    """infer.py 还没就绪时，只跑说话人分支。"""
-    print("\n[infer.py 尚未就绪] 退化为「说话人分支」验证。")
-    print("  成员 A 的 infer.py 一旦提供 protect()，本脚本会自动走完整链路。\n")
-
+    这是**论文路线**的核心：h 从哪来、长什么样、归一化了没有。
+    """
+    print("\n【1】GE2E 说话人分支（论文路线，只需 encoder.pt）")
     try:
         from bridge_speaker import SpeakerBridge, SpeakerBridgeError
-    except Exception as error:  # noqa: BLE001
-        print(f"  [失败] 无法导入 bridge_speaker：{error}")
-        return 1
+    except ImportError as error:
+        print(f"  [跳过] 无法导入 bridge_speaker：{error}")
+        return False
 
     try:
         bridge = SpeakerBridge()
     except SpeakerBridgeError as error:
-        print(f"  [失败] {error}")
-        return 1
+        print(f"  [跳过] {error}")
+        return False
 
-    wav = audio_utils.load_audio(wav_path)
-    import soundfile as sf
+    info = bridge.describe()
+    print(f"  上游布局  : {info.get('上游布局', '?')}")
+    print(f"  权重      : {info.get('权重文件', '?')}")
+    print(f"  采样率    : {info.get('采样率 (Hz)', '?')} Hz")
+    print(f"  mel       : {info.get('mel 维数', '?')} 维，"
+          f"n_fft/hop = {info.get('mel n_fft / hop', '?')}")
+    print(f"  嵌入维度  : {info.get('嵌入维度', '?')}")
 
-    sample_rate = sf.info(str(wav_path)).samplerate
-    duration = len(wav) / sample_rate
+    if wav_path is None:
+        print("  [提示] 没有可用的测试音频，跳过嵌入测试")
+        return True
 
-    embedding = bridge.embed(wav, sample_rate)
-    print(f"  输入音频     : {wav_path}")
-    print(f"  采样率/时长  : {sample_rate} Hz / {duration:.2f}s")
-    print(f"  h.shape      : {tuple(embedding.shape)}")
-    print(f"  |h| (归一化后): {float(embedding.norm()):.6f}")
-
-    # L1 阶段不训练 G，用随机方向当扰动（任务板 D4-2）
-    rng = np.random.default_rng(config.SEED)
-    delta = rng.standard_normal(config.SPEAKER_DIM).astype(np.float32)
-    delta /= np.linalg.norm(delta) + 1e-8
-    perturbed = embedding.numpy() + alpha * delta
-    cosine = float(
-        np.dot(embedding.numpy(), perturbed)
-        / (np.linalg.norm(embedding.numpy()) * np.linalg.norm(perturbed) + 1e-8)
-    )
-    print(f"  扰动 α       : {alpha}")
-    print(f"  cos(h, h+αδ) : {cosine:.4f}   （α 越大越低，说明扰动确实改动了嵌入）")
-    print("\n  [待 A 补齐] infer.py 的 mel / 内容码 / 解码 / 声码器四段尚未串联，")
-    print("              因此这里**没有**产出 protected.wav —— 不能算 M1 验收通过。")
-    return 2
+    embedding = bridge.embed_path(wav_path)
+    norm = float(np.linalg.norm(embedding))
+    print(f"  嵌入形状  : {tuple(embedding.shape)}  L2 范数 {norm:.6f}")
+    if abs(norm - 1.0) > 1e-3:
+        print("  [失败] 嵌入没有归一化到单位长度")
+        return False
+    print("  [OK] 嵌入已 L2 归一化")
+    return True
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="端到端冒烟测试（成员 B）")
-    parser.add_argument("--wav", default=None, help="输入音频（不给则自动挑）")
-    parser.add_argument("--alpha", type=float, default=config.STAGE2["alpha"],
-                        help="扰动强度 α，论文值 0.10")
-    parser.add_argument("--out", default=None, help="保护后音频的输出路径")
-    parser.add_argument("--report", default=None, help="把结果写成 JSON")
+    parser = argparse.ArgumentParser(description="L1 冒烟测试")
+    parser.add_argument("--audio", default=None, help="输入音频（wav）。不给则用平台样例/清单第一条")
+    parser.add_argument("--alpha", type=float, default=config.STAGE2["alpha"])
+    parser.add_argument("--seed", type=int, default=config.SEED)
+    parser.add_argument("--outdir", default=str(paths.MODULE_DIR / "results"))
     args = parser.parse_args()
 
-    print("=" * 64)
-    print("  端到端冒烟测试（成员 B）")
-    print("=" * 64)
+    print("=" * 66)
+    print("  L1 冒烟测试 · 声纹保护推理链")
+    print("=" * 66)
 
+    # -- 步骤 0：组件与权重 ----------------------------------------------
+    print("\n【0】组件与权重检查")
+    print(paths.describe())
+    missing = [name for name in paths.WEIGHT_FILES.values()
+               if not paths.weight_path(name).exists()]
+    if missing:
+        print(f"\n  [注意] 缺少 AutoVC 路线所需的权重：{', '.join(missing)}")
+        print("         下载地址见 third_party/README.md；放到 algorithms/voiceprint_protection/weights/")
+        print("         → 第 2/3 步会跳过；第 1 步（GE2E）不受影响。")
+    else:
+        print("  [OK] AutoVC 路线权重齐备")
+
+    # -- 准备输入 --------------------------------------------------------
+    sample_rate = config.MEL_PRESETS[config.DEFAULT_PRESET]["sample_rate"]
+    audio_path = pick_input(args.audio)
+    if audio_path is not None:
+        wav = audio_utils.load_audio(str(audio_path), sample_rate)
+        print(f"\n输入: {audio_path}")
+    else:
+        audio_path = None
+        print("\n[提示] 找不到可用的测试音频，使用一段合成信号"
+              "（仅用于验证链路，不用于效果评估）")
+        t = np.arange(sample_rate * 2, dtype=np.float32) / sample_rate
+        wav = (0.25 * np.sin(2 * np.pi * 140 * t)
+               + 0.12 * np.sin(2 * np.pi * 430 * t) * np.sin(2 * np.pi * 2.7 * t)).astype(np.float32)
+    print(f"  时长 {audio_utils.duration_seconds(wav, sample_rate):.2f} 秒  "
+          f"采样率 {sample_rate} Hz")
+
+    # -- 步骤 1：GE2E 说话人分支 -----------------------------------------
+    speaker_ok = check_speaker_branch(audio_path, sample_rate)
+
+    if missing:
+        print("\n" + "=" * 66)
+        print("  AutoVC 权重不齐，已跳过重建/保护两步。")
+        print("  已验证：GE2E 说话人分支 =", "通过" if speaker_ok else "未通过")
+        print("  补齐权重后重跑本脚本即可完成整链验证。")
+        print("=" * 66)
+        return 0 if speaker_ok else 1
+
+    # -- 步骤 2：加载模型 ------------------------------------------------
+    from infer import Protector, perturb_embedding, random_perturbation
+
+    print("\n【2】加载模型")
     try:
-        wav_path = find_input_wav(args.wav)
-    except FileNotFoundError as error:
-        print(f"\n[失败] {error}")
-        return 1
-
-    # -- 优先走完整链路 --------------------------------------------------
-    try:
-        import infer  # noqa: F401  （成员 A 的模块）
-    except ImportError:
-        infer = None
-
-    if infer is None or not hasattr(infer, "protect"):
-        return run_speaker_branch(wav_path, args.alpha)
-
-    print(f"\n  输入音频 : {wav_path}")
-    print(f"  α       : {args.alpha}")
-
-    out_path = Path(args.out) if args.out else (
-        REPO_ROOT / "algorithms" / "voiceprint_protection" / "results" / "protected.wav"
-    )
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-
-    try:
-        result = infer.protect(str(wav_path), alpha=args.alpha, output_path=str(out_path))
+        protector = Protector()
     except Exception as error:  # noqa: BLE001
-        print(f"\n  [失败] infer.protect() 抛异常：{error}")
-        raise
+        print(f"  [失败] 加载模型出错：{error}")
+        return 1
+    print("  [OK] AutoVC / 说话人编码器 / 声码器 全部就绪")
 
-    print(f"\n  保护后音频 : {result.get('protected_path', out_path)}")
-    print_shapes(result.get("shapes", {}))
+    # -- 步骤 3：只重建 --------------------------------------------------
+    print("\n【3】重建测试（不加扰动）—— 验证 mel 与权重是否配套")
+    mel = protector.to_mel(wav)
+    embedding = protector.embedding(mel)
+    print(f"  mel 形状        {tuple(mel.shape)}")
+    print(f"  嵌入形状        {tuple(embedding.shape)}  "
+          f"L2 范数 {float(np.linalg.norm(embedding)):.4f}")
+    reconstructed_mel = protector.autovc.reconstruct(mel, embedding)
+    print(f"  重建 mel 形状   {tuple(reconstructed_mel.shape)}")
+    print(f"  重建 mel 范围   [{reconstructed_mel.min():.3f}, {reconstructed_mel.max():.3f}]")
 
-    protected = result.get("protected_path", out_path)
-    if Path(protected).exists():
-        original_wav = audio_utils.load_audio(wav_path)
-        protected_wav = audio_utils.load_audio(protected)
-        print("\n【输出体检】")
-        print(f"  原始 RMS      : {audio_utils.rms_energy(original_wav):.6f}")
-        print(f"  保护后 RMS    : {audio_utils.rms_energy(protected_wav):.6f}")
-        print(f"  频谱距离      : {audio_utils.spectral_distance(original_wav, protected_wav):.4f}")
-        if audio_utils.rms_energy(protected_wav) < 1e-4:
-            print("  [警告] 输出几乎是静音，检查声码器与 mel 对照")
-        else:
-            print("  [通过] 输出不是静音")
+    reconstructed_wav = protector.to_waveform(reconstructed_mel)
+    rms = audio_utils.rms_energy(reconstructed_wav)
+    original_rms = audio_utils.rms_energy(wav)
+    print(f"  重建波形 RMS    {rms:.5f}（原音频 {original_rms:.5f}）")
+    if rms < 1e-4:
+        print("  [失败] 重建音频接近静音 —— mel 或权重不配套，先别往下走")
+        return 1
+    print("  [OK] 重建音频有声")
 
-    if args.report:
-        Path(args.report).parent.mkdir(parents=True, exist_ok=True)
-        Path(args.report).write_text(
-            json.dumps(result, ensure_ascii=False, indent=2, default=str), encoding="utf-8"
-        )
-        print(f"  报告已写 : {args.report}")
+    # -- 步骤 4：加扰动 --------------------------------------------------
+    print("\n【4】保护测试（加随机扰动）")
+    delta = random_perturbation(seed=args.seed)
+    result = protector.protect(wav, alpha=args.alpha, seed=args.seed, verbose=False)
 
-    print("\n  冒烟测试通过。")
+    protected_rms = audio_utils.rms_energy(result["waveform"])
+    similarity = float(np.dot(result["embedding"], result["embedding_adv"]))
+    mel_difference = float(np.mean(np.abs(result["protected_mel"] - mel)))
+    print(f"  α = {args.alpha}")
+    print(f"  嵌入余弦相似度  {similarity:.4f}（1.0 = 没扰动；越小扰动越强）")
+    print(f"  mel 平均绝对差  {mel_difference:.4f}")
+    print(f"  保护后波形 RMS  {protected_rms:.5f}")
+    if protected_rms < 1e-4:
+        print("  [失败] 保护后音频接近静音")
+        return 1
+    print("  [OK] 保护后音频有声")
+
+    # -- 输出 ------------------------------------------------------------
+    outdir = Path(args.outdir)
+    outdir.mkdir(parents=True, exist_ok=True)
+    stem = Path(audio_path).stem if audio_path else "synthetic"
+    protected_path = outdir / f"{stem}_protected.wav"
+    reconstructed_path = outdir / f"{stem}_reconstructed.wav"
+    audio_utils.save_audio(protected_path, result["waveform"], sample_rate)
+    audio_utils.save_audio(reconstructed_path, reconstructed_wav, sample_rate)
+    print(f"\n  已保存保护后音频   {protected_path}")
+    print(f"  已保存重建音频     {reconstructed_path}")
+
+    report = {
+        "alpha": args.alpha,
+        "seed": args.seed,
+        "shapes": result["shapes"],
+        "embedding_cosine": similarity,
+        "mel_mean_abs_diff": mel_difference,
+        "rms_original": original_rms,
+        "rms_reconstructed": rms,
+        "rms_protected": protected_rms,
+        "note": "L1 阶段：δ 为随机高斯噪声占位，尚未训练生成器 G。",
+    }
+    report_path = outdir / f"{stem}_report.json"
+    report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"  已保存报告         {report_path}")
+
+    print("\n" + "=" * 66)
+    print("  冒烟测试通过。")
+    print("  ★ 下一步：对比「重建音频」与「原始音频」，确认听感一致；")
+    print("    然后再对比「保护后音频」，确认听感几乎无差别。")
+    print("  ★ 如果听感不对，先怀疑 mel 对照，而不是保护逻辑。")
+    print("=" * 66)
     return 0
 
 

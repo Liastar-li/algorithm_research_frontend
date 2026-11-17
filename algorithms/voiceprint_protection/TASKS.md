@@ -40,79 +40,65 @@
 | 环境（conda `vpp` + torch 2.4.1+cu121 + GPU） | ✅ 已就绪 |
 | mel 参数契约（`scripts/test_audio_utils.py`，35 项断言） | ✅ 已锁定 |
 | 环境指纹 | ⬜ **待重新生成**（新增了 `scikit-learn==1.5.2`，指纹算法已跟着改）—— 两人装完后重跑 `check_env.py` 比对 |
-| `config.py` / `audio_utils.py` | ✅ 已写好 |
+| `config.py` / `audio_utils.py` | ✅ 已写好（★ 已按 AutoVC 官方实测对齐） |
+| `third_party/AutoVC` | ✅ 已克隆，commit `c1827a6` |
+| `third_party/RTC`（GE2E） | ✅ 已克隆，commit `890f3a0`；权重 `encoder.pt` 已下载并校验 |
+| VCTK 数据 | ✅ 110 说话人 / 11,004 条，划分 80/10/20 已自检通过 |
 | **当前阶段** | **W2 · 指南第 3 步 + 第 4 步** |
-| **下一个里程碑** | **M1：L1 推理链跑通**（产出保护后音频） |
-| **待补依赖** | `python-multipart` 升到 0.0.20（起服务前必须） |
+| **下一个里程碑** | **M1：L1 推理链跑通**（产出保护后音频）—— 差 AutoVC 三件套权重 |
+| **待补依赖** | `python-multipart` 升到 0.0.20（起服务前必须）、`scikit-learn==1.5.2`（上游 GE2E 必需） |
+
+### ★ 本周已取得的关键结论（2026-11-13 实测，详见 [docs/notes/autovc_alignment.md](docs/notes/autovc_alignment.md)）
+
+| # | 结论 | 影响 |
+|---|---|---|
+| 1 | AutoVC 官方仓库是 **`auspicious3000/autovc`**（原 `cyqxiaozhen/AutoVC` 已 404） | D1-1 已完成 |
+| 2 | **AutoVC 官方权重是 16 kHz 的**（不是 22.05 kHz） | **全程 16 kHz**，原"22.05k 预设"取消 |
+| 3 | **AutoVC 的 mel 不是 librosa**（reflect 填充 + 幅度 + dB + clip[0,1] + fmin=90 + 30Hz 高通） | 已实现 `autovc_mel()`，必须跑对照脚本验证 |
+| 4 | content code 实际 **64 维**（dim_neck 32 × 双向），下采样 `freq=32` | 契约已更正 |
+| 5 | AutoVC 的说话人嵌入用 `D_VECTOR`（**输入 80 维** mel）；论文脚注的 GE2E 用 **40 维** mel | **两套权重不可混用**，L1 用前者、最终系统用后者 |
+| 6 | AutoVC 官方权重在 **IBM Box**（不是 Google Drive）；Google Drive 直连不通 | 需代理或找镜像 |
 
 ### 0.4 本轮进展（成员 B · 2026-11-17）
 
-**已产出（代码/文档写完，等有网络与数据后执行）**
+**已产出（代码/文档写完并已实测跑通）**
 
 | 任务 | 产出 | 状态 |
 |---|---|---|
-| D2-5 / D3-5 | `scripts/prepare_data.py`（VCTK → 16 kHz + 80/10/20 划分 + 三条硬要求自动自检） | ✅ 代码完成，待跑 |
-| D1-5 | `scripts/survey_vctk.py`（自动生成 `docs/notes/vctk_layout.md`） | ✅ 代码完成，待跑 |
-| D2-4 | `docs/notes/ge2e_interface.md`（四个问题的答案 + **运行时自证方法**） | ✅ **已收口**（2026-11-17 实测通过，实测记录已填入文档） |
-| D3-4 | `bridge_speaker.py`（GE2E → `h (256,)`，L2 归一化；运行时从上游代码读接口） | ✅ **已跑通**（新版上游布局，权重加载正常，`\|h\|=1.000000`） |
-| D3-3 | `scripts/smoke_test.py`（端到端冒烟；`infer.py` 未就绪时只验证说话人分支） | ✅ 代码完成 |
-| D4-4 / W3-P4 | `scripts/make_sample.py`（从测试集取样例 + 写来源与许可说明） | ✅ **输入已生成**（`public/samples/.../input.wav`，测试集说话人 p228，16 kHz 单声道 PCM_16）；**输出待 A 的 `infer.py`** |
+| D1-3 | 克隆 RTC（commit `890f3a0`）+ 从 HuggingFace 下 `encoder.pt`（17,090,379 B，已校验） | ✅ |
+| D1-4 | VCTK 下载：**1.36 GiB / 11,004 条 / 110 说话人**（用 `scripts/download_vctk.mjs`） | ✅ |
+| D1-5 | `scripts/survey_vctk.py` → `docs/notes/vctk_layout.md`（自动生成） | ✅ |
+| D2-4 | `docs/notes/ge2e_interface.md`（四个问题按上游源码逐条核实 + 实测记录） | ✅ **已收口** |
+| D2-5 / D3-5 | `scripts/prepare_data.py`：转换 + 80/10/20 划分 + **三条硬要求自检** | ✅ **全通过** |
+| D3-4 | `bridge_speaker.py`（上游 GE2E → `h (256,)`，实测 `\|h\|=1.000000`） | ✅ **已跑通** |
+| D4-4 | 平台样例**输入** `public/samples/.../input.wav`（测试集说话人 p228）+ `SOURCES.md`（CC BY 4.0 署名） | ✅ |
 | D3-1 | `docs/interface-contract.md`（**草案 v0.1，待成员 A 签字**） | ⬜ 待 A 确认 |
-| D1-6 | `third_party/README.md`（四个组件的 URL/commit/许可登记表） | ⬜ 待回填 commit |
-| W3-P1 | `public/methods/group_n005_voiceprint_protection.json` | ⬜ 待 A review |
+| D1-6 | `third_party/README.md`（四个组件的 URL/commit/许可登记表） | ✅ 已合并双方信息 |
+| W3-P1 | `public/methods/group_n005_voiceprint_protection.json` + `npm run check:method` 校验器 | ⬜ 待 A review |
 
-**被卡住的任务（需要网络/数据，本机沙箱无法执行）**
+### 0.5 ★ 上游 RTC 在 2026-03 做过重构（成员 B 核实，三处影响）
 
-| 任务 | 卡在哪 | 解法 |
+| 项 | 变化 | 我们的处理 |
 |---|---|---|
-| D1-3 | 无法 `git clone`（沙箱禁网） | 见 [`docs/notes/download_vctk.md`](../docs/notes/download_vctk.md) §1 |
-| D1-4 | 无法 `curl` 下载 VCTK（11 GB） | 同上 §2 |
-| D2-4 / D3-4 / D4-3 | 依赖上面两个 | 跑完 §3 的三条命令即可 |
+| 目录结构 | 平铺 `speaker_encoder.py` → 包结构 `encoder/` | `bridge_speaker.py` **两种布局都支持** |
+| **权重来源** | 仓库内 `pretrained.pt` → **HuggingFace `CorentinJ/SV2TTS` 的 `encoder.pt`** | 新增 `scripts/download_encoder_weights.py`；clone 完目录里那个 `pretrained.pt` 是**HTML 错误页**，要删 |
+| **GE2E 内部 mel** | **不再取 log**（改成线性 mel） | ⚠️ 拿旧版 mel 喂新版权重 → **嵌入全错但不报错**。桥接层直接调上游的 mel 函数，不混用 |
+| 依赖 | 新增 `scikit-learn` | 已加进 `requirements.txt`，**两人都要装** |
 
-**注意（成员 A 必看）**
+已核实 commit：`890f3a03187195b9829db2079b75c2ba2ab0405c`（2026-03-09，MIT）。
+详见 [`docs/notes/ge2e_interface.md`](../docs/notes/ge2e_interface.md)（含上游三处 API 漂移的适配）。
 
-1. **方法 ID 必须全小写**：平台契约的标识符正则 `/^[a-z][a-z0-9_]{1,63}$/` 不接受大写，
-   所以是 `group_n005_...` 而不是 `group_N005_...`。组号定下来后统一替换。
-2. **`infer.py` 的签名**已写进 `docs/interface-contract.md` §4，`scripts/smoke_test.py` 直接依赖它：
-   `protect(wav_path, alpha=0.10, output_path=None) -> dict`。
-3. **`index.json` 还没追加**我们的方法 —— 因为样例（`public/samples/.../input.wav` 与 `output.wav`）
-   必须**真实跑出来**才有意义。等 `make_sample.py` 跑通后追加一行即可。
-4. **数据放 D 盘**：C 盘只剩 21 GB，VCTK 要 ~27 GB。仓库留在 C 盘（只有 77 MB），
-   **数据放 D 盘**：设 `VPP_DATA_ROOT="D:\vpp\data"` 即可，脚本会自动跟着走
-   （或用目录联接 `mklink /J`，见 [`docs/notes/data-location.md`](../docs/notes/data-location.md)）。
-   **组内必须统一用同一种方案**，否则清单在别人机器上找不到文件。
-
-### 0.5 ★ 重要发现：上游 RTC 在 2026-03 做过重构（2026-11-17 成员 B 核实）
-
-成员 B 克隆 `third_party/RTC` 后发现**上游结构变了**，三处影响必须同步给成员 A：
-
-| 项 | 变化 | 对我们的影响 |
-|---|---|---|
-| 目录结构 | 平铺 `speaker_encoder.py` → 包结构 `encoder/` | 桥接层已改成**两种布局都支持**，永远调用当前布局的上游代码 |
-| **权重来源** | 仓库内 `pretrained.pt`（30 MB）→ **HuggingFace `CorentinJ/SV2TTS` 的 `encoder.pt`（17,090,379 字节）** | 新增 `scripts/download_encoder_weights.py`；clone 完目录里那个 `pretrained.pt` 是**HTML 错误页**，要删掉 |
-| **GE2E 内部 mel** | **不再取 log、不做均值方差归一化**（改成线性 mel） | ⚠️ **拿旧版 mel 喂新版权重 → 嵌入全错但不报错**。桥接层直接调用上游的 mel 函数，不会混用 |
-| 依赖 | 新增 `scikit-learn` | 已加进 `requirements.txt`（`scikit-learn==1.5.2`），**两人都要装**，装完重跑 `check_env.py` 比对新指纹 |
-
-已核实的 commit：`890f3a03187195b9829db2079b75c2ba2ab0405c`（2026-03-09，MIT）。
-D2-4 的四个问题已按源码逐条核实并写进 [`docs/notes/ge2e_interface.md`](../docs/notes/ge2e_interface.md)。
-
-### 0.6 ★ DataShare 改版 + 下载方案（2026-11-17 成员 B 实测）
+### 0.6 ★ DataShare 改版 + 下载方案（成员 B 实测）
 
 | 发现 | 内容 |
 |---|---|
 | 老链接失效 | `.../bitstream/handle/10283/3191/VCTK-2.tar.gz` → **404**；老 handle 在新站点被重新映射到别的数据集 |
 | 新直链 | `https://datashare.ed.ac.uk/server/api/core/bitstreams/535f4286-e54c-4038-838c-a02285e32cb2/content`（`VCTK-Corpus-0.92.zip`，11,747,302,977 字节） |
-| 包内结构 | 只有 `wav48_silence_trimmed/`（88,329 个 flac / 10.92 GiB / 111 个说话人）+ `txt/`（2 MB）。**没有 `wav/` 目录** |
+| 包内结构 | 只有 `wav48_silence_trimmed/`（88,329 个 flac / 10.92 GiB / 111 个目录）+ `txt/`（2 MB）。**没有 `wav/` 目录** |
 | 速度实测 | 单连接 **31.8 KB/s**；16 连接 ~280 KB/s；**48 连接 423 KB/s** |
-| **最终方案** | 新增 `scripts/download_vctk.mjs`：**按中央目录定向取条目 + 48 并发 Range + 直接解压落盘**。<br>**每个说话人只取 100 句（论文测试集同款）→ 1.36 GiB（12%），约 55 分钟** |
+| **最终方案** | 新增 `scripts/download_vctk.mjs`：**按中央目录定向取条目 + 48 并发 Range + 直接解压落盘**。每人只取 100 句 → **1.36 GiB（12%），约 55 分钟** |
 
-```cmd
-node scripts/download_vctk.mjs --out D:\vpp\data\raw --per-speaker 100 --concurrency 48
-```
-
-> 脚本已实测通过：60 个文件全部为合法 FLAC（`fLaC` 头），支持断点续传（已下好的会跳过）。
-
-### 0.7 ★ VCTK 的第 110 个说话人叫 `s5`（2026-11-17 成员 B 踩到）
+### 0.7 ★ VCTK 的第 110 个说话人叫 `s5`（成员 B 踩到）
 
 数据里 `wav48_silence_trimmed/` 下是 **109 个 `pXXX` + 1 个 `s5`**，
 `s5` 是 VCTK 真实的第 110 个说话人（`speaker-info.txt` 第 111 行：
@@ -121,29 +107,22 @@ node scripts/download_vctk.mjs --out D:\vpp\data\raw --per-speaker 100 --concurr
 s5    22  F    British (new speaker, more data would be released for training a speaker-dependent model)
 ```
 
-**它不遵循 `p+数字` 的命名规律**，如果按 `p` 前缀筛说话人，就会只剩 109 人 →
-80/10/20 的划分直接失败（`split_speakers` 报"说话人不够"）。
+**它不遵循 `p+数字` 的命名规律**，按 `p` 前缀筛说话人就会只剩 109 人 → 80/10/20 划分直接失败。
+已修：`prepare_data.py::_is_speaker_dir()` 显式把 `s5` 认作说话人。
+**组内任何"筛 VCTK 说话人"的代码都要注意这一条。**
 
-> 修复：`prepare_data.py::_is_speaker_dir()` 现在显式把 `s5` 认作说话人。
-> **组内任何"筛 VCTK 说话人"的代码都要注意这一条。**
+### 0.8 两条 L1 路线（合并后并存，待 A 确认取舍）
 
-**数据实况**（本组当前数据）：
+| | **路线 A（成员 A）** | **路线 B（成员 B）** |
+|---|---|---|
+| 说话人编码器 | AutoVC 自带 `D_VECTOR`（`3000000-BL.ckpt`，吃 **80 维** mel） | **论文脚注的 GE2E**（`encoder.pt`，吃 **40 维**线性 mel） |
+| 依赖权重 | AutoVC 三件套（IBM Box） | 只有 `encoder.pt`（**已下载并跑通**） |
+| 当前状态 | `infer.py` 已写好，缺权重 | `bridge_speaker.py` 已跑通 |
 
-| 项 | 值 |
-|---|---|
-| 说话人 | **110**（109 个 `p*` + `s5`），与论文一致 |
-| 语句数 | 10,904（每人 100 句，均匀抽样） |
-| 原始格式 | 48 kHz / 单声道 / FLAC |
-| 划分 | seed=42 → 80 训练 / 10 验证 / 20 测试 |
-| 磁盘 | 原始 1.4 GB + 16 kHz 副本约 1.3 GB（都在 D 盘） |
+> `bridge_speaker.py` 里两个类并存：`SpeakerEncoderBridge`（A 的）与 `SpeakerBridge`（B 的）。
+> **论文要求走路线 B**（脚注 2 引用的就是 GE2E），
+> 但路线 A 是 AutoVC 官方权重自带的、配套最完整 —— **取舍待 A 确认**。
 
-**⚠️ 引用勘误（2026-11-17 核实）**
-
-指南与原笔记里写的 `Zenodo. https://doi.org/10.5281/zenodo.3235654` **实测 404**，
-Zenodo 上**没有 VCTK 的主记录**（且那条其实是 AutoVC 的论文，不是 VCTK 的引用）。
-
-**引用 VCTK 请用 DataShare 的 DOI：<https://doi.org/10.7488/ds/2645>**
-（已验证指向我们下载的同一个 item，handle `10283/3443`）。
 
 ---
 
@@ -169,12 +148,13 @@ Zenodo 上**没有 VCTK 的主记录**（且那条其实是 AutoVC 的论文，�
 
 | # | 负责人 | 任务 | 🔗 前置 | 📦 产出 | 验收标准 |
 |---|---|---|---|---|---|
-| D1-1 | A | 克隆 AutoVC 官方仓库 → `third_party/AutoVC`，记下 **commit hash** | — | `third_party/AutoVC/` | 目录存在，commit 已记录 |
-| D1-2 | A | 读它的 `hparams.py`，把 **mel 参数**（`sample_rate / n_fft / hop / win / n_mels / mel_fmin / mel_fmax`）抄进 `docs/notes/autovc_hparams.md` | D1-1 | `docs/notes/autovc_hparams.md` | 六个参数齐全，和 `config.py` 的 `autovc22k` 预设**逐项相同或写明差异** |
-| D1-3 | B | 克隆 `CorentinJ/Real-Time-Voice-Cloning` → `third_party/RTC`，记 commit | — | `third_party/RTC/` | 目录存在，commit 已记录 |
-| D1-4 | B | 下载 VCTK（Edinburgh DataShare）→ `data/raw/`，解压 | — | `data/raw/` | 解压完成，能看到 `wav48_silence_trimmed/` 或 `wav/` |
-| D1-5 | B | 勘察 VCTK 目录：**统计说话人数、每个说话人的句子数、有多少 `p*_eval` 目录** | D1-4 | `docs/notes/vctk_layout.md` | 说话人数 ≈ 110；`p*_eval` 数量已统计 |
-| D1-6 | **共同** | 建 `third_party/README.md`：每个组件的 **URL + commit + 许可证 + 用途** | D1-1, D1-3 | `third_party/README.md` | 四个组件（AutoVC / RTC-GE2E / HiFi-GAN / VCTK）都有条目 |
+| D1-1 | A | 克隆 AutoVC 官方仓库 → `third_party/AutoVC`，记下 **commit hash** | — | `third_party/AutoVC/` | ✅ **已完成** `c1827a6`，仓库见 `third_party/README.md` |
+| D1-2 | A | 读它的 `hparams.py`，把 **mel 参数**抄进 `docs/notes/` | D1-1 | `docs/notes/autovc_alignment.md` | ✅ **已完成**，实测参数已记录 |
+| D1-3 | B | 克隆 `CorentinJ/Real-Time-Voice-Cloning` → `third_party/RTC`，记 commit | — | `third_party/RTC/` | ✅ **已完成** commit `890f3a0`；⚠️ 权重改从 HF 下 `encoder.pt` |
+| D1-4 | B | 下载 VCTK（Edinburgh DataShare）→ `data/raw/`，解压 | — | `data/raw/` | ✅ **已完成** 1.36 GiB / 11,004 条 / 110 说话人 |
+| D1-5 | B | 勘察 VCTK 目录：**统计说话人数、每个说话人的句子数、有多少 `p*_eval` 目录** | D1-4 | `docs/notes/vctk_layout.md` | ✅ **已完成** 110 人（含 `s5`）；本包无 `p*_eval` |
+| D1-6 | **共同** | 建 `third_party/README.md`：每个组件的 **URL + commit + 许可证 + 用途** | D1-1, D1-3 | `third_party/README.md` | ✅ **已完成**（待 D1-3 后补 RTC 条目） |
+| **D1-7** | **A** | **下载 AutoVC 官方权重**（IBM Box，主模型 + WaveNet 声码器）；`3000000-BL.ckpt` 也要 | D1-1 | `algorithms/voiceprint_protection/weights/` | 权重文件就位，**不提交到 git**（`.gitignore` 已忽略 `*.pt`） |
 
 > ⚠️ **D1-5 的坑（指南第 3 步原文）**：VCTK 的说话人文件夹名是 `p225`、`p292` 这种
 > （对应论文 t-SNE 图里的 p225/p252/p292/p315/p318）；
@@ -188,12 +168,12 @@ Zenodo 上**没有 VCTK 的主记录**（且那条其实是 AutoVC 的论文，�
 
 | # | 负责人 | 任务 | 🔗 前置 | 📦 产出 | 验收标准 |
 |---|---|---|---|---|---|
-| D2-1 | A | **AutoVC mel 对照**：同一段音频，分别用 AutoVC 仓库的原始 mel 代码 与 我们的 `audio_utils.MelSpec("autovc22k").mel()` 计算 | D1-2 | 对照脚本 + 结论 | **最大绝对差 < 1e-4**；有差异则**改我们的实现**，不是改组件 |
-| D2-2 | A | **HiFi-GAN mel 对照**：组件的 mel 处理 与 我们的 `audio_utils.vocoder_mel()` | D1-1 | 对照脚本 + 结论 | 同上；确认 `(x+4.5)/5` 归一化一致 |
-| D2-3 | A | **验证 16 kHz 声码器**：`torch.hub.load('NVIDIA/torch.hifi_gan', 'hifigan_melbins_16k')` 能否加载并合成 | — | 合成样例 wav | 能出声；**若可用则 16 kHz 全路线无障碍**（论文本来就是 16k+VCTK） |
-| D2-4 | B | **GE2E 输入约定确认**：采样率是多少？内部 mel 是几维、什么参数？输出 `h` 是否已 L2 归一化？ | D1-3 | `docs/notes/ge2e_interface.md` | 四个问题都有明确答案 + 代码位置引用 |
-| D2-5 | B | **写 `scripts/prepare_data.py`**（详见下方 §1.3 规格） | D1-5 | `scripts/prepare_data.py` | 能跑出 `data/train.txt` / `val.txt` / `test.txt` / `spk2id.txt` |
-| D2-6 | **共同** | 把对照结论写进 `audio_utils.py` 的文件头注释 + `docs/notes/mel_convention.md` | D2-1, D2-2, D2-4 | 两个文件已更新 | 三方 mel 约定在文档里能对照着看 |
+| D2-1 | A | **AutoVC mel 对照**：用官方 `make_spect.py` 原始代码 与 我们的 `audio_utils.autovc_mel()` 比较 | D1-2 | ✅ `scripts/verify_autovc_mel.py` | **最大绝对差 < 1e-5**；脚本已就绪，**待运行** |
+| D2-2 | A | **HiFi-GAN mel 对照**：组件 mel 处理 与 我们的 `vocoder_mel()` | D1-1 | 对照脚本 + 结论 | 同上；确认 `(x+4.5)/5` 归一化一致 |
+| D2-3 | A | **验证 16 kHz 声码器**：`torch.hub.load('NVIDIA/torch.hifi_gan', 'hifigan_melbins_16k')` 能否加载并合成 | — | 合成样例 wav | 能出声；**若可用则 16 kHz 全路线无障碍** |
+| D2-4 | B | **GE2E 输入约定确认**：采样率？内部 mel 几维、什么参数？输出 `h` 是否已 L2 归一化？ | D1-3 | `docs/notes/ge2e_interface.md` | 四个问题都有明确答案 + 代码位置引用✅ **已完成并收口**（16 kHz / 40 维线性 mel / 已 L2 归一化，见 ge2e_interface.md） |
+| D2-5 | B | **写 `scripts/prepare_data.py`**（详见下方 §1.3 规格） | D1-5 | `scripts/prepare_data.py` | ✅ **已完成** 三份清单 + `spk2id.txt`（K=80）已产出 |
+| D2-6 | **共同** | 把对照结论写进 `audio_utils.py` 注释 + `docs/notes/autovc_alignment.md` | D2-1, D2-2, D2-4 | 两个文件 | ✅ 主体已完成，D2-1/D2-2 通过后补最终结论 |
 
 #### W2-D3 · 写桥接模块与接口签名
 
@@ -202,8 +182,8 @@ Zenodo 上**没有 VCTK 的主记录**（且那条其实是 AutoVC 的论文，�
 | D3-1 | **共同** | **定接口签名**，写进 `docs/interface-contract.md`（指南第 8 章那 10 条 + 下列函数签名） | D2-6 | `docs/interface-contract.md` | 双方确认，后续改动须双方同意 |
 | D3-2 | A | `bridge_autovc.py`：加载 AutoVC 权重，提供 `content_encoder(x,h)->c` 与 `decoder(c,h)->mel` | D2-1, D3-1 | `bridge_autovc.py` | 输入 `(T,80)`，输出 `(T',32)` 与 `(T,80)` |
 | D3-3 | A | `bridge_vocoder.py`：加载 HiFi-GAN，提供 `mel->wav` | D2-2, D3-1 | `bridge_vocoder.py` | 输出 wav 采样率与预设一致 |
-| D3-4 | B | `bridge_speaker.py`：加载 GE2E，提供 `wav->h(256)` | D2-4, D3-1 | `bridge_speaker.py` | 输出形状 `(256,)`，归一化状态明确 |
-| D3-5 | B | `scripts/prepare_data.py` 补完 + **核对划分** | D2-5 | `data/*.txt` | **训练说话人不出现在测试集**；`spk2id.txt` 的 K = 80 |
+| D3-4 | B | `bridge_speaker.py`：加载 GE2E，提供 `wav->h(256)` | D2-4, D3-1 | `bridge_speaker.py` | ✅ **已跑通** `(256,)`，`|h|=1.000000` |
+| D3-5 | B | `scripts/prepare_data.py` 补完 + **核对划分** | D2-5 | `data/*.txt` | ✅ **三条硬要求自检全通过**（不相交 / K=80 / 无 p*_eval） |
 
 #### W2-D4 · 串起推理主流程
 
@@ -211,8 +191,8 @@ Zenodo 上**没有 VCTK 的主记录**（且那条其实是 AutoVC 的论文，�
 |---|---|---|---|---|---|
 | D4-1 | A | 写 `infer.py` 主流程（`wav → x → h → h_adv → c → x_adv → wav'`），**每步打印张量形状** | D3-2, D3-3, D3-4 | `infer.py` | 打印出 `x (T,80)` / `h (256,)` / `c (T',32)` / `x_adv (T,80)` |
 | D4-2 | A | **先加随机/高斯扰动**（α=0.1），**不训练 G** —— L1 阶段本来就不训练 | D4-1 | `infer.py` | 扰动可复现（固定 seed） |
-| D4-3 | B | 写 `scripts/smoke_test.py`：喂一段真实语音 → 出 `protected.wav` + 打印形状 | D4-1 | `scripts/smoke_test.py` | 一条命令跑完 |
-| D4-4 | B | 准备 1 段**公开可用**的测试音频（平台样例输入），确认许可 | D1-4 | `samples/` 下的音频 | 能公开展示 |
+| D4-3 | B | 写 `scripts/smoke_test.py`：喂一段真实语音 → 出 `protected.wav` + 打印形状 | D4-1 | `scripts/smoke_test.py` | ✅ 已写；⭐ 与 A 的 smoke_test 合并为两版（重建/保护分两步测）；待 A 的权重就位后跑通 |
+| D4-4 | B | 准备 1 段**公开可用**的测试音频（平台样例输入），确认许可 | D1-4 | `samples/` 下的音频 | ✅ **输入已生成**（测试集说话人 p228 + CC BY 4.0 署名）；输出待 `infer.py` |
 | D4-5 | **共同** | 端到端联调 | D4-1, D4-3 | — | **产出一段能播放的 `protected.wav`** |
 
 #### W2-D5 · 验收与固化
@@ -351,13 +331,67 @@ cut -d' ' -f2 data/train.txt | sort -u | wc -l
 
 ---
 
-## 8. 待决事项（需要组内拍板）
+## 8. 云端算力预算（华为云体验代金券 500 元）
 
-- [ ] **代金券适用产品**：能否开 ECS（NVIDIA 卡）？还是只有昇腾 ModelArts？
-      → 决定训练是否需要额外做 NPU 迁移（**越早查越好，直接影响排期**）
-- [ ] **采样率方案**：L1 用 `autovc22k`(22.05k) 还是全程 `paper16k`(16k)？
-      - 倾向：**L1 用 22.05k（能直接用现成权重，最快看到东西）→ 最终系统用 16k**
-      - 若 **D2-3** 验证 `hifigan_melbins_16k` 可用，则 16k 路线全程无障碍
+> **已知**：华为云体验代金券 500 元。
+> **未知（需在控制台确认）**：① 适用产品是否包含 ECS（NVIDIA 卡）还是只有 ModelArts（昇腾）
+> ② 有效期多长 ③ 能否用于按需/竞价实例。
+
+### 8.1 500 元够不够？够，但必须精打细算
+
+本地 RTX 4060（8 GB）能跑**缩减版**训练，但要跑论文量级（Stage 1 500k + Stage 2 200k 迭代）
+必须有云上 GPU。500 元大约能覆盖 **1–2 次完整训练**，前提是：
+
+| 规则 | 原因 |
+|---|---|
+| **只在真正要训练时才开机** | 开发、调试、评测全在本地（推理单条 <1s，CPU 也够） |
+| **训练完立刻释放实例** | 按需实例"关机"仍收存储费，"释放"才彻底停收 |
+| **优先用竞价实例** | 便宜 50–80%；训练配 checkpoint 续训，被抢占也不怕 |
+| **先在小卡上跑通流程** | 别一上来就开 A100 烧钱 |
+| **VCTK 下载在本地做** | 数据 11 GB，别在云机上慢慢下 |
+
+### 8.2 花钱顺序（按这个来，别乱开）
+
+| 阶段 | 是否需要云 | 说明 |
+|---|---|---|
+| W2 L1 推理链 | ❌ | 本地 CPU/GPU 都够 |
+| W3 平台打通 | ❌ | 推理服务本地跑 |
+| W4 Stage 1 训练 | ✅ **第一次开云** | 先用 5k 迭代验证能收敛（几分钟），确认无误再放长训 |
+| W5 Stage 2 训练 | ✅ | Stage 1 冻结后显存压力小，可与 Stage 1 用同一台 |
+| W6 评测 | ❌ | 本地跑 |
+| **云上常驻推理服务** | ❌ **不要** | 本地起服务即可（除非演示需要外网访问） |
+
+### 8.3 建议的云上配置
+
+- **实例**：先开中等规格（能放下 AutoVC + 8 GB 显存即可），跑通再换大的
+- **镜像**：**选 PyTorch 预置镜像**（CUDA 版 torch 开箱即用，**零下载**，省掉 2GB 的安装折腾）
+- **代码同步**：`git push` 到 GitHub → 云机 `git clone`（顺便保证两人同一份代码）
+- **数据**：VCTK 在云机上重新下载，或先在本地下载后传 OBS
+- **断线保护**：**必须用 `tmux`**（SSH 断了训练不能停）
+- **结果回收**：训练完把 checkpoint + 指标 `scp` 回本地，再释放实例
+
+### 8.4 如果券只能开昇腾（ModelArts）
+
+⚠️ 那就要额外评估迁移成本：**本项目是纯 CUDA 栈**（torch cu121 / torch.hub 拉 HiFi-GAN /
+AutoVC 权重），迁到昇腾要装 CANN + `torch_npu`，并把 `.cuda()` 改成 `.npu`，
+而 AutoVC / GE2E / HiFi-GAN **都没有人在昇腾上验证过**，出问题难定位。
+
+**对策**：这时优先考虑用券的**其他用途**（如 ECS 的 NVIDIA 卡、或折算成别的服务），
+实在不行就走"本地 4060 缩减规模训练 + 诚实写明配置差距"的路线 ——
+**平台能展示 + 有一组真实指标 > 训练规模做全**。
+
+---
+
+## 9. 待决事项（需要组内拍板）
+
+- [ ] **代金券适用产品**（控制台确认）：能否开 ECS（NVIDIA 卡）？还是只有昇腾 ModelArts？
+      → 决定 W4–W5 的训练路线，**W3 结束前必须有答案**
+- [ ] **代金券有效期** → 训练排期必须卡在有效期内
+- [ ] **采样率方案**：~~L1 用 22.05k~~ → **已定：全程 16 kHz**（AutoVC 官方权重就是 16k）
+- [ ] **说话人编码器选型**：
+      - L1 用 AutoVC 自带 `D_VECTOR`（80 维输入，与官方权重配套）
+      - 最终系统用论文脚注的 **GE2E / RTC**（40 维输入）
+      → **建议就按此执行，待组内确认**
 - [ ] **组号与选题名称** → 确定后统一改方法 ID、目录名、README 标题
 - [ ] **MOS 听测人数**：论文是 50 人，我们做多少？（如实写明即可）
-- [ ] **W4–W5 是否真的交换主责**（W6 起交换是必须的，W4–W5 是否也换需组内定）
+- [ ] **W4–W5 是否也交换主责**（W6 起交换是必须的）

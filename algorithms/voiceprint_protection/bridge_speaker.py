@@ -1,49 +1,48 @@
-"""GE2E 说话人编码器桥接层 —— 成员 B 主责（任务板 W2-D3-4）。
+"""桥接：说话人编码器 —— "体检仪"，把声音扫描成身份卡。
 
-【它解决什么】
-Stage 1 的解码器、Stage 2 的防御损失 L_de、以及全部评测指标，
-都要用到说话人嵌入 h（256 维）。h 从哪来？
-→ **GE2E**（论文脚注 2 直接引用的 Real-Time-Voice-Cloning 仓库里的 `SpeakerEncoder`）。
+【它在做什么（比喻）】
+你把一段录音递给体检仪，它扫描后给你一张 256 个数字组成的"身份卡"。
+同一段内容换个人说，身份卡就变了；同一个人说不同的话，身份卡基本不变。
 
-本模块把那个"外部预训练组件"包成全项目统一的入口：
+【★ 本文件有两套实现，作用不同，请勿混用】
+| | `SpeakerEncoderBridge`（成员 A 写） | `SpeakerBridge`（成员 B 写） |
+|---|---|---|
+| 后端 | AutoVC 自带 D_VECTOR（`3000000-BL.ckpt`） | **论文脚注引用的 GE2E**（上游 Real-Time-Voice-Cloning） |
+| 输入 | **mel (T, 80)**（AutoVC 的 spmel 链） | **原始波形**（自己算 40 维 mel） |
+| 权重 | AutoVC 官方 ckpt | HuggingFace `CorentinJ/SV2TTS` 的 `encoder.pt` |
+| 谁在用 | `infer.py` 的默认路线 | 论文路线 / 评测 |
 
-    wav (任意采样率) ──► bridge_speaker.embed(wav) ──► h (256,) L2 归一化
+两套的**权重不能互相加载**（输入维度与结构都不同）：
+`SpeakerEncoderBridge` 的 `autovc_bl` 吃 80 维 mel，
+`SpeakerBridge` 走上游自己的 40 维线性 mel。
 
-【★ 上游有两种布局，本模块都支持】
-2026-03 之前的"旧版"：平铺文件 `speaker_encoder.py` + `voice_encoder.py` + `preprocess.py`，
-权重是仓库里的 `pretrained.pt`（约 30 MB）。
-2026-03 之后的"新版"（**当前上游 master**）：包结构 `encoder/`（model / inference / audio /
-params_data / params_model），权重**不再随仓库分发**，改从 Hugging Face 下载
-`CorentinJ/SV2TTS` 的 `encoder.pt`（17,090,379 字节）。
+【为什么 B 的 GE2E 不是"重写一遍"】
+上游 RTC 在 2026-03 重构过，现在权重在 HuggingFace 上、模型在 `encoder/` 包里，
+而且**内部 mel 约定变了**（不再取 log）。所以正确做法是**直接调用上游的代码**，
+而不是照着论文/旧版重写 —— 那会得到"能跑但全错"的嵌入。
+`SpeakerBridge` 因此只做三件事：定位上游仓库、加载权重、调用
+`encoder.inference.embed_utterance()`。上游那套"切片 → 逐片编码 → 平均 → 归一化"
+的逻辑原样保留。
 
-新版还改了 GE2E 内部的一个关键约定：**mel 不再做 log + 均值方差归一化，直接用线性 mel**
-（`encoder/audio.py::wav_to_mel_spectrogram`，注释原文 "Note: this not a log-mel spectrogram"）。
-所以**不能拿旧版的 mel 代码去喂新版的权重** —— 必须用上游自己的函数。
+上游的三处 API 漂移（都已适配，见 `SpeakerBridge` 内部注释）：
+`load_model` 的参数类型、librosa 0.10 的仅关键字参数、mel 约定变更。
 
-本模块的做法：**优先调用上游自己的代码**（`encoder.inference.embed_utterance`），
-不复制、不重写它那套"切片 → 逐片编码 → 平均 → 归一化"的逻辑。
+【接口细节见】docs/notes/ge2e_interface.md（成员 B 核实）
+【官方实现（third_party/AutoVC/model_bl.py）】
+    class D_VECTOR(nn.Module):
+        def __init__(self, num_layers=3, dim_input=80, dim_cell=768, dim_emb=256):
+            self.lstm = nn.LSTM(input_size=dim_input, hidden_size=dim_cell,
+                                num_layers=num_layers, batch_batch_first=True)
+            self.embedding = nn.Linear(dim_cell, dim_emb)
+        def forward(self, x):                      # x: (B, T, dim_input)
+            lstm_out, _ = self.lstm(x)
+            embeds = self.embedding(lstm_out[:, -1, :])   # 取最后一个时间步
+            return embeds.div(embeds.norm(p=2, dim=-1, keepdim=True))   # L2 归一化
 
-【权重从哪来】
-    https://huggingface.co/CorentinJ/SV2TTS  →  encoder.pt（17,090,379 字节）
-用 `scripts/download_encoder_weights.py` 下载（支持国内 hf-mirror 加速）。
-
-【关于"输入约定"的四个问题（任务板 D2-4）】
-本模块**不靠记忆**回答这四个问题，而是运行时从上游代码里读出来（见 `describe()`）：
-  Q1 输入采样率？          ← `encoder/params_data.py::sampling_rate`
-  Q2 内部 mel 几维/什么参数？← `encoder/params_data.py` 的 mel_window_length / mel_window_step
-                              + `encoder/audio.py::wav_to_mel_spectrogram`
-  Q3 输出 h 是否已归一化？  ← `encoder/model.py::forward` 里显式 L2 归一化；运行时再实测模长
-  Q4 输出形状？            ← `encoder/params_model.py::model_embedding_size`
-
-【安全提示】
-上游仓库是从网上拉下来的**第三方代码**，本模块会 import 并执行它。因此：
-  * 务必在 third_party/README.md 里**记录 commit hash**，锁定版本；
-  * 运行时**不要把工作目录切到上游仓库里面**（避免误执行它的 demo 脚本）；
-  * 建议用 `python -I` 运行本项目脚本，减少被污染的解释器环境。
-
-【用法】
-    conda activate vpp
-    python algorithms/voiceprint_protection/bridge_speaker.py --wav 某条音频.wav
+【官方输入约定（third_party/AutoVC/make_metadata.py）】
+    melsp = torch.from_numpy(tmp[np.newaxis, left:left+len_crop, :]).cuda()  # (1, 128, 80)
+    emb = C(melsp)          # -> (1, 256)
+即：**输入是 128 帧（2 秒 @16kHz/hop256）× 80 维的 mel**，取最后时间步的隐藏态。
 """
 
 from __future__ import annotations
@@ -54,146 +53,136 @@ import os
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+import numpy as np
 
-import paths  # noqa: E402
+import config
+import paths
 
 try:
-    import numpy as np
     import torch
 
     import audio_utils  # noqa: E402
-    import config  # noqa: E402
 except ImportError as error:  # 多半是忘了 conda activate vpp
     paths.print_env_hint(error)
     raise SystemExit(1) from error
 
+# 官方 make_metadata.py 里的 len_crop
+LEN_CROP = 128
+
 # GE2E 只吃 16 kHz（它的权重就是 16 kHz 训的，改采样率权重直接失效）
 GE2E_SAMPLE_RATE = 16000
 
-# 上游仓库的可能位置（按优先级）
-RTC_DIR_CANDIDATES = (
-    "third_party/RTC",
-    "third_party/Real-Time-Voice-Cloning",
-    "algorithms/voiceprint_protection/third_party/RTC",
-)
+
+# ===========================================================================
+# A 的实现：AutoVC 自带的 D_VECTOR（mel 80 维进）
+# ===========================================================================
+class SpeakerEncoderBridge:
+    """说话人编码器的薄封装（AutoVC 官方链）。"""
+
+    def __init__(self, checkpoint: str | Path | None = None, device: str | None = None,
+                 encoder: str = "autovc_bl"):
+        self.device = torch.device(
+            device or ("cuda" if torch.cuda.is_available() else "cpu")
+        )
+        self.encoder_name = encoder
+
+        # ★ 论文路线：交给上游 GE2E（下面 SpeakerBridge 的实现）。
+        #   这不是"多写一个后端"，而是**修正**：原先这个分支按旧版 RTC 的
+        #   pretrained.pt 加载权重，而 2026-03 上游重构后那个文件已不存在，
+        #   权重改成 HuggingFace 的 encoder.pt（结构与算法也不同）。
+        if encoder == "ge2e_rtc":
+            self._upstream = SpeakerBridge(device=str(self.device))
+            self.checkpoint_path = self._upstream.weights_path
+            self.model = None
+            return
+
+        paths.ensure_import_paths()
+        from model_bl import D_VECTOR
+
+        settings = config.SPEAKER_ENCODERS[encoder]
+        self.model = D_VECTOR(
+            num_layers=settings["num_layers"],
+            dim_input=settings["dim_input"],
+            dim_cell=settings["dim_cell"],
+            dim_emb=settings["dim_emb"],
+        )
+        self.model.eval().to(self.device)
+
+        key = "speaker_bl" if encoder == "autovc_bl" else "ge2e_rtc"
+        self.checkpoint_path = Path(checkpoint) if checkpoint else paths.weight_path(key)
+        if not self.checkpoint_path.exists():
+            raise FileNotFoundError(
+                f"找不到说话人编码器权重：{self.checkpoint_path}\n"
+                "AutoVC 的 3000000-BL.ckpt 请从官方 README 的 IBM Box 链接下载，"
+                "放到：" + str(paths.WEIGHTS_DIR)
+            )
+        checkpoint_data = torch.load(self.checkpoint_path, map_location="cpu")
+        if "model_b" in checkpoint_data:
+            # 官方 make_metadata.py 的写法：键名前 7 个字符是 "module."（DataParallel 包装）
+            state = {key[7:]: value for key, value in checkpoint_data["model_b"].items()}
+        elif "model" in checkpoint_data:
+            state = checkpoint_data["model"]
+        else:
+            state = checkpoint_data
+        self.model.load_state_dict(state)
+        self.model.to(self.device)
+
+    # -- 对外 ------------------------------------------------------------
+    def embed(self, mel: np.ndarray, crop: int = LEN_CROP, sample_rate: int = 16000) -> np.ndarray:
+        """mel (T, 80) -> 说话人嵌入 (256,)，已 L2 归一化。
+
+        官方做法是在时间轴上随机截取 `crop` 帧；
+        为了可复现，这里固定取**居中**的 crop 帧（seed 固定的随机截取也可）。
+
+        ⚠️ **当 encoder="ge2e_rtc" 时，第一个参数是原始波形而不是 mel**
+        （上游 GE2E 自己算它的 40 维 mel）。
+        """
+        if self.encoder_name == "ge2e_rtc":
+            return self._upstream.embed(mel, sample_rate)
+
+        mel = np.asarray(mel, dtype=np.float32)
+        length = mel.shape[0]
+        if length >= crop:
+            start = (length - crop) // 2
+            window = mel[start:start + crop]
+        else:
+            # 不足 crop 帧时补零（官方数据每条都有 128 帧以上）
+            window = np.pad(mel, ((0, crop - length), (0, 0)), "constant")
+        tensor = torch.from_numpy(window[None, :, :]).to(self.device)
+        with torch.no_grad():
+            embedding = self.model(tensor)
+        return embedding[0].cpu().numpy()
+
+    def describe(self) -> str:
+        if self.encoder_name == "ge2e_rtc":
+            return (
+                "说话人编码器桥接就绪（论文路线：上游 GE2E）\n"
+                f"  权重    : {self.checkpoint_path}\n"
+                "  编码器  : ge2e_rtc（输入是原始波形，内部算 40 维线性 mel）\n"
+                f"  设备    : {self.device}\n"
+                "  输出    : (256,) 已 L2 归一化"
+            )
+        return (
+            "说话人编码器桥接就绪\n"
+            f"  权重    : {self.checkpoint_path}\n"
+            f"  编码器  : {self.encoder_name}"
+            f"（输入 {config.SPEAKER_ENCODERS[self.encoder_name]['dim_input']} 维 mel）\n"
+            f"  设备    : {self.device}\n"
+            "  输出    : (256,) 已 L2 归一化"
+        )
 
 
-class SpeakerBridgeError(RuntimeError):
-    """找不到 GE2E 权重或加载失败时的统一报错。"""
-
-
-# ---------------------------------------------------------------------------
-# 定位上游仓库
-# ---------------------------------------------------------------------------
-def _repo_root() -> Path:
-    return Path(__file__).resolve().parent.parent.parent
-
-
-def _looks_like_rtc(path: Path) -> bool:
-    """这个目录像不像 RTC 仓库（两种布局都认）。"""
-    if not path.is_dir():
-        return False
-    new_layout = (path / "encoder" / "inference.py").exists()
-    old_layout = (path / "speaker_encoder.py").exists() or (path / "voice_encoder.py").exists()
-    return new_layout or old_layout
-
-
-def find_rtc_dir(explicit: str | None = None) -> Path:
-    """找到 Real-Time-Voice-Cloning 仓库目录。
-
-    优先级：命令行参数 > 环境变量 VPP_RTC_DIR > 仓库内常见位置。
-    """
-    candidates: list[Path] = []
-    if explicit:
-        candidates.append(Path(explicit))
-    env_dir = os.environ.get("VPP_RTC_DIR")
-    if env_dir:
-        candidates.append(Path(env_dir))
-
-    root = _repo_root()
-    for relative in RTC_DIR_CANDIDATES:
-        candidates.append(root / relative)
-        candidates.append(Path(relative))
-
-    for candidate in candidates:
-        if _looks_like_rtc(candidate):
-            return candidate.resolve()
-
-    raise SpeakerBridgeError(
-        "找不到 Real-Time-Voice-Cloning 仓库。\n"
-        "请先执行（任务板 W2-D1-3）：\n"
-        "    git clone https://github.com/CorentinJ/Real-Time-Voice-Cloning.git third_party/RTC\n"
-        "国内可换成 gitee 镜像：\n"
-        "    git clone --depth 1 https://gitee.com/mirrors/real-time-voice-cloning.git third_party/RTC\n"
-        "或用 --rtc-dir / 环境变量 VPP_RTC_DIR 指定路径。\n"
-        f"已尝试：{', '.join(str(c) for c in candidates)}"
-    )
-
-
-def _is_html_error_page(path: Path) -> bool:
-    """判断文件是不是"下载失败留下的 HTML 错误页"。"""
-    try:
-        with path.open("rb") as handle:
-            head = handle.read(200).lstrip().lower()
-    except OSError:
-        return False
-    return head.startswith(b"<!doctype") or head.startswith(b"<html")
-
-
-# ---------------------------------------------------------------------------
-# 权重定位
-# ---------------------------------------------------------------------------
-def _candidate_weight_files(rtc_dir: Path) -> list[Path]:
-    """按优先级列出可能的权重文件位置。"""
-    models_dir = paths.models_dir()
-    return [
-        models_dir / "default" / "encoder.pt",   # 推荐：download_encoder_weights.py 的输出
-        models_dir / "encoder.pt",
-        rtc_dir / "encoder.pt",
-        rtc_dir / "saved_models" / "default" / "encoder.pt",
-        rtc_dir / "pretrained.pt",               # 旧版布局
-    ]
-
-
-def find_weights(rtc_dir: Path, explicit: str | None = None) -> Path:
-    """找到 GE2E 的权重文件。"""
-    if explicit:
-        path = Path(explicit)
-        if not path.exists():
-            raise SpeakerBridgeError(f"指定的权重文件不存在：{path}")
-        return path
-
-    for candidate in _candidate_weight_files(rtc_dir):
-        if candidate.exists() and candidate.stat().st_size > 1024:
-            if _is_html_error_page(candidate):
-                raise SpeakerBridgeError(
-                    f"{candidate} 是一个 HTML 错误页，不是权重文件！\n"
-                    "（通常是下载被拦或 404 之后把错误页面存成了 .pt）\n"
-                    "请删掉它，然后重新下载：\n"
-                    "    python algorithms/voiceprint_protection/scripts/download_encoder_weights.py"
-                )
-            return candidate
-
-    searched = "\n".join(f"    {c}" for c in _candidate_weight_files(rtc_dir))
-    raise SpeakerBridgeError(
-        "找不到 GE2E 的权重文件（encoder.pt）。\n"
-        "**新版上游不再把权重放在仓库里**，需要单独下载（约 17 MB）：\n"
-        "\n"
-        "    python algorithms/voiceprint_protection/scripts/download_encoder_weights.py\n"
-        "\n"
-        "国内网络慢可以先设镜像：\n"
-        "    set HF_ENDPOINT=https://hf-mirror.com\n"
-        "\n"
-        f"已尝试：\n{searched}"
-    )
-
-
-# ---------------------------------------------------------------------------
-# 桥接层
-# ---------------------------------------------------------------------------
+# ===========================================================================
+# B 的实现：论文脚注引用的 GE2E（上游 Real-Time-Voice-Cloning）
+# ===========================================================================
 class SpeakerBridge:
-    """GE2E 说话人编码器的统一入口（同时支持新版 / 旧版上游布局）。"""
+    """GE2E 说话人编码器的统一入口（wav -> h (256,)）。
+
+    【为什么直接调上游，而不是重写】
+    上游的 mel 约定、切片策略、归一化都在 2026-03 改过，
+    照着旧论文重写会得到"能跑但全错"的嵌入。
+    这里只做：定位仓库 → 加载权重 → 调 `encoder.inference.embed_utterance()`。
+    """
 
     def __init__(
         self,
@@ -202,15 +191,9 @@ class SpeakerBridge:
         weights_path: str | None = None,
     ):
         self.rtc_dir = find_rtc_dir(rtc_dir)
-        requested = device or ("cuda" if torch.cuda.is_available() else "cpu")
-        self.device = torch.device(requested)
-        if self.device.type == "cuda" and not torch.cuda.is_available():
-            # 装了 CPU 版 torch 时不要在这里就炸：推理用不到 GPU。
-            # 只有 Stage 1/2 训练才真的需要 GPU（放云上，见环境文档 §2.3）。
-            print("  [提示] 指定了 CUDA，但当前 torch 是 CPU 版"
-                  "（torch.cuda.is_available() == False），自动改用 CPU。")
-            print("         推理不需要 GPU；只有训练才需要，按环境文档 §2.3 换 CUDA 版。")
-            self.device = torch.device("cpu")
+        self.device = torch.device(
+            device or ("cuda" if torch.cuda.is_available() else "cpu")
+        )
         self.layout = "new" if (self.rtc_dir / "encoder" / "inference.py").exists() else "old"
 
         self.weights_path = find_weights(self.rtc_dir, weights_path)
@@ -299,7 +282,7 @@ class SpeakerBridge:
         return encoder
 
     # -- 对外 ------------------------------------------------------------
-    def embed(self, wav: np.ndarray, sample_rate: int) -> torch.Tensor:
+    def embed(self, wav: np.ndarray, sample_rate: int) -> np.ndarray:
         """波形 → 说话人嵌入 h (256,)。
 
         参数
@@ -309,7 +292,7 @@ class SpeakerBridge:
 
         返回
         ----
-        torch.Tensor，形状 (256,)，**已 L2 归一化**（接口契约第 5 条）。
+        numpy (256,)，**已 L2 归一化**（接口契约第 5 条）。
         """
         wav = np.asarray(wav, dtype=np.float32)
         if len(wav) < GE2E_SAMPLE_RATE // 10:
@@ -328,18 +311,18 @@ class SpeakerBridge:
             wav = audio_utils.resample(wav, sample_rate, GE2E_SAMPLE_RATE)
 
         raw = self._embed_raw(wav, GE2E_SAMPLE_RATE)
-        return audio_utils.normalize_l2(torch.as_tensor(raw, dtype=torch.float32))
+        return audio_utils.normalize_l2(torch.as_tensor(raw, dtype=torch.float32)).numpy()
 
-    def embed_path(self, path: str | Path) -> torch.Tensor:
+    def embed_path(self, path: str | Path) -> np.ndarray:
         """音频文件 → 说话人嵌入 h (256,)。"""
         wav = audio_utils.load_audio(path)  # 保持原生采样率
         import soundfile as sf
 
         return self.embed(wav, sf.info(str(path)).samplerate)
 
-    def embed_batch(self, waves: list[np.ndarray], sample_rates: list[int]) -> torch.Tensor:
+    def embed_batch(self, waves: list[np.ndarray], sample_rates: list[int]) -> np.ndarray:
         """一批波形 → (N, 256)。"""
-        return torch.stack([self.embed(w, sr) for w, sr in zip(waves, sample_rates)])
+        return np.stack([self.embed(w, sr) for w, sr in zip(waves, sample_rates)])
 
     def _embed_raw(self, wav: np.ndarray, sample_rate: int) -> np.ndarray:
         """调用上游模型拿到嵌入。
@@ -378,7 +361,7 @@ class SpeakerBridge:
             result = encoder(mel)
         return _to_numpy_1d(result)
 
-    def _compute_mel_old(self, wav_16k: np.ndarray) -> torch.Tensor:
+    def _compute_mel_old(self, wav_16k: np.ndarray) -> np.ndarray:
         """旧版布局的 40 维 mel（log + 均值方差归一化）。仅旧版使用。"""
         import librosa
 
@@ -445,6 +428,100 @@ class SpeakerBridge:
         return info
 
 
+class SpeakerBridgeError(RuntimeError):
+    """找不到 GE2E 权重或加载失败时的统一报错。"""
+
+
+# ---------------------------------------------------------------------------
+# 定位上游仓库与权重
+# ---------------------------------------------------------------------------
+def _looks_like_rtc(path: Path) -> bool:
+    """这个目录像不像 RTC 仓库（两种布局都认）。"""
+    if not path.is_dir():
+        return False
+    new_layout = (path / "encoder" / "inference.py").exists()
+    old_layout = (path / "speaker_encoder.py").exists() or (path / "voice_encoder.py").exists()
+    return new_layout or old_layout
+
+
+def find_rtc_dir(explicit: str | None = None) -> Path:
+    """找到 Real-Time-Voice-Cloning 仓库目录。
+
+    优先级：命令行参数 > 环境变量 VPP_RTC_DIR > paths.RTC_DIR（已解析好）> 常见位置。
+    """
+    candidates: list[Path] = []
+    if explicit:
+        candidates.append(Path(explicit))
+    env_dir = os.environ.get("VPP_RTC_DIR")
+    if env_dir:
+        candidates.append(Path(env_dir))
+    candidates.append(paths.RTC_DIR)
+
+    for candidate in candidates:
+        if _looks_like_rtc(candidate):
+            return candidate.resolve()
+
+    raise SpeakerBridgeError(
+        "找不到 Real-Time-Voice-Cloning 仓库。\n"
+        "请先执行（任务板 W2-D1-3）：\n"
+        "    git clone https://github.com/CorentinJ/Real-Time-Voice-Cloning.git third_party/RTC\n"
+        "国内可换成 gitee 镜像：\n"
+        "    git clone --depth 1 https://gitee.com/mirrors/real-time-voice-cloning.git third_party/RTC\n"
+        "或用 --rtc-dir / 环境变量 VPP_RTC_DIR 指定路径。\n"
+        f"已尝试：{', '.join(str(c) for c in candidates)}"
+    )
+
+
+def _is_html_error_page(path: Path) -> bool:
+    """判断文件是不是"下载失败留下的 HTML 错误页"。"""
+    try:
+        with path.open("rb") as handle:
+            head = handle.read(200).lstrip().lower()
+    except OSError:
+        return False
+    return head.startswith(b"<!doctype") or head.startswith(b"<html")
+
+
+def find_weights(rtc_dir: Path, explicit: str | None = None) -> Path:
+    """找到 GE2E 的权重文件。"""
+    if explicit:
+        path = Path(explicit)
+        if not path.exists():
+            raise SpeakerBridgeError(f"指定的权重文件不存在：{path}")
+        return path
+
+    candidates = [
+        paths.models_dir() / "default" / "encoder.pt",   # download_encoder_weights.py 的输出
+        paths.models_dir() / "encoder.pt",
+        rtc_dir / "encoder.pt",
+        rtc_dir / "saved_models" / "default" / "encoder.pt",
+        rtc_dir / "pretrained.pt",                       # 旧版布局
+    ]
+    for candidate in candidates:
+        if candidate.exists() and candidate.stat().st_size > 1024:
+            if _is_html_error_page(candidate):
+                raise SpeakerBridgeError(
+                    f"{candidate} 是一个 HTML 错误页，不是权重文件！\n"
+                    "（通常是下载被拦或 404 之后把错误页面存成了 .pt）\n"
+                    "请删掉它，然后重新下载：\n"
+                    "    python algorithms/voiceprint_protection/scripts/download_encoder_weights.py"
+                )
+            return candidate
+
+    searched = "\n".join(f"    {c}" for c in candidates)
+    raise SpeakerBridgeError(
+        "找不到 GE2E 的权重文件（encoder.pt）。\n"
+        "**新版上游不再把权重放在仓库里**，需要单独下载（约 17 MB）：\n"
+        "\n"
+        "    python algorithms/voiceprint_protection/scripts/download_encoder_weights.py\n"
+        "\n"
+        "国内网络慢可以先设镜像：\n"
+        "    set HF_ENDPOINT=https://hf-mirror.com\n"
+        "\n"
+        f"已尝试：\n{searched}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # 小工具
 # ---------------------------------------------------------------------------
@@ -487,11 +564,21 @@ def _filter_kwargs(callable_obj, **kwargs):
     return {key: value for key, value in kwargs.items() if key in allowed}
 
 
+def _to_numpy_1d(value) -> np.ndarray:
+    """把上游返回的 tensor / ndarray / list 统一成 (D,) 的 float32 numpy。"""
+    if isinstance(value, torch.Tensor):
+        value = value.detach().cpu().numpy()
+    value = np.asarray(value, dtype=np.float32)
+    if value.ndim > 1:
+        value = value.reshape(-1)
+    return value
+
+
 def patch_upstream_mel(encoder_audio, encoder_params) -> bool:
     """把上游的 `wav_to_mel_spectrogram` 换成 librosa 0.10 兼容版。
 
     **为什么必须换**
-    上游按 librosa **0.9.2** 写的（见其 pyproject.toml）：
+    上游按 librosa **0.9.2** 写的：
 
         librosa.feature.melspectrogram(wav, sampling_rate, n_fft=..., hop_length=..., n_mels=...)
 
@@ -509,8 +596,6 @@ def patch_upstream_mel(encoder_audio, encoder_params) -> bool:
     （`center=True, power=2.0, amin=1e-10, fmin=0, fmax=sr/2, htk=False, norm='slaney'`），
     同样的 n_fft / hop / n_mels（从上游 `params_data` 现场读，不写死）。
     所以算出来的 mel 与上游本意**完全一致**。
-
-    返回 True 表示做了替换。
     """
     import librosa
 
@@ -531,16 +616,6 @@ def patch_upstream_mel(encoder_audio, encoder_params) -> bool:
 
     encoder_audio.wav_to_mel_spectrogram = wav_to_mel_spectrogram
     return True
-
-
-def _to_numpy_1d(value) -> np.ndarray:
-    """把上游返回的 tensor / ndarray / list 统一成 (D,) 的 float32 numpy。"""
-    if isinstance(value, torch.Tensor):
-        value = value.detach().cpu().numpy()
-    value = np.asarray(value, dtype=np.float32)
-    if value.ndim > 1:
-        value = value.reshape(-1)
-    return value
 
 
 # ---------------------------------------------------------------------------
@@ -584,16 +659,14 @@ def main() -> int:
         embedding = bridge.embed_path(wav_path)
         embeddings.append(embedding)
         print(f"  {Path(wav_path).name:<28} h.shape = {tuple(embedding.shape)}  "
-              f"|h| = {float(embedding.norm()):.6f}")
+              f"|h| = {float(np.linalg.norm(embedding)):.6f}")
 
     print(f"\n  Q3 输出是否已 L2 归一化：实测模长 = "
-          f"{float(embeddings[0].norm()):.6f}（应为 1.000000）")
+          f"{float(np.linalg.norm(embeddings[0])):.6f}（应为 1.000000）")
     print("     → 本模块出口还会再归一化一次（幂等，无副作用）。")
 
     if len(embeddings) >= 2:
-        similarity = float(torch.nn.functional.cosine_similarity(
-            embeddings[0].unsqueeze(0), embeddings[1].unsqueeze(0)
-        ))
+        similarity = float(np.dot(embeddings[0], embeddings[1]))
         print(f"\n  两段音频的余弦相似度 = {similarity:.4f}")
         print("     （同一人说话通常 > 0.7，不同人通常 < 0.5；数值异常先查权重是否加载对）")
 
