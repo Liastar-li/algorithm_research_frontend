@@ -170,7 +170,11 @@ def check_packages():
         "fastapi", "uvicorn", "python_multipart", "pydantic", "requests",
         "huggingface_hub", "tokenizers", "ctranslate2", "faster_whisper",
         "jiwer", "numba", "llvmlite",
+        "sklearn",          # GE2E 的 encoder/model.py import 时就要它
+        "torch", "torchaudio",
     ]
+    # import 名与 pip 包名不一致的
+    package_names = {"sklearn": "scikit-learn"}
     missing = []
     versions = {}
     for name in names:
@@ -182,7 +186,7 @@ def check_packages():
                 try:
                     from importlib.metadata import version as _meta_version
 
-                    version = _meta_version(name.replace("_", "-"))
+                    version = _meta_version(package_names.get(name, name.replace("_", "-")))
                 except Exception:  # noqa: BLE001
                     version = "unknown"
             versions[name] = str(version)
@@ -280,7 +284,9 @@ def fingerprint():
     except ImportError:
         parts.append("torch=MISSING")
 
-    for name in ["numpy", "librosa", "scipy", "faster_whisper", "fastapi"]:
+    # ⚠️ 指纹里加入 sklearn 的原因：上游 GE2E 的 encoder/model.py import 时就要它，
+    #    少装一个的话"环境一致"但推理链起不来。加进来能让两人比对指纹时立刻发现。
+    for name in ["numpy", "librosa", "scipy", "faster_whisper", "fastapi", "sklearn"]:
         try:
             module = __import__(name)
             parts.append(f"{name}={getattr(module, '__version__', 'unknown')}")

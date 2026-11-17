@@ -110,6 +110,16 @@ librosa==0.10.2.post1    # 音频读取、mel、STFT
 soundfile==0.12.1        # wav 读写（比 librosa 的 io 更少依赖）
 soxr==0.3.7              # 高质量重采样，librosa resample 可选后端
 
+# --- 第三方组件的依赖（GE2E 说话人编码器）---
+# ⚠️ 上游 Real-Time-Voice-Cloning 的 encoder/model.py 在 import 时就要
+#    `from sklearn.metrics import roc_curve`，所以**必须装 scikit-learn**，
+#    否则 `import encoder.inference` 直接 ImportError，桥接层起不来。
+#    1.5.2 是同时支持 Python 3.9 与 numpy<2 的最后一个稳定系列。
+scikit-learn==1.5.2
+#
+# 可选（不装也能跑，只是静音不会被裁掉，嵌入质量略有差别）：
+#   webrtcvad==2.0.10     # 上游用来裁长静音；缺失时上游会自己 try/except 跳过
+
 # --- 训练与可视化 ---
 tqdm==4.66.4
 tensorboard==2.16.2      # torch 2.4 要求 tensorboard >=2.14,<2.17
