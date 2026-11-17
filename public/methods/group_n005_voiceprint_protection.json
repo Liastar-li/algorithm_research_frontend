@@ -1,0 +1,24 @@
+{
+  "schema_version": "1.0",
+  "id": "group_n005_voiceprint_protection",
+  "title": "基于人机感知差异解耦的隐式声纹保护",
+  "english": "Imperceptible Voiceprint Protection via Human-Machine Perception Discrepancy",
+  "category": "主动防御",
+  "summary": "在说话人嵌入空间加入人耳不可感知的扰动，使针对该音频的 AI 声音克隆显著失效，同时人耳听感与可识别性基本不变。",
+  "description": "复现自论文《Imperceptible Voiceprint Protection via Human-Machine Perception Discrepancy Feature Disentanglement》（Interspeech 2026, pp. 5259–5263, DOI: 10.21437/Interspeech.2026-105）。论文未提供官方代码，本方法基于公开组件（AutoVC、GE2E 说话人编码器、HiFi-GAN 声码器）自行搭建，未使用作者代码。原理：先训练解耦-重建网络把语音拆成内容码与说话人嵌入，再在 256 维说话人嵌入上加一个人耳听不到、但克隆系统能听出来的扰动（h_adv = h + α·δ，α = 0.10），最后重新合成音频。适用范围：16 kHz 单声道语音；仅对使用说话人嵌入的克隆系统有效。已知限制：当前为 L1 推理链版本，扰动由随机方向代替训练好的生成器 G，尚未训练防御模型，因此指标不代表论文水平；模型与指标随服务版本更新。",
+  "team": "第 N005 组",
+  "version": "0.1.0",
+  "runtime": "独立算法服务 · CPU/GPU",
+  "inputs": [
+    { "name": "input_file", "label": "原始语音", "kind": "audio", "accept": ["audio/wav"], "required": true, "max_mb": 50 }
+  ],
+  "parameters": [
+    { "name": "alpha", "label": "扰动强度 α", "type": "number", "default": 0.1, "min": 0, "max": 1, "step": 0.01, "required": true, "help": "论文取值 0.10。值越大克隆越难，但音质可能下降。" },
+    { "name": "attack_mode", "label": "攻击者克隆对比", "type": "select", "default": "clone", "options": [ { "value": "clone", "label": "同时输出攻击者克隆音（推荐，可直观对比）" }, { "value": "none", "label": "只输出保护后音频" } ], "help": "模拟攻击者用说话人编码器提取嵌入后再克隆，输出对比音频。" },
+    { "name": "report", "label": "返回评测报告", "type": "boolean", "default": true, "help": "同时返回评测报告 JSON，含 Sim_prot、Sim_clone、DSR 等指标。" }
+  ],
+  "examples": [
+    { "title": "保护前后与攻击者克隆对比", "description": "左侧为原始语音，右侧为保护后语音。未防御时攻击者克隆音与原说话人高度相似；施加保护后克隆音与原说话人明显不同，而保护后音频本身听感与可识别性基本不变。", "input": { "src": "samples/group_n005_voiceprint_protection/input.wav", "kind": "audio", "label": "原始语音" }, "output": { "src": "samples/group_n005_voiceprint_protection/output.wav", "kind": "audio", "label": "保护后语音" }, "parameters": { "alpha": 0.1, "attack_mode": "clone", "report": true } }
+  ],
+  "adapter": { "type": "http", "endpoint": "http://127.0.0.1:8000/process" }
+}
