@@ -39,11 +39,111 @@
 |---|---|
 | 环境（conda `vpp` + torch 2.4.1+cu121 + GPU） | ✅ 已就绪 |
 | mel 参数契约（`scripts/test_audio_utils.py`，35 项断言） | ✅ 已锁定 |
-| 环境指纹 | `36370ba987e72a4b`（两人必须一致） |
+| 环境指纹 | ⬜ **待重新生成**（新增了 `scikit-learn==1.5.2`，指纹算法已跟着改）—— 两人装完后重跑 `check_env.py` 比对 |
 | `config.py` / `audio_utils.py` | ✅ 已写好 |
 | **当前阶段** | **W2 · 指南第 3 步 + 第 4 步** |
 | **下一个里程碑** | **M1：L1 推理链跑通**（产出保护后音频） |
 | **待补依赖** | `python-multipart` 升到 0.0.20（起服务前必须） |
+
+### 0.4 本轮进展（成员 B · 2026-11-17）
+
+**已产出（代码/文档写完，等有网络与数据后执行）**
+
+| 任务 | 产出 | 状态 |
+|---|---|---|
+| D2-5 / D3-5 | `scripts/prepare_data.py`（VCTK → 16 kHz + 80/10/20 划分 + 三条硬要求自动自检） | ✅ 代码完成，待跑 |
+| D1-5 | `scripts/survey_vctk.py`（自动生成 `docs/notes/vctk_layout.md`） | ✅ 代码完成，待跑 |
+| D2-4 | `docs/notes/ge2e_interface.md`（四个问题的答案 + **运行时自证方法**） | ✅ **已收口**（2026-11-17 实测通过，实测记录已填入文档） |
+| D3-4 | `bridge_speaker.py`（GE2E → `h (256,)`，L2 归一化；运行时从上游代码读接口） | ✅ **已跑通**（新版上游布局，权重加载正常，`\|h\|=1.000000`） |
+| D3-3 | `scripts/smoke_test.py`（端到端冒烟；`infer.py` 未就绪时只验证说话人分支） | ✅ 代码完成 |
+| D4-4 / W3-P4 | `scripts/make_sample.py`（从测试集取样例 + 写来源与许可说明） | ✅ **输入已生成**（`public/samples/.../input.wav`，测试集说话人 p228，16 kHz 单声道 PCM_16）；**输出待 A 的 `infer.py`** |
+| D3-1 | `docs/interface-contract.md`（**草案 v0.1，待成员 A 签字**） | ⬜ 待 A 确认 |
+| D1-6 | `third_party/README.md`（四个组件的 URL/commit/许可登记表） | ⬜ 待回填 commit |
+| W3-P1 | `public/methods/group_n005_voiceprint_protection.json` | ⬜ 待 A review |
+
+**被卡住的任务（需要网络/数据，本机沙箱无法执行）**
+
+| 任务 | 卡在哪 | 解法 |
+|---|---|---|
+| D1-3 | 无法 `git clone`（沙箱禁网） | 见 [`docs/notes/download_vctk.md`](../docs/notes/download_vctk.md) §1 |
+| D1-4 | 无法 `curl` 下载 VCTK（11 GB） | 同上 §2 |
+| D2-4 / D3-4 / D4-3 | 依赖上面两个 | 跑完 §3 的三条命令即可 |
+
+**注意（成员 A 必看）**
+
+1. **方法 ID 必须全小写**：平台契约的标识符正则 `/^[a-z][a-z0-9_]{1,63}$/` 不接受大写，
+   所以是 `group_n005_...` 而不是 `group_N005_...`。组号定下来后统一替换。
+2. **`infer.py` 的签名**已写进 `docs/interface-contract.md` §4，`scripts/smoke_test.py` 直接依赖它：
+   `protect(wav_path, alpha=0.10, output_path=None) -> dict`。
+3. **`index.json` 还没追加**我们的方法 —— 因为样例（`public/samples/.../input.wav` 与 `output.wav`）
+   必须**真实跑出来**才有意义。等 `make_sample.py` 跑通后追加一行即可。
+4. **数据放 D 盘**：C 盘只剩 21 GB，VCTK 要 ~27 GB。仓库留在 C 盘（只有 77 MB），
+   **数据放 D 盘**：设 `VPP_DATA_ROOT="D:\vpp\data"` 即可，脚本会自动跟着走
+   （或用目录联接 `mklink /J`，见 [`docs/notes/data-location.md`](../docs/notes/data-location.md)）。
+   **组内必须统一用同一种方案**，否则清单在别人机器上找不到文件。
+
+### 0.5 ★ 重要发现：上游 RTC 在 2026-03 做过重构（2026-11-17 成员 B 核实）
+
+成员 B 克隆 `third_party/RTC` 后发现**上游结构变了**，三处影响必须同步给成员 A：
+
+| 项 | 变化 | 对我们的影响 |
+|---|---|---|
+| 目录结构 | 平铺 `speaker_encoder.py` → 包结构 `encoder/` | 桥接层已改成**两种布局都支持**，永远调用当前布局的上游代码 |
+| **权重来源** | 仓库内 `pretrained.pt`（30 MB）→ **HuggingFace `CorentinJ/SV2TTS` 的 `encoder.pt`（17,090,379 字节）** | 新增 `scripts/download_encoder_weights.py`；clone 完目录里那个 `pretrained.pt` 是**HTML 错误页**，要删掉 |
+| **GE2E 内部 mel** | **不再取 log、不做均值方差归一化**（改成线性 mel） | ⚠️ **拿旧版 mel 喂新版权重 → 嵌入全错但不报错**。桥接层直接调用上游的 mel 函数，不会混用 |
+| 依赖 | 新增 `scikit-learn` | 已加进 `requirements.txt`（`scikit-learn==1.5.2`），**两人都要装**，装完重跑 `check_env.py` 比对新指纹 |
+
+已核实的 commit：`890f3a03187195b9829db2079b75c2ba2ab0405c`（2026-03-09，MIT）。
+D2-4 的四个问题已按源码逐条核实并写进 [`docs/notes/ge2e_interface.md`](../docs/notes/ge2e_interface.md)。
+
+### 0.6 ★ DataShare 改版 + 下载方案（2026-11-17 成员 B 实测）
+
+| 发现 | 内容 |
+|---|---|
+| 老链接失效 | `.../bitstream/handle/10283/3191/VCTK-2.tar.gz` → **404**；老 handle 在新站点被重新映射到别的数据集 |
+| 新直链 | `https://datashare.ed.ac.uk/server/api/core/bitstreams/535f4286-e54c-4038-838c-a02285e32cb2/content`（`VCTK-Corpus-0.92.zip`，11,747,302,977 字节） |
+| 包内结构 | 只有 `wav48_silence_trimmed/`（88,329 个 flac / 10.92 GiB / 111 个说话人）+ `txt/`（2 MB）。**没有 `wav/` 目录** |
+| 速度实测 | 单连接 **31.8 KB/s**；16 连接 ~280 KB/s；**48 连接 423 KB/s** |
+| **最终方案** | 新增 `scripts/download_vctk.mjs`：**按中央目录定向取条目 + 48 并发 Range + 直接解压落盘**。<br>**每个说话人只取 100 句（论文测试集同款）→ 1.36 GiB（12%），约 55 分钟** |
+
+```cmd
+node scripts/download_vctk.mjs --out D:\vpp\data\raw --per-speaker 100 --concurrency 48
+```
+
+> 脚本已实测通过：60 个文件全部为合法 FLAC（`fLaC` 头），支持断点续传（已下好的会跳过）。
+
+### 0.7 ★ VCTK 的第 110 个说话人叫 `s5`（2026-11-17 成员 B 踩到）
+
+数据里 `wav48_silence_trimmed/` 下是 **109 个 `pXXX` + 1 个 `s5`**，
+`s5` 是 VCTK 真实的第 110 个说话人（`speaker-info.txt` 第 111 行：
+
+```text
+s5    22  F    British (new speaker, more data would be released for training a speaker-dependent model)
+```
+
+**它不遵循 `p+数字` 的命名规律**，如果按 `p` 前缀筛说话人，就会只剩 109 人 →
+80/10/20 的划分直接失败（`split_speakers` 报"说话人不够"）。
+
+> 修复：`prepare_data.py::_is_speaker_dir()` 现在显式把 `s5` 认作说话人。
+> **组内任何"筛 VCTK 说话人"的代码都要注意这一条。**
+
+**数据实况**（本组当前数据）：
+
+| 项 | 值 |
+|---|---|
+| 说话人 | **110**（109 个 `p*` + `s5`），与论文一致 |
+| 语句数 | 10,904（每人 100 句，均匀抽样） |
+| 原始格式 | 48 kHz / 单声道 / FLAC |
+| 划分 | seed=42 → 80 训练 / 10 验证 / 20 测试 |
+| 磁盘 | 原始 1.4 GB + 16 kHz 副本约 1.3 GB（都在 D 盘） |
+
+**⚠️ 引用勘误（2026-11-17 核实）**
+
+指南与原笔记里写的 `Zenodo. https://doi.org/10.5281/zenodo.3235654` **实测 404**，
+Zenodo 上**没有 VCTK 的主记录**（且那条其实是 AutoVC 的论文，不是 VCTK 的引用）。
+
+**引用 VCTK 请用 DataShare 的 DOI：<https://doi.org/10.7488/ds/2645>**
+（已验证指向我们下载的同一个 item，handle `10283/3443`）。
 
 ---
 
