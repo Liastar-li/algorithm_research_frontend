@@ -150,9 +150,12 @@ def main() -> int:
     if not args.no_output:
         sys.path.insert(0, str(REPO_ROOT / "algorithms" / "voiceprint_protection"))
         try:
-            import infer  # noqa: F401
+            import infer
+
+            sample_rate = config.MEL_PRESETS[config.DEFAULT_PRESET]["sample_rate"]
 
             if hasattr(infer, "protect"):
+                # 约定一：模块级 protect(wav_path, alpha=..., output_path=...)
                 result = infer.protect(
                     str(input_path), alpha=args.alpha, output_path=str(output_path)
                 )
@@ -161,8 +164,19 @@ def main() -> int:
                 shapes = result.get("shapes", {})
                 if shapes:
                     print(f"  张量形状 : {shapes}")
+            elif hasattr(infer, "Protector"):
+                # 约定二（成员 A 当前的实现）：Protector.protect(wav, alpha=...)
+                protector = infer.Protector()
+                wav = audio_utils.load_audio(str(input_path), sample_rate)
+                result = protector.protect(wav, alpha=args.alpha, verbose=False)
+                audio_utils.save_audio(output_path, result["waveform"], sample_rate)
+                produced_output = True
+                print(f"  输出样例 : {output_path}")
+                shapes = result.get("shapes", {})
+                if shapes:
+                    print(f"  张量形状 : {shapes}")
             else:
-                print("  [提示] infer.py 还没有 protect()，跳过生成输出")
+                print("  [提示] infer.py 还没有 protect()/Protector，跳过生成输出")
         except ImportError:
             print("  [提示] infer.py 还不存在（成员 A 主责），跳过生成输出")
         except Exception as error:  # noqa: BLE001

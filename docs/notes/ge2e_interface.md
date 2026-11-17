@@ -65,13 +65,13 @@ frames = librosa.feature.melspectrogram(
 return frames.astype(np.float32).T                          # (T, 40)
 ```
 
-| 参数 | GE2E 内部 | 我们（`audio_utils.MelSpec`） | 一样吗 |
+| 参数 | GE2E 内部 | 我们（AutoVC 侧 mel） | 一样吗 |
 |---|---|---|---|
-| 采样率 | 16000 | 16000（paper16k） | ✅ |
+| 采样率 | 16000 | 16000 | ✅ |
 | 维数 | **40** | **80** | ❌ |
 | n_fft | 400 | 1024 | ❌ |
 | hop | 160 | 256 | ❌ |
-| fmin / fmax | 0 / 8000 | 40 / 7600 | ❌ |
+| fmin / fmax | 0 / 8000 | 90 / 7600 | ❌ |
 | 幅度 | 功率谱（`power=2` 默认），**不取 log** | `power=2` → `log10` | ❌ |
 | 归一化 | 无（只有我们外部的 L2） | 无 | ✅ |
 
@@ -304,8 +304,8 @@ Loaded encoder "encoder.pt" trained to step 1564501
 ## 5. 与本项目其他部分的关系
 
 ```text
-                ┌──────────── 我们的 80 维 mel（paper16k）────────────┐
-                │  用于：L_mel / L_cd / AutoVC 解码器 / HiFi-GAN 声码器 │
+                ┌──────────── 我们的 80 维 mel（AutoVC 链）────────────┐
+                │  用于：L_mel / L_cd / AutoVC 解码器 / wavenet 声码器  │
                 │  真源：algorithms/voiceprint_protection/audio_utils.py│
                 └───────────────────────┬──────────────────────────────┘
                                         │
