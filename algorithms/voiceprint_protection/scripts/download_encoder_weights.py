@@ -45,9 +45,43 @@ import paths  # noqa: E402
 
 HF_REPO = "CorentinJ/SV2TTS"
 HF_FILENAME = "encoder.pt"
-# 上游 utils/default_models.py 里写死的期望大小
-EXPECTED_SIZE = 17_090_379
-DEFAULT_MIRROR = "https://hf-mirror.com"
+# 兜底：问不到 HF 时的"最小合理大小"（用于排除 HTML 错误页 / 空文件）
+MIN_PLAUSIBLE_SIZE = 1024 * 1024
+
+
+def fetch_remote_info(filename: str) -> tuple[int | None, str | None]:
+    """向 HF 查询该文件的真实大小与 sha256。
+
+    ★ 不写死字节数：上游权重会更新，写死迟早误报
+      （同组的 download_rtc_weights.py 就被这个坑过：写死 353,426,445，
+        实际 370,554,559，文件明明下好了却被判成"失败"）。
+    """
+    try:
+        from huggingface_hub import HfApi
+
+        info = HfApi().model_info(HF_REPO, files_metadata=True)
+    except Exception as error:  # noqa: BLE001
+        print(f"  [提示] 向 HF 查询元信息失败（将退回宽松校验）：{error}")
+        return None, None
+
+    for sibling in getattr(info, "siblings", []) or []:
+        if getattr(sibling, "rfilename", None) != filename:
+            continue
+        lfs = getattr(sibling, "lfs", None) or {}
+        size = getattr(lfs, "size", None) or getattr(sibling, "size", None)
+        sha = getattr(lfs, "sha256", None) or getattr(sibling, "sha256", None)
+        return (int(size) if size else None), (sha.lower() if sha else None)
+    return None, None
+
+
+def sha256_of(path: Path) -> str:
+    import hashlib
+
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
 
 
 def _candidate_dirs(explicit: str | None) -> list[Path]:
@@ -111,18 +145,27 @@ def download_with_urllib(target_dir: Path) -> Path | None:
 
 
 def verify(path: Path) -> bool:
-    """核对大小与文件头 —— 防止把错误页面当成权重存下来。"""
+    """核对大小、文件头与 sha256 —— 防止把错误页面当成权重存下来。"""
     if not path.exists():
         print(f"  [失败] 文件不存在：{path}")
         return False
 
     size = path.stat().st_size
-    print(f"  文件大小：{size:,} 字节（期望 {EXPECTED_SIZE:,}）")
-    if size != EXPECTED_SIZE:
-        print("  [失败] 大小不符 —— 多半是下载被截断或拿到了错误页面。")
-        print("          请删除该文件后重试；国内网络建议先设：")
-        print("            set HF_ENDPOINT=https://hf-mirror.com")
-        return False
+    print(f"  本地大小：{size:,} 字节（{size / 1024 / 1024:.1f} MB）")
+
+    remote_size, remote_sha = fetch_remote_info(HF_FILENAME)
+    if remote_size is not None:
+        print(f"  远端大小：{remote_size:,} 字节")
+        if size != remote_size:
+            print("  [失败] 大小与远端不符 —— 多半是下载被截断或拿到了错误页面。")
+            print("          请删除该文件后重试；国内网络建议先设：")
+            print("            set HF_ENDPOINT=https://hf-mirror.com")
+            return False
+    else:
+        print("  [提示] 拿不到远端大小，退回宽松校验")
+        if size < MIN_PLAUSIBLE_SIZE:
+            print(f"  [失败] 文件太小（< {MIN_PLAUSIBLE_SIZE:,} 字节），多半是错误页面")
+            return False
 
     with path.open("rb") as handle:
         head = handle.read(4)
@@ -130,7 +173,14 @@ def verify(path: Path) -> bool:
         print("  [失败] 文件开头是 '<'，这是 HTML 错误页，不是权重。")
         return False
 
-    print("  [通过] 大小与文件头都正常")
+    if remote_sha:
+        local_sha = sha256_of(path)
+        print(f"  sha256   : {local_sha[:16]}…")
+        if local_sha != remote_sha:
+            print("  [失败] sha256 与远端不符 —— 文件已损坏，请删除后重试")
+            return False
+
+    print("  [通过] 大小、文件头与 sha256 均正常")
     return True
 
 

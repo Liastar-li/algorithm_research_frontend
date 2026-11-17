@@ -45,7 +45,7 @@
 | `third_party/RTC`（GE2E） | ✅ 已克隆，commit `890f3a0`；权重 `encoder.pt` 已下载并校验 |
 | VCTK 数据 | ✅ 110 说话人 / 11,004 条，划分 80/10/20 已自检通过 |
 | **当前阶段** | **W2 · 指南第 3 步 + 第 4 步** |
-| **下一个里程碑** | **M1：L1 推理链跑通**（产出保护后音频）—— 差 AutoVC 三件套权重 |
+| **下一个里程碑** | **M1：L1 推理链跑通**（产出保护后音频）—— 差 `synthesizer.pt` + `vocoder.pt`（见 0.8 路线决策） |
 | **待补依赖** | `python-multipart` 升到 0.0.20（起服务前必须）、`scikit-learn==1.5.2`（上游 GE2E 必需） |
 
 ### ★ 本周已取得的关键结论（2026-11-13 实测，详见 [docs/notes/autovc_alignment.md](docs/notes/autovc_alignment.md)）
@@ -111,18 +111,73 @@ s5    22  F    British (new speaker, more data would be released for training a 
 已修：`prepare_data.py::_is_speaker_dir()` 显式把 `s5` 认作说话人。
 **组内任何"筛 VCTK 说话人"的代码都要注意这一条。**
 
-### 0.8 两条 L1 路线（合并后并存，待 A 确认取舍）
+### 0.8 ★ 路线取舍已定（成员 A · 2026-11-17，依据实测）
 
-| | **路线 A（成员 A）** | **路线 B（成员 B）** |
+**结论：L1 走路线 B（论文脚注的 GE2E + 上游合成器/声码器）；AutoVC 降级为「Stage 1 的架构参考」。**
+
+#### 决定性依据：AutoVC 官方权重链实测已失效
+
+```
+curl -I https://ibm.box.com/s/upmfbstk8n8ded0xd3aaic4ayclh90ee
+→ HTTP/1.1 404 Not Found
+```
+
+AutoVC 官方 README 给的三件套权重（`autovc.ckpt` / `3000000-BL.ckpt` / WaveNet 声码器）
+**全部托管在这个 IBM Box 链接上，现已 404** —— 路线 A 不是"难下"，是**下不到**。
+
+#### 对比
+
+| | 路线 A（AutoVC 全家桶） | **路线 B（上游 RTC 全套）← 选定** |
 |---|---|---|
-| 说话人编码器 | AutoVC 自带 `D_VECTOR`（`3000000-BL.ckpt`，吃 **80 维** mel） | **论文脚注的 GE2E**（`encoder.pt`，吃 **40 维**线性 mel） |
-| 依赖权重 | AutoVC 三件套（IBM Box） | 只有 `encoder.pt`（**已下载并跑通**） |
-| 当前状态 | `infer.py` 已写好，缺权重 | `bridge_speaker.py` 已跑通 |
+| 说话人编码器 | AutoVC `D_VECTOR`（吃 80 维 mel） | **GE2E**（论文脚注 2，吃 40 维线性 mel） |
+| 权重来源 | IBM Box → **404 失效** | HF `CorentinJ/SV2TTS` → **实测 200 OK** |
+| 需要的权重 | 3 个（含配套声码器） | 3 个（encoder 17MB / synthesizer 353MB / vocoder 51MB） |
+| mel 约定 | 要自己复刻 AutoVC 的自定义链 | **合成器与声码器自带配套，不用猜** |
+| 与论文的一致性 | 架构一致，但权重链断了 | **脚注 2 直接引用的就是它** |
+| 当前状态 | 阻塞 | **encoder.pt 已跑通**（成员 B） |
 
-> `bridge_speaker.py` 里两个类并存：`SpeakerEncoderBridge`（A 的）与 `SpeakerBridge`（B 的）。
-> **论文要求走路线 B**（脚注 2 引用的就是 GE2E），
-> 但路线 A 是 AutoVC 官方权重自带的、配套最完整 —— **取舍待 A 确认**。
+#### 路线 B 的推理链（全部有可用权重）
 
+```
+[保护]
+  wav ──GE2E──→ h (256) ──加扰动 a·d──→ h_adv
+  h_adv ──上游合成器(text, h_adv)──→ mel ──上游 WaveRNN──→ 保护后语音 x_adv
+[攻击]
+  x_adv ──GE2E──→ h_stolen ──上游合成器(text, h_stolen)──→ 攻击者克隆音
+[基线]
+  h ──上游合成器(text, h)──→ 未防御克隆音（像原说话人）
+```
+
+★ **上游合成器就是论文 Figure 1 红框里的那个"攻击者"**：
+用同一个克隆机跑两次（原始嵌入 vs 被扰动嵌入），两者的差别**就是防御效果本身**。
+
+#### AutoVC 没有被抛弃，改任新职
+
+| AutoVC 的价值 | 用在哪 |
+|---|---|
+| **架构**（Ec / D / PostNet、dim_neck=32、双向 LSTM、freq=32） | **Stage 1 我们自己实现并训练**（论文本来就要训） |
+| **mel 预处理链**（reflect 填充 + 幅度 + dB + clip[0,1] + fmin=90 + 30Hz 高通） | 已复刻在 `audio_utils.autovc_mel()`，**自训 Stage 1 时沿用** |
+| 官方权重 `3000000-BL.ckpt`（= GE2E） | 已被上游 `encoder.pt` 取代（同一个 Wan et al. [2018] GE2E 家族） |
+| **备选初始化权重**：`marlenezw/AutoVC_Voice_Conversion` 的 `ckpt_autovc.pth`（171 MB，MakeItTalk 出品，含 Ec + D + GE2E） | **Stage 1 训练的初始化权重来源**（HF 可下载） |
+
+> `marlenezw` 那个 ckpt 的 README 明确写着：
+> *"The speaker encoder is a pre-trained model provided Wan et al. [2018]"* —— 正是论文用的 GE2E。
+
+#### 因此分工微调
+
+| | 原分工 | 调整后 |
+|---|---|---|
+| 成员 A | AutoVC 权重链 | **克隆机（合成器+声码器）桥接 + 上游权重下载 + infer.py 整链** |
+| 成员 B | GE2E 桥接 + 数据 + 平台 | 不变（**B 的路线 B 是主线，A 转为补齐 B 缺的"攻击者"那一半**） |
+
+#### A 的新行动项（已开工）
+
+- [x] `bridge_cloner.py`：上游合成器 + 声码器封装（= 攻击者）
+- [x] `scripts/download_rtc_weights.py`：定点下载 `synthesizer.pt` + `vocoder.pt`（带大小校验）
+- [x] `infer.py` 改写为路线 B，并加**模块级 `protect(wav_path, alpha, output_path)`**（成员 B 的 `make_sample.py` 约定一依赖它）
+- [x] `scripts/smoke_test.py` 步骤 2/3 改为「克隆机分支」与「端到端 + 攻击者对比」
+- [ ] 下载 `synthesizer.pt` / `vocoder.pt`，跑通端到端
+- [ ] Stage 1：按 AutoVC 架构自实现，用 `ckpt_autovc.pth` 初始化
 
 ---
 
@@ -384,6 +439,9 @@ AutoVC 权重），迁到昇腾要装 CANN + `torch_npu`，并把 `.cuda()` 改�
 
 ## 9. 待决事项（需要组内拍板）
 
+- [x] ~~**采样率方案**~~ → **已定：全程 16 kHz**（AutoVC 官方权重就是 16k）
+- [x] ~~**L1 走哪条路线**~~ → **已定：路线 B**（上游 RTC 全套），依据见 §0.8
+      —— AutoVC 官方权重链实测 404 失效，路线 A 走不通
 - [ ] **代金券适用产品**（控制台确认）：能否开 ECS（NVIDIA 卡）？还是只有昇腾 ModelArts？
       → 决定 W4–W5 的训练路线，**W3 结束前必须有答案**
 - [ ] **代金券有效期** → 训练排期必须卡在有效期内

@@ -106,6 +106,33 @@ def check_speaker_branch(wav_path: Path | None, sample_rate: int) -> bool:
     return True
 
 
+def check_cloner_branch() -> bool:
+    """第 2 步：测克隆机分支（合成器 + 声码器）。
+
+    这是**论文 Figure 1 里那个"攻击者"**：给它一段文本 + 一张身份卡，
+    它就念出那段话。没有它就没法演示"防御让克隆失效"。
+    """
+    print("\n【2】克隆机分支（合成器 + 声码器，即论文里的「攻击者」）")
+    try:
+        from bridge_cloner import ClonerBridge
+    except ImportError as error:
+        print(f"  [跳过] 无法导入 bridge_cloner：{error}")
+        print("         上游合成器需要 Unidecode / inflect：")
+        print("           pip install Unidecode==1.3.2 inflect==5.3.0")
+        return False
+
+    try:
+        bridge = ClonerBridge()
+    except Exception as error:  # noqa: BLE001
+        print(f"  [跳过] {error}")
+        return False
+
+    for line in bridge.describe().splitlines():
+        print(f"  {line}")
+    print("  [OK] 克隆机就绪")
+    return True
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="L1 冒烟测试")
     parser.add_argument("--audio", default=None, help="输入音频（wav）。不给则用平台样例/清单第一条")
@@ -121,14 +148,37 @@ def main() -> int:
     # -- 步骤 0：组件与权重 ----------------------------------------------
     print("\n【0】组件与权重检查")
     print(paths.describe())
-    missing = [name for name in paths.WEIGHT_FILES.values()
-               if not paths.weight_path(name).exists()]
+
+    # 论文主线的三个权重（上游 RTC：encoder / synthesizer / vocoder）
+    # 注意：download_* 脚本会把它们放到 <数据根>/models/default/ 下
+    def _find_weight(name: str) -> Path | None:
+        for candidate in (
+            paths.models_dir() / "default" / name,
+            paths.models_dir() / name,
+            paths.RTC_DIR / name,
+        ):
+            if candidate.exists() and candidate.stat().st_size > 1024:
+                return candidate
+        return None
+
+    missing = [name for name in ("encoder.pt", "synthesizer.pt", "vocoder.pt")
+               if _find_weight(name) is None]
     if missing:
-        print(f"\n  [注意] 缺少 AutoVC 路线所需的权重：{', '.join(missing)}")
-        print("         下载地址见 third_party/README.md；放到 algorithms/voiceprint_protection/weights/")
-        print("         → 第 2/3 步会跳过；第 1 步（GE2E）不受影响。")
+        print(f"\n  [注意] 缺少论文主线的权重：{', '.join(missing)}")
+        print("         下载：")
+        print("           python algorithms/voiceprint_protection/scripts/download_encoder_weights.py   # encoder.pt")
+        print("           python algorithms/voiceprint_protection/scripts/download_rtc_weights.py      # synthesizer + vocoder")
+        print("         → 第 1 步（GE2E）不受影响，第 2/3 步会跳过。")
     else:
-        print("  [OK] AutoVC 路线权重齐备")
+        print("  [OK] 论文主线权重齐备（encoder / synthesizer / vocoder）")
+
+    # AutoVC 全家桶（可选路线：Stage 1 之后才用得上）
+    autovc_missing = [name for name in paths.WEIGHT_FILES.values()
+                      if not paths.weight_path(name).exists()]
+    if autovc_missing:
+        print(f"  [提示] AutoVC 路线权重缺失：{', '.join(autovc_missing)}")
+        print("         AutoVC 官方链接实测已 404 失效；该路线改为「Stage 1 的架构参考」，")
+        print("         不影响当前 L1 演示。")
 
     # -- 准备输入 --------------------------------------------------------
     sample_rate = config.MEL_PRESETS[config.DEFAULT_PRESET]["sample_rate"]
@@ -151,81 +201,86 @@ def main() -> int:
 
     if missing:
         print("\n" + "=" * 66)
-        print("  AutoVC 权重不齐，已跳过重建/保护两步。")
+        print("  论文主线权重不齐，已跳过克隆机与端到端两步。")
         print("  已验证：GE2E 说话人分支 =", "通过" if speaker_ok else "未通过")
         print("  补齐权重后重跑本脚本即可完成整链验证。")
         print("=" * 66)
         return 0 if speaker_ok else 1
 
-    # -- 步骤 2：加载模型 ------------------------------------------------
-    from infer import Protector, perturb_embedding, random_perturbation
+    # -- 步骤 2：克隆机分支 -----------------------------------------------
+    cloner_ok = check_cloner_branch()
+    if not cloner_ok:
+        print("\n" + "=" * 66)
+        print("  克隆机权重不齐，无法验证整条链。")
+        print("  下载：")
+        print("    python algorithms/voiceprint_protection/scripts/download_rtc_weights.py")
+        print("  已验证：GE2E 说话人分支 =", "通过" if speaker_ok else "未通过")
+        print("=" * 66)
+        return 0 if speaker_ok else 1
 
-    print("\n【2】加载模型")
+    # -- 步骤 3：端到端 --------------------------------------------------
+    from infer import DEFAULT_REFERENCE_TEXT, Protector
+
+    print("\n【3】端到端：体检 -> 打疫苗 -> 骗子行骗")
+    print(f"  参考文本: {DEFAULT_REFERENCE_TEXT}")
     try:
         protector = Protector()
     except Exception as error:  # noqa: BLE001
         print(f"  [失败] 加载模型出错：{error}")
         return 1
-    print("  [OK] AutoVC / 说话人编码器 / 声码器 全部就绪")
 
-    # -- 步骤 3：只重建 --------------------------------------------------
-    print("\n【3】重建测试（不加扰动）—— 验证 mel 与权重是否配套")
-    mel = protector.to_mel(wav)
-    embedding = protector.embedding(mel)
-    print(f"  mel 形状        {tuple(mel.shape)}")
-    print(f"  嵌入形状        {tuple(embedding.shape)}  "
-          f"L2 范数 {float(np.linalg.norm(embedding)):.4f}")
-    reconstructed_mel = protector.autovc.reconstruct(mel, embedding)
-    print(f"  重建 mel 形状   {tuple(reconstructed_mel.shape)}")
-    print(f"  重建 mel 范围   [{reconstructed_mel.min():.3f}, {reconstructed_mel.max():.3f}]")
+    result = protector.protect(
+        wav, alpha=args.alpha, seed=args.seed, text=DEFAULT_REFERENCE_TEXT, verbose=False
+    )
 
-    reconstructed_wav = protector.to_waveform(reconstructed_mel)
-    rms = audio_utils.rms_energy(reconstructed_wav)
-    original_rms = audio_utils.rms_energy(wav)
-    print(f"  重建波形 RMS    {rms:.5f}（原音频 {original_rms:.5f}）")
-    if rms < 1e-4:
-        print("  [失败] 重建音频接近静音 —— mel 或权重不配套，先别往下走")
-        return 1
-    print("  [OK] 重建音频有声")
-
-    # -- 步骤 4：加扰动 --------------------------------------------------
-    print("\n【4】保护测试（加随机扰动）")
-    delta = random_perturbation(seed=args.seed)
-    result = protector.protect(wav, alpha=args.alpha, seed=args.seed, verbose=False)
-
-    protected_rms = audio_utils.rms_energy(result["waveform"])
     similarity = float(np.dot(result["embedding"], result["embedding_adv"]))
-    mel_difference = float(np.mean(np.abs(result["protected_mel"] - mel)))
+    protected_rms = audio_utils.rms_energy(result["protected_waveform"])
+    baseline_rms = audio_utils.rms_energy(result["clone_baseline_waveform"])
+    cloned_rms = audio_utils.rms_energy(result["clone_protected_waveform"])
+    stolen_similarity = float(np.dot(result["embedding"], result["stolen_embedding"]))
+
     print(f"  α = {args.alpha}")
-    print(f"  嵌入余弦相似度  {similarity:.4f}（1.0 = 没扰动；越小扰动越强）")
-    print(f"  mel 平均绝对差  {mel_difference:.4f}")
-    print(f"  保护后波形 RMS  {protected_rms:.5f}")
+    print(f"  原始卡 vs 扰动卡 余弦相似度        {similarity:.4f}（1.0 = 没扰动；越小扰动越强）")
+    print(f"  保护后语音 RMS                    {protected_rms:.5f}")
+    print(f"  未防御克隆音 RMS                  {baseline_rms:.5f}")
+    print(f"  防御后克隆音 RMS                  {cloned_rms:.5f}")
+    print(f"  攻击者从保护后语音提的卡 vs 原卡   {stolen_similarity:.4f}")
+    print("    （越小 -> 防御越有效；论文用 Sim_clone 衡量，目标是 < 0.5）")
+
     if protected_rms < 1e-4:
         print("  [失败] 保护后音频接近静音")
         return 1
-    print("  [OK] 保护后音频有声")
+    if baseline_rms < 1e-4:
+        print("  [失败] 克隆机输出接近静音 —— 合成器/声码器可能没配套")
+        return 1
+    print("  [OK] 保护后语音与克隆音都有声")
 
     # -- 输出 ------------------------------------------------------------
     outdir = Path(args.outdir)
     outdir.mkdir(parents=True, exist_ok=True)
     stem = Path(audio_path).stem if audio_path else "synthetic"
     protected_path = outdir / f"{stem}_protected.wav"
-    reconstructed_path = outdir / f"{stem}_reconstructed.wav"
-    audio_utils.save_audio(protected_path, result["waveform"], sample_rate)
-    audio_utils.save_audio(reconstructed_path, reconstructed_wav, sample_rate)
-    print(f"\n  已保存保护后音频   {protected_path}")
-    print(f"  已保存重建音频     {reconstructed_path}")
+    baseline_path = outdir / f"{stem}_clone_baseline.wav"
+    cloned_path = outdir / f"{stem}_clone_protected.wav"
+    audio_utils.save_audio(protected_path, result["protected_waveform"], sample_rate)
+    audio_utils.save_audio(baseline_path, result["clone_baseline_waveform"], sample_rate)
+    audio_utils.save_audio(cloned_path, result["clone_protected_waveform"], sample_rate)
+    print(f"\n  已保存保护后语音     {protected_path}")
+    print(f"  已保存未防御克隆音   {baseline_path}")
+    print(f"  已保存防御后克隆音   {cloned_path}")
 
     report = {
         "alpha": args.alpha,
         "seed": args.seed,
         "shapes": result["shapes"],
         "embedding_cosine": similarity,
-        "mel_mean_abs_diff": mel_difference,
-        "rms_original": original_rms,
-        "rms_reconstructed": rms,
+        "stolen_embedding_cosine": stolen_similarity,
         "rms_protected": protected_rms,
-        "note": "L1 阶段：δ 为随机高斯噪声占位，尚未训练生成器 G。",
+        "rms_clone_baseline": baseline_rms,
+        "rms_clone_protected": cloned_rms,
+        "note": "L1 阶段：δ 为随机高斯噪声占位，尚未训练生成器 G。"
+                "stolen_embedding_cosine 即论文的 Sim_clone；随机扰动下它不会很低，"
+                "要等 Stage 2 训练出生成器 G 才会显著下降（论文报告 0.13）。",
     }
     report_path = outdir / f"{stem}_report.json"
     report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -233,9 +288,13 @@ def main() -> int:
 
     print("\n" + "=" * 66)
     print("  冒烟测试通过。")
-    print("  ★ 下一步：对比「重建音频」与「原始音频」，确认听感一致；")
-    print("    然后再对比「保护后音频」，确认听感几乎无差别。")
-    print("  ★ 如果听感不对，先怀疑 mel 对照，而不是保护逻辑。")
+    print("  ★ 听一下这三个文件：")
+    print("      protected.wav       —— 保护后的语音（人耳听感应与原音频基本一致）")
+    print("      clone_baseline.wav  —— 未防御时攻击者克隆出来的声音（应很像本人）")
+    print("      clone_protected.wav —— 防御后攻击者克隆出来的声音（应明显不像）")
+    print("  ★ 上面的 stolen_embedding_cosine 就是论文的 Sim_clone。")
+    print("    L1 用的是随机扰动，所以它还很高（接近 1 = 防御几乎无效）。")
+    print("    这是**预期**的：Stage 2 训练出生成器 G 之后才会显著下降。")
     print("=" * 66)
     return 0
 

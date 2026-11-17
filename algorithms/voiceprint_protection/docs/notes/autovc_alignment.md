@@ -268,6 +268,51 @@ IBM Box 需实测可达性。HiFi-GAN 另有 GitHub 上的 `NVIDIA/torch.hifi_ga
 
 ---
 
+## 五、★ AutoVC 官方权重链已失效（2026-11-17 实测）
+
+```
+curl -I https://ibm.box.com/s/upmfbstk8n8ded0xd3aaic4ayclh90ee
+→ HTTP/1.1 404 Not Found
+```
+
+AutoVC 官方 README 给的三件套权重**全部托管在这个 IBM Box 链接上，现已 404**：
+
+| 权重 | 链接 | 状态 |
+|---|---|---|
+| AutoVC 主模型 | `https://ibm.box.com/s/upmfbstk8n8ded0xd3aaic4ayclh90ee` | **404** |
+| 另两个 | `.../s/k4nyvzkz26r9ux1o8rcq9tov36h69o2e`、`.../s/pdr8b0z5oim9q0p4be496mt3ue5lb004` | **404** |
+| HiFi-GAN v1 | `https://ibm.box.com/s/asvv554v0zd09yipl2qadz49i7jpdhta` | **404** |
+| WaveNet vocoder | 见 README | **404** |
+
+**结论：路线 A（AutoVC 全家桶）走不通 —— 不是"难下"，是"下不到"。**
+
+### 替代方案（都已实测可下载）
+
+| 用途 | 来源 | 实测 |
+|---|---|---|
+| GE2E 说话人编码器 | HF `CorentinJ/SV2TTS` → `encoder.pt`（17,090,379 字节） | ✅ 200 OK |
+| **合成器**（= 论文里的"攻击者"） | 同上 → `synthesizer.pt` | ✅ |
+| **声码器** | 同上 → `vocoder.pt` | ✅ |
+| AutoVC 的 Ec/D/GE2E 打包权重（MakeItTalk 出品） | HF `marlenezw/AutoVC_Voice_Conversion` → `ckpt_autovc.pth`（171,881,992 字节） | ✅ |
+
+> `marlenezw` 的 README 明确写：*"The speaker encoder is a pre-trained model provided Wan et al. [2018]"*
+> —— 正是论文用的 GE2E（论文脚注 2）。
+
+### 由此产生的路线调整
+
+**L1 推理链改用上游 RTC 的合成器 + 声码器**（`bridge_cloner.py`），
+因为它们**互相配套**（同一套 mel：16 kHz / 80 mel / n_fft 800 / hop 200 / fmin 55），
+我们完全不用自己猜 mel 约定。
+
+**AutoVC 降级为「Stage 1 的架构参考 + 初始化权重来源」**：
+它的 `Ec / D / PostNet` 架构、`dim_neck=32`、双向 LSTM、`freq=32`，
+以及那条已复刻的 mel 预处理链（`audio_utils.autovc_mel()`，逐元素对照差 0.000e+00），
+在 Stage 1 自己训练时全部沿用。
+
+详见任务板 [TASKS.md](../../TASKS.md) §0.8。
+
+---
+
 ## 六、给下一阶段的行动项
 
 | # | 事项 | 负责人 | 状态 |
