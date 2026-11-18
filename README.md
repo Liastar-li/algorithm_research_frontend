@@ -1,68 +1,262 @@
-# 算法研究平台
+# 第 N005 组：基于人机感知差异解耦的隐式声纹保护
 
-用于展示与体验内容水印、主动防御方法的统一前端。用户可以查看方法样例，上传图像、音频或视频，填写方法参数，预览并下载处理结果。算法贡献者通过方法配置和 HTTP 接口接入自己的算法。
+> **本文件是组内 W6 的工作稿。** 凡是标 `【待填】` 的地方都还没定，
+> 填之前**不要**提交 PR —— 任务板 §7 第 3 条踩坑：
+> *"文档到最后一个人赶 → README 里全是想象。实验记录必须和代码同 commit 提交。"*
+>
+> 已经写实的部分（实现内容、接口、环境、命令、来源与许可）都对着代码核过了。
 
-**小组提交流程：Fork 本仓库 → 在本组仓库完成接入并重写根目录 README → 发起 PR。** PR 标题格式为 `第XX组-选题名称`，XX 填写本组实际组号，选题填写本组实际选题。提交后保持打开，用于集中查看与反馈，默认不合并。详见[算法提交指南](docs/算法提交指南.md)与[小组 README 模板](docs/小组README模板.md)。
+---
 
-## 文档导航
+## 1. 小组与项目
 
-| 你要做什么 | 阅读文档 |
-| --- | --- |
-| 选择方法、上传素材、获取结果 | [使用说明](docs/使用说明.md) |
-| 定义素材、参数、样例与算法接口 | [算法接入规范](docs/算法接入规范.md) |
-| Fork 仓库、编写小组 README、提交 PR | [算法提交指南](docs/算法提交指南.md) |
-| 准备本组成果说明与附加文档入口 | [小组 README 模板](docs/小组README模板.md) |
-| 检查方法是否已具备使用条件 | [接入自查清单](docs/接入自查清单.md) |
+| 信息 | 本组填写 |
+|---|---|
+| 组号 | **第 N005 组**【待填：最终组号】 |
+| 选题名称 | 基于人机感知差异解耦的隐式声纹保护 |
+| 成员 | 【待填：姓名、GitHub 用户名与分工】 |
+| 方法 ID | `group_n005_voiceprint_protection`（**必须全小写**，平台契约要求 `/^[a-z][a-z0-9_]{1,63}$/`） |
+| 本组仓库与提交分支 | 【待填：Fork 链接】 · 分支 `group_N005_submission` |
 
-## 本地运行
+**这个方法解决什么问题**
 
-准备 Node.js 22 或更新的 LTS 版本和 Git：
+在说话人嵌入（256 维）上加一个人耳听不出来、但语音克隆系统能听出来的扰动，
+让针对这段录音的 AI 声音克隆显著失效，同时人耳听感与说话人可识别性基本不变。
+
+原理：先训练解耦-重建网络把语音拆成内容码与说话人嵌入，
+再在嵌入上加扰动（`h_adv = h + α·δ`，α = 0.10），最后重新合成音频。
+论文的核心洞见是**人机感知差异**：人耳的掩蔽阈值远高于机器特征空间的判别边界，
+所以存在一个"人听不出、机器听得出"的扰动窗口。
+
+---
+
+## 2. 论文与代码来源
+
+- **论文**：Xue, C., Sun, M., Zhang, Q., Zhang, X., Li, K., Liao, Y., Ge, X., & Yao, K. (2026).
+  *Imperceptible Voiceprint Protection via Human-Machine Perception Discrepancy Feature
+  Disentanglement.* Interspeech 2026, pp. 5259–5263. DOI: [10.21437/Interspeech.2026-105](https://doi.org/10.21437/Interspeech.2026-105)
+  （本地副本：[`docs/xue26_interspeech.pdf`](docs/xue26_interspeech.pdf)）
+- **作者代码**：**没有**。论文未提供官方代码链接，本方法**完全基于公开组件自建**。
+- **使用的开源组件**（版本与许可见 [`third_party/README.md`](third_party/README.md)）：
+
+  | 组件 | 仓库 | 固定 commit | 许可 | 用途 |
+  |---|---|---|---|---|
+  | Real-Time-Voice-Cloning | [CorentinJ/Real-Time-Voice-Cloning](https://github.com/CorentinJ/Real-Time-Voice-Cloning) | `890f3a0` | MIT | **GE2E 说话人编码器**（论文脚注 2 直接引用） |
+  | AutoVC | [auspicious3000/autovc](https://github.com/auspicious3000/autovc) | `c1827a6` | MIT | Stage 1 的模型架构（Ec / D / PostNet） |
+  | wavenet_vocoder | [r9y9/wavenet_vocoder](https://github.com/r9y9/wavenet_vocoder) | `d4333546` | MIT | 与 AutoVC 的 mel 格式配套的声码器 |
+
+  上游权重全部来自 HuggingFace `CorentinJ/SV2TTS`（`encoder.pt` / `synthesizer.pt` / `vocoder.pt`）。
+- **数据**：VCTK（Edinburgh DataShare，[DOI 10.7488/ds/2645](https://doi.org/10.7488/ds/2645)），**CC BY 4.0**。
+  110 说话人 / 11,004 句，seed=42 划分 80 训练 / 10 验证 / 20 测试。
+- **本组算法代码位置**：[`algorithms/voiceprint_protection/`](algorithms/voiceprint_protection/)（本分支）
+- **第三方许可证与引用说明**：见 [`third_party/README.md`](third_party/README.md)；
+  样例音频的署名见 [`public/samples/group_n005_voiceprint_protection/SOURCES.md`](public/samples/group_n005_voiceprint_protection/SOURCES.md)。
+
+---
+
+## 3. 本组实现内容
+
+### 3.1 功能完成状态
+
+| 功能 | 完成状态 | 实现位置与验证方式 |
+|---|---|---|
+| GE2E 说话人编码器封装（波形 → 256 维嵌入，L2 归一化） | ✅ 已完成 | [`bridge_speaker.py`](algorithms/voiceprint_protection/bridge_speaker.py)；实测 `‖h‖ = 1.000000` |
+| VCTK 数据管道（转 16 kHz + 80/10/20 划分 + 三条硬要求自检） | ✅ 已完成 | [`scripts/prepare_data.py`](algorithms/voiceprint_protection/scripts/prepare_data.py) |
+| L1 推理链（体检 → 打疫苗 → 骗子行骗） | ✅ 已完成 | [`infer.py`](algorithms/voiceprint_protection/infer.py)；⏳ 本机复现差 `synthesizer.pt` + `vocoder.pt` |
+| 平台算法服务（FastAPI + CORS + 统一错误格式） | ✅ 已完成 | [`service.py`](algorithms/voiceprint_protection/service.py)；契约自测 **40/40** |
+| 平台方法配置 + 索引登记 | ✅ 已完成 | [`public/methods/group_n005_voiceprint_protection.json`](public/methods/group_n005_voiceprint_protection.json) |
+| Stage 1（解耦-重建网络训练） | ⬜ 未完成 | 成员 A 主责；架构参考 AutoVC |
+| Stage 2（防御性扰动生成，**代码骨架已完成**） | 🟡 部分完成 | [`stage2/`](algorithms/voiceprint_protection/stage2/)；梯度通路自检 12/12，正式训练缺声码器与 Stage 1 权重 |
+| 评测（Sim_prot / Sim_clone / DSR / WER） | 🟡 部分完成 | [`evaluate.py`](algorithms/voiceprint_protection/evaluate.py)；脚本已写好，⏳ 等权重 |
+| 心理声学掩蔽 θ_x（MPEG-1 模型） | ✅ 已完成 | [`stage2/psychoacoustics.py`](algorithms/voiceprint_protection/stage2/psychoacoustics.py) |
+
+### 3.2 相对 baseline 做了什么
+
+- **把论文的两阶段拆成可独立验证的两步**：Stage 1 的解耦-重建（保内容、换音色）、
+  Stage 2 的扰动生成（换音色、破克隆）。
+- **写了一套可求导的冻结组件**（`stage2/models.py`）：
+  现有的 `bridge_autovc` / `bridge_vocoder` 是 numpy 封装（内部 `no_grad()`），
+  梯度到不了生成器 G，训练会**静默失效**。
+- **把两个"会静默失败"的坑变成会失败的断言**：
+  梯度通路自检（12 项）+ torch/numpy GE2E 数值对照（4 项）。
+- **服务层把模型做成单例**：平台的请求是同步等待的，
+  每次请求重载 400 MB 权重必然超时。
+
+---
+
+## 4. 输入、输出与参数
+
+### 输入
+
+| 输入字段 | 素材类型与格式 | 必填 | 限制与说明 |
+|---|---|---|---|
+| `input_file` | 音频（`audio/wav`） | 是 | ≤ 50 MB，≤ 60 秒，16 kHz 单声道（服务内部自动重采样） |
+
+### 参数
+
+| 参数字段 | 类型 | 默认值与范围 | 作用 |
+|---|---|---|---|
+| `alpha` | number | **0.1**，范围 [0, 1]，步长 0.01 | 扰动强度 α（论文取值 0.10）。值越大克隆越难，但音质可能下降 |
+| `attack_mode` | select | **clone**（`clone` / `none`） | 是否同时输出攻击者的克隆音，便于直观对比 |
+| `report` | boolean | **true** | 是否返回评测报告 JSON |
+
+### 输出
+
+| 输出 | 文件类型 | 含义 |
+|---|---|---|
+| 保护后语音 | WAV (16 kHz) | 加了扰动后重新合成的音频，人耳听感应与原音频基本一致 |
+| 未防御时攻击者的克隆音 | WAV (16 kHz) | 用**原始**嵌入克隆出来的声音（应很像本人） |
+| 防御后攻击者的克隆音 | WAV (16 kHz) | 攻击者从保护后语音重新提卡再克隆（应明显不像本人） |
+| 评测报告 | JSON | Sim_prot / Sim_clone / 各步张量形状、耗时 |
+
+---
+
+## 5. 环境与安装
+
+- **已验证**：Windows 11，Python 3.9（conda 环境 `vpp`），torch 2.4.1（CPU 版即可推理），
+  numpy 1.26.4 / librosa 0.10.2.post1 / soundfile 0.12.1 / scikit-learn 1.5.2 /
+  fastapi 0.110.3 / uvicorn 0.30.1 / python-multipart 0.0.20
+- **GPU**：训练用；本地 RTX 4060（8 GB）可跑缩减版，论文量级（Stage 1 500k + Stage 2 200k）建议上云
+- **依赖文件**：[`algorithms/voiceprint_protection/requirements.txt`](algorithms/voiceprint_protection/requirements.txt)、
+  [`requirements.lock.txt`](algorithms/voiceprint_protection/requirements.lock.txt)
+- **权重**（不提交到仓库，`.gitignore` 已忽略）：
+
+  | 权重 | 大小 | 来源 | 放置位置 |
+  |---|---|---|---|
+  | `encoder.pt` | 17 MB | HF `CorentinJ/SV2TTS` | `<数据根>/models/default/` |
+  | `synthesizer.pt` | 371 MB | 同上 | 同上 |
+  | `vocoder.pt` | 54 MB | 同上 | 同上 |
+
+安装命令：
 
 ```bash
-git clone https://github.com/lym-lab/algorithm_research_frontend.git
-cd algorithm_research_frontend
+conda activate vpp
+pip install torch==2.4.1 torchaudio==2.4.1 -i https://pypi.tuna.tsinghua.edu.cn/simple
+pip install -r algorithms/voiceprint_protection/requirements.txt
+pip install Unidecode==1.3.2 inflect==5.3.0     # 上游合成器的文字处理，克隆机必需
+
+# 第三方组件（按固定 commit 拉取，保证两人版本一致）
+bash scripts/setup_third_party.sh                # Windows 用 .ps1
+
+# 权重
+python algorithms/voiceprint_protection/scripts/download_encoder_weights.py
+python algorithms/voiceprint_protection/scripts/download_rtc_weights.py
+```
+
+> **国内网络**：`HF_ENDPOINT=https://hf-mirror.com` 可显著加快权重下载。
+
+---
+
+## 6. 启动与运行
+
+### 6.1 启动算法服务
+
+```bash
+conda activate vpp
+uvicorn algorithms.voiceprint_protection.service:app --host 127.0.0.1 --port 8000
+# 或者：python algorithms/voiceprint_protection/service.py
+```
+
+接口地址：`http://127.0.0.1:8000/process`（与
+[`public/methods/group_n005_voiceprint_protection.json`](public/methods/group_n005_voiceprint_protection.json)
+里的 `adapter.endpoint` 一致）。
+
+自检（**不需要权重**就能验协议）：
+
+```bash
+python algorithms/voiceprint_protection/scripts/test_service.py --mock   # 40 项
+```
+
+### 6.2 启动前端
+
+```bash
 npm install
 npm run dev
 ```
 
-在浏览器打开终端打印的地址。构建与预览命令：
+打开页面 → 「方法集合」里找 **「基于人机感知差异解耦的隐式声纹保护」**。
+
+### 6.3 第一次运行
+
+1. 用 `public/samples/group_n005_voiceprint_protection/input.wav`（测试集说话人 p228，CC BY 4.0）
+2. 参数保持默认：`alpha = 0.1`、`attack_mode = clone`、`report = true`
+3. 点「运行方法」
+
+预期得到 3 个音频（保护后语音 / 未防御克隆音 / 防御后克隆音）+ 1 个 JSON 报告。
+
+### 6.4 结果在哪里 / 怎么清理
+
+- 服务把结果写在 `algorithms/voiceprint_protection/results/`，
+  通过 `http://127.0.0.1:8000/files/<文件名>` 下载。
+- 服务**启动时会清空**上一次的残留（结果目录只保留最近 50 个文件）；
+  上传的临时文件**用完即删**。
+- 完全清空：停掉服务后删掉 `algorithms/voiceprint_protection/results/` 即可。
+
+### 6.5 离线跑通整条链
 
 ```bash
-npm run build
-npm run preview
+python algorithms/voiceprint_protection/scripts/smoke_test.py
 ```
 
-`npm test` 运行接口契约与处理逻辑测试，`npm run samples` 重新生成内置样例素材。
+---
 
-## 使用流程
+## 7. 样例与实际结果
 
-1. 在“方法集合”搜索或筛选方法。
-2. 查看方法详情中的输入、输出样例和效果说明。
-3. 选择素材，填写该方法的参数，点击“开始处理”。
-4. 预览结果，下载结果文件及本次参数记录。
+| 样例 | 输入链接 | 输出链接 | 参数 | 观察重点 |
+|---|---|---|---|---|
+| 保护前后与攻击者克隆对比 | [`input.wav`](public/samples/group_n005_voiceprint_protection/input.wav) | 【待填：`output.wav`】 | `alpha=0.1, attack_mode=clone, report=true` | 未防御的克隆音应像本人；防御后的克隆音应明显不像，而保护后语音听感基本不变 |
 
-平台附带图像可见文字水印和音频可听周期标记两个浏览器基础样例，用于体验上传、参数设置与结果下载。论文方法的功能和效果由各方法说明及其算法接口决定。
+> ⏳ **输出样例还没生成** —— 差 `synthesizer.pt` + `vocoder.pt`（425 MB）。
+> 平台示例卡在输出缺失时会显示"暂时无法预览素材"（不会白屏）。
 
-## 接入方法
+---
 
-每个方法使用一份 JSON 配置定义输入、参数、样例和 HTTP 接口。前端根据配置生成页面与表单，支持多素材输入和多个结果文件。CPU / GPU 算法均可通过相同接口接入，算法运行环境由各自服务管理。
+## 8. 验证与已知限制
 
-在“接入算法”页面填写或导入配置，可先登记到当前浏览器测试。每组在自己的 Fork 中添加方法配置、目录索引和样例，并通过 PR 提交成果。根目录 `README.md` 必须介绍本组实际完成的工作，不能直接沿用平台或 baseline 的介绍。
+### 实际执行过的测试
 
-提交 PR 后，方法可在本组 Fork 中运行，公共仓库通过 PR 集中查看成果。正式加入公共平台目录时，由维护者另外整理已确认的方法配置与样例，保留平台的根目录 README。
+| 测试 | 结果 |
+|---|---|
+| `npm test` / `npm run build` | ✅ 6/6 通过 / 构建通过 |
+| `scripts/test_service.py --mock` | ✅ **40/40** 通过（协议全项） |
+| `stage2/verify_gradients.py` | ✅ **12/12** 通过（梯度确实穿过三层冻结组件回到 G） |
+| `stage2/verify_mel.py` | ✅ **4/4** 通过（torch 版 GE2E 与上游 mel 误差 2.3e-05，嵌入余弦 0.99999481） |
+| `stage2/train.py --stub --steps 6` | ✅ 训练机制跑通（8004 条 / 80 说话人） |
+| `scripts/prepare_data.py` | ✅ 三条硬要求自检全通过 |
 
-## 目录
+### 接口当前状态
 
-```text
-public/methods/      方法配置与目录索引
-public/samples/      输入、输出样例
-public/templates/    方法配置模板
-src/components/      素材预览、参数表单、处理工作区
-src/pages/           集合、详情、接入与指南页面
-src/services/        浏览器处理与 HTTP 调用
-src/lib/             配置校验、目录加载与本机登记
-docs/                使用与算法接入文档
-tests/               接口契约与处理逻辑测试
-```
+- 服务代码已完成并通过协议自测；**真实推理需要上游三个权重**。
+- 权重缺失时接口返回 **503 + 中文说明**（明确指出缺哪个文件、去哪儿下），不是 500 traceback。
 
-技术栈为 React、Vite、JavaScript 和 CSS。方法页面统一使用 `#/methods/方法ID` 路径。
+### 已知限制
+
+1. **L1 阶段扰动是随机高斯噪声**（尚未训练 Stage 2 的生成器 G），
+   因此当前指标反映的是**链路是否正确**，**不代表论文水平**。
+   论文报告 Sim_prot 0.95 / Sim_clone 0.13 / DSR 87.2%，我们还没到那一步。
+2. **Stage 2 缺一个可求导的声码器**（`bridge_vocoder` 是 numpy 封装，梯度断在里面）。
+   候选与取舍见 [`docs/notes/stage2_blockers.md`](docs/notes/stage2_blockers.md)。
+3. **MOS 听测未做**（论文 50 人）——【待填：实际人数】。
+4. **黑盒迁移未做**（论文的 Figure 2 跨系统实验，最难，放最后）。
+5. VCTK 每人只取了 **100 句**（均匀抽样），不是全部 ~400–800 句 —— 为把 10.94 GiB 的下载压到 1.36 GiB。
+
+### 耗时与资源
+
+- 单条推理（CPU）：【待填：实测】。
+- 平台是**同步等待**的，接口设计上按 < 60 秒考虑；服务内部已缓存模型，不会每次重载。
+
+---
+
+## 9. 附加文档
+
+- [实验记录（与代码同 commit）](docs/experiments.md)
+- [两人接口契约（形状与签名）](docs/interface-contract.md)
+- [任务板与分工](algorithms/voiceprint_protection/TASKS.md)
+- [Stage 2 的阻塞项与待决问题](docs/notes/stage2_blockers.md)
+- [GE2E 接口核实记录](docs/notes/ge2e_interface.md)
+- [VCTK 目录勘察结果](docs/notes/vctk_layout.md)
+- [VCTK 下载方案](docs/notes/download_vctk.md)
+- [数据与第三方组件的存放位置（C 盘不够用怎么办）](docs/notes/data-location.md)
+- [第三方组件来源与许可登记](third_party/README.md)
+- [方法配置](public/methods/group_n005_voiceprint_protection.json)
+- [样例素材与署名](public/samples/group_n005_voiceprint_protection/SOURCES.md)

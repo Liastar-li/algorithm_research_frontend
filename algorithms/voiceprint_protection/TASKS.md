@@ -406,7 +406,8 @@ cut -d' ' -f2 data/train.txt | sort -u | wc -l
 | `stage2/dataset.py` | VCTK 数据集（按清单读、随机裁） | ✅ |
 | `stage2/train.py` | 训练主循环 | ✅ |
 | `stage2/verify_gradients.py` | **梯度通路自检**（12 项，全通过） | ✅ |
-| `stage2/verify_mel.py` | torch GE2E ↔ 上游 numpy 数值对照 | ✅ |
+| `stage2/verify_mel.py` | torch GE2E ↔ 上游 numpy 数值对照（4 项，全通过） | ✅ |
+| `stage2/verify_psychoacoustics.py` | 心理声学掩蔽自检（20 项，全通过） | ✅ |
 | `algorithms/voiceprint_protection/evaluate.py` | Sim_prot / Sim_clone / DSR / WER + 高斯噪声基线 + 消融入口 | ✅ |
 | `docs/notes/stage2_blockers.md` | **阻塞项清单**（可求导声码器 / Stage 1 checkpoint 等） | ✅ |
 
@@ -518,3 +519,13 @@ AutoVC 权重），迁到昇腾要装 CANN + `torch_npu`，并把 `.cuda()` 改�
 - [ ] **组号与选题名称** → 确定后统一改方法 ID、目录名、README 标题
 - [ ] **MOS 听测人数**：论文是 50 人，我们做多少？（如实写明即可）
 - [ ] **W4–W5 是否也交换主责**（W6 起交换是必须的）
+- [ ] **★ Sim_clone 的口径**（2026-11-18 新增，需 A 拍板）
+      - 论文口径：`cos(E_spk(克隆音), h)` —— "克隆出来的**声音**有多像本人"
+      - 契约 §4.3 里写的：`cos(h, h_stolen)` —— "攻击者重新提的**卡**有多像原卡"
+      - 这两个量**不是一回事**：后者其实等于 `Sim_prot`（保护后语音 vs 原语音）
+      - `evaluate.py` 目前以**论文口径**为主，另报 `sim_clone_no_defense` 作对照
+      - 详见 `docs/interface-contract.md` §4.5.5
+- [ ] **★ Stage 2 用哪个声码器**（2026-11-18 新增，需 A 拍板）
+      - 推荐 AutoVC 配套的 `wavenet_vocoder`（mel 约定天然匹配，论文的 L_mel / L_mask 才严格成立）
+      - 备选 HiFi-GAN（论文同款，但 mel 口径要做近似换算）
+      - 详见 `docs/notes/stage2_blockers.md` §1

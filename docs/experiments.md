@@ -170,13 +170,14 @@ python algorithms/voiceprint_protection/scripts/make_sample.py
 
 | 项 | 结果 |
 |---|---|
-| `stage2/` 8 个模块 | ✅ 代码写完（generator / discriminator / psychoacoustics / losses / models / pipeline / dataset / train） |
-| 训练机制跑通 | ✅ `--stub --steps 6` 正常训练（8004 条 / 80 说话人） |
+| `stage2/` 12 个模块 | ✅ 代码写完（generator / discriminator / psychoacoustics / losses / models / pipeline / dataset / train + 3 个 verify 脚本） |
+| 训练机制跑通 | ✅ `--stub --steps 5` 正常训练（8004 条 / 80 说话人；L_de / L_per / L_mask / L_GAN 全有值） |
 | **梯度通路自检** | ✅ **12/12 通过**（`stage2/verify_gradients.py`） |
 | torch GE2E vs 上游数值对照 | ✅ mel 最大绝对误差 **2.3e-05**；嵌入余弦 **0.99999481**（`stage2/verify_mel.py`） |
+| **心理声学掩蔽自检** | ✅ **20/20 通过**（`stage2/verify_psychoacoustics.py`） |
 | 正式训练 | ⛔ **缺可求导声码器 + 缺 Stage 1 checkpoint** → 见 [notes/stage2_blockers.md](notes/stage2_blockers.md) |
 
-**★ 本轮最重要的两个发现**（都已变成会失败的断言）：
+**★ 本轮最重要的四个发现**（都已变成会失败的断言）：
 
 1. **指南伪代码里的 `with torch.no_grad()` 不能照抄** ——
    照抄会让梯度被切断，G 收不到任何梯度，loss 一步不动，**而且不报错**。
@@ -184,6 +185,12 @@ python algorithms/voiceprint_protection/scripts/make_sample.py
    **不等于**切断梯度（那才是 `no_grad()` / `.detach()`）。
 2. **torch 版 GE2E 必须与上游 numpy 版逐值一致** ——
    不一致时训练与推理的说话人嵌入不是一回事，**同样不报错**。
+3. **心理声学掩蔽的参考电平必须对齐** ——
+   掩蔽阈值是 dB SPL，扰动 PSD 是数字信号量纲；不统一的话 `L_mask` **恒为 0**，
+   那条约束形同虚设，而且**不报错**。
+4. **"掩蔽不到"不能当成"极低阈值"** ——
+   扩散函数够不着的频带如果用 −200 dB 代替，会把整条阈值曲线压到绝对听阈上，
+   结果 `L_mask` 又是恒为 0。
 
 ---
 
@@ -204,6 +211,9 @@ python algorithms/voiceprint_protection/scripts/make_sample.py
 | **每次请求重载模型** | `infer.protect()` 每次新建 `Protector()` → 400 MB 重载 → 必超时 | TASKS.md §0.4b |
 | **冻结 ≠ 断梯度** | 伪代码里的 `no_grad()` 会让训练**静默失效** | notes/stage2_blockers.md §6.1 |
 | **numpy 封装断梯度** | `bridge_autovc` / `bridge_vocoder` 内部 `no_grad()` → Stage 2 用不了 | notes/stage2_blockers.md §1 |
+| **掩蔽阈值与 PSD 参考电平不一致** | `L_mask` 恒为 0，约束形同虚设 | notes/stage2_blockers.md §6.4 |
+| **"掩蔽不到"≠"极低阈值"** | 整条阈值曲线被压到绝对听阈上 | notes/stage2_blockers.md §6.4 |
+| **调性判定方向反了** | 纯音被当成噪声 → 阈值偏高 14 dB | notes/stage2_blockers.md §6.4 |
 
 ---
 

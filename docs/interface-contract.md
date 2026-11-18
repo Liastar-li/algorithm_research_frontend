@@ -200,6 +200,82 @@ wav ─► GE2E ─► h ─► h_adv = h + α·δ
   `make_sample.py` 兼容两种形态（模块级 `protect(...)` 或 `Protector.protect(...)`）。
   **签名再变就要同步改这两个脚本。**
 
+### 4.5 ★ Stage 2 的接口与形状（2026-11-18 新增，成员 B）
+
+> Stage 2 的代码在 `algorithms/voiceprint_protection/stage2/`。
+> 这一节只记**两人都会碰到的**部分：形状、接口、冻结约定。
+
+#### 4.5.1 张量形状（续 §2）
+
+| 符号 | 名称 | 形状 | 说明 |
+|---|---|---|---|
+| `δ` | 扰动 | `(B, 256)` | **单位长度**（‖δ‖=1）→ α 是唯一的强度旋钮 |
+| `h_adv` | 被污染的嵌入 | `(B, 256)` | `h_adv = normalize(h + α·δ)`，**重新 L2 归一化** |
+| `c` | 内容码 | `(B, T', 64)` | `T' = T // 32`（AutoVC 抽样式降采样） |
+| `c_arb` | 打乱配对的内容码 | `(B, T', 64)` | 论文的 "arbitrary content"，batch 内随机置换 |
+| `x_adv` | 保护后 mel | `(B, T, 80)` | **与 `x` 帧数必须完全相等** |
+| `wav_adv` | 保护后波形 | `(B, N)` | `N = T · 256` |
+| `δ_wav` | 波形扰动 | `(B, N)` | `δ_wav = V(x_adv) − V(x)`，**两条波形要先对齐到等长** |
+| `h_stolen` | 攻击者重新提的卡 | `(B, 256)` | `h_stolen = E_spk(wav_adv)` |
+
+#### 4.5.2 ★ 冻结 ≠ 断梯度（最容易踩的一条）
+
+Stage 1 的解码器、声码器、`E_spk` 都**冻结**（不更新参数），
+但**梯度必须能穿过它们流回 G**：
+
+```
+G → h_adv → D(c, h_adv) → V(·) → E_spk(·) → L_de
+```
+
+- **冻结** = `requires_grad_(False)` + `eval()`
+- **切断梯度** = `torch.no_grad()` 或 `.detach()` ← 这两个**不要**在前向里用
+
+> 指南第 6 步的伪代码把整段前向包进了 `torch.no_grad()`。
+> **照抄会让训练静默失效**（loss 一步不动、不报错）。
+> 已由 `stage2/verify_gradients.py` 变成会失败的断言。
+
+#### 4.5.3 可求导组件放哪（不改动 A 的桥接层）
+
+| 需求 | 用哪个 | 为什么不用现成的 |
+|---|---|---|
+| `E_spk`（可导） | `stage2/models.py::TorchSpeakerEncoder` | `bridge_speaker.SpeakerBridge` 是 numpy 封装 |
+| Stage 1 解码器（可导） | `stage2/models.py::TorchAutoVCStage1` | `bridge_autovc.AutoVCBridge` 内部 `no_grad()` |
+| 声码器（可导） | `stage2/pipeline.py::HiFiGANVocoder` | `bridge_vocoder.VocoderBridge` 内部 `no_grad()` |
+
+> **两套实现并存是刻意的**：`bridge_*` 供推理链（L1/平台）用，
+> `stage2/models.py` 供训练用。两者加载**同一个** checkpoint，结构一致。
+> `stage2/verify_mel.py` 保证 torch 版 GE2E 与上游 numpy 版**逐值一致**
+> （mel 误差 2.3e-05，嵌入余弦 0.99999481）。
+
+#### 4.5.4 损失函数签名（论文式 7–13）
+
+```python
+from stage2.losses import (
+    mel_loss, mask_loss, perceptual_loss,          # 式 7/8/9
+    discriminator_gan_loss, generator_gan_loss,     # 式 10/11（LSGAN，无 sigmoid）
+    defense_loss,                                  # 式 12（★ 要最小化）
+    generator_loss,                                # 式 13
+)
+```
+
+超参全部读 `config.STAGE2`（唯一真源）：`α=0.10, λ_per=15.0, λ_de=5.0, λ_mask=0.1, λ_GAN=1.0`。
+
+> ⚠️ `defense_loss` 是**最小化**余弦相似度（论文的 "Minimizing L_de"）。
+> 方向反了训练会把音频毁掉。`stage2/train.py` 每步都打印 `L_de`，**它应该下降**。
+
+#### 4.5.5 评测指标的口径
+
+| 指标 | 定义 | 备注 |
+|---|---|---|
+| `Sim_prot` ↑ | `cos(h_stolen, h)` | 保护后语音 vs 原始语音 |
+| `Sim_clone` ↓ | `cos(E_spk(clone), h)` | **论文口径**：克隆音 vs 原始说话人 |
+| `DSR` ↑ | `mean(Sim_clone < τ)`，τ ∈ {0.3, 0.4, 0.5} | 论文 79.8 / 83.5 / 87.2 |
+| `WER` ↓ | Whisper 转写 vs 标准转写 | 论文 5.30% |
+
+> ⚠️ `docs/interface-contract.md` §4.3 里说的 "`Sim_clone` 的语义就是 `cos(h, stolen)`"
+> **与论文口径不同** —— 那个量其实等于本节的 `Sim_prot`。
+> `evaluate.py` 以**论文口径**为主，同时报 `sim_clone_no_defense` 作对照。
+> **A 请确认这一条的口径**（见 TASKS.md §9 待决事项）。
 
 ## 5. 数据清单格式（成员 B）
 
@@ -238,6 +314,7 @@ data/spk2id.txt  每行：<说话人名> <整数 ID>，只含训练集说话人�
 | 2026-11-17 | v0.1 | 起草：补齐三个桥接模块签名、`infer.protect()` 签名、清单格式 | 成员 B | ⬜ 待成员 A 确认 |
 | 2026-11-17 | **v0.2** | **按实际代码重写 §1/§3/§4**：预设改为 `model16k`（取消 22.05k）、AutoVC mel 改为自定义链、`AutoVCBridge` 的方法改为 `protect`/`reconstruct`、`VocoderBridge` 改为 `synthesize`、`infer` 改为 `Protector.protect(wav, ...)`；`bridge_speaker.py` 增补路线 B 的 `SpeakerBridge` | 成员 B（合并时核对） | ⬜ 待成员 A 确认 |
 | 2026-11-18 | **v0.3** | **按 A 的新链路重写 §4**：L1 改为「克隆机路线」（上游合成器+声码器，不用 AutoVC 权重）；`infer.protect()` 有模块级接口；新增 `bridge_cloner.py`；**路线取舍已定 —— 用路线 B（论文 GE2E）** | 成员 B（合并时核对） | ⬜ 待成员 A 确认 |
+| 2026-11-18 | **v0.4** | **新增 §4.5 Stage 2 的接口与形状**；写明「冻结 ≠ 断梯度」、可求导组件的分工、损失函数签名、评测指标口径 | 成员 B | ⬜ 待成员 A 确认 |
 
 ---
 
@@ -257,3 +334,7 @@ data/spk2id.txt  每行：<说话人名> <整数 ID>，只含训练集说话人�
 > - [x] **路线取舍**：已定为**路线 B（论文的 GE2E）** —— `infer.py` 已改用 `SpeakerBridge`
 > - [ ] A 的 `bridge_cloner.py`（攻击者克隆机）依赖的三个上游权重下载方式与 §4.3 一致
 > - [ ] `make_sample.py` / `smoke_test.py` 在 A 改签名后仍能跑通（跑一次确认）
+> - [ ] **§4.5.5 的 Sim_clone 口径**：以论文口径（克隆音 vs 原说话人）为准？
+> - [ ] **§4.5.2 的冻结约定**：Stage 2 用 `stage2/models.py` 的可求导组件，
+>       不改动 `bridge_autovc` / `bridge_vocoder`（推理链继续用它们）
+> - [ ] **§4.5.4 的 `defense_loss` 是最小化**（论文式 12 的 "Minimizing L_de"）
