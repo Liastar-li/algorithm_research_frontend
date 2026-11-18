@@ -82,8 +82,9 @@ h = encoder.embed(mel: np.ndarray, crop: int = 128)    -> np.ndarray  # (256,) �
 - 两条路线的输出**都已 L2 归一化**，调用方不要再归一化。
 - `sample_rate` 是**输入音频的原生采样率**；不是 16 kHz 时桥接层内部自动重采样。
 
-> ⚠️ **论文要求走路线 B**（脚注 2 引用的就是 GE2E），
-> 但路线 A 是 AutoVC 官方权重自带的、配套最完整。**取舍待成员 A 确认**（见 TASKS.md §0.8）。
+> ✅ **路线取舍已定：走路线 B**（论文的 GE2E）。`infer.py` 现在用的就是 `SpeakerBridge`。
+> `SpeakerEncoderBridge`（路线 A）保留在文件里，供 AutoVC 权重链那条备选路线使用。
+> 详见 §4.4。
 
 ### 3.2 `bridge_autovc.py`（成员 A）
 
@@ -132,39 +133,73 @@ wav = bridge.synthesize(mel)  # (T, 80) 的 AutoVC mel -> 一维波形
 > 代码里请一律用 `config.DEFAULT_PRESET` 符号引用，别写死字符串。
 
 
-## 4. 推理主流程 `infer.py`（成员 A 主责，B 写冒烟测试要用）
+## 4. 推理主流程 `infer.py`（成员 A 主责，B 的脚本依赖它）
 
-> ⚠️ 下面是**按实际代码**（2026-11-17 合并时核对）写的。
+> ⚠️ 下面是**按 2026-11-18 合并后的实际代码**写的。
+
+### 4.1 模块级接口（`make_sample.py` 走这条）
+
+```python
+from infer import protect
+
+result = protect(
+    wav_path,                       # 输入音频路径
+    alpha=0.10,
+    output_path=None,               # 保护后 wav 的输出路径（None 则不写文件）
+    text="...",                     # 攻击者要念的参考文本
+    attack_mode="clone",            # "clone" 额外产出攻击者克隆音；"none" 只产保护后语音
+    seed=42,
+)
+# 返回 dict，至少含 'protected_path' 与 'shapes'
+```
+
+### 4.2 类接口（逐步调试用）
 
 ```python
 from infer import Protector, perturb_embedding, random_perturbation
 
-protector = Protector()                       # 装配 AutoVC / 说话人编码器 / 声码器
-result = protector.protect(wav, alpha=0.10, seed=42, verbose=True)
+protector = Protector(use_speaker_bridge=True, with_cloner=True)
+result = protector.protect(wav, alpha=0.10, seed=42, text=..., attack_mode="clone")
 # result 里至少有：
-#   "waveform"      保护后波形（一维 np.float32）
-#   "embedding"     (256,) 说话人嵌入
-#   "embedding_adv" (256,) 加扰动后的嵌入
-#   "protected_mel" (T, 80) 保护后 mel
-#   "shapes"        各步的张量形状
+#   "embedding"                (256,) 原始说话人嵌入
+#   "embedding_adv"            (256,) 加扰动后的嵌入
+#   "protected_waveform"       (N,)  保护后语音
+#   "clone_baseline_waveform"  (N,)  未防御时攻击者的克隆音   ← attack_mode="clone" 时才有
+#   "clone_protected_waveform" (N,)  防御后攻击者的克隆音     ← 同上
+#   "stolen_embedding"         (256,) 攻击者从保护后语音里重新提的卡
+#   "shapes"                   各步张量形状
 ```
 
-- `protect()` 的第一个参数是**波形数组**（不是路径），
-  路径 → 波形由 `audio_utils.load_audio(path, sample_rate)` 负责。
-- 逐步接口（便于定位问题）：`to_mel()` / `embedding()` / `protect_mel()` / `to_waveform()`。
-- **L1 阶段**：`δ` 用**随机方向**（`random_perturbation(seed=...)`，固定 seed）代替训练好的 `G`。
-- `scripts/smoke_test.py` 与 `scripts/make_sample.py` 都按这个 API 调用；
-  **`make_sample.py` 兼容两种形态**：模块级 `protect(...)` 或 `Protector.protect(...)`，
-  谁先存在用谁 —— **签名再变就要同步改这两个脚本**。
+### 4.3 ★ L1 走的是"克隆机路线"（不是 AutoVC 重建）
 
-> 💡 若希望 `make_sample.py` 这类脚本更省事，可以给 `infer.py` 加一个模块级薄封装：
-> ```python
-> def protect(wav_path, alpha=0.10, output_path=None) -> dict:
->     """文件进、保护后 wav 落盘、返回带 shapes 的报告。"""
-> ```
-> 加了之后 `make_sample.py` 会自动走这条更简洁的路径。
+```text
+wav ─► GE2E ─► h ─► h_adv = h + α·δ
+                  │
+                  └─► 克隆机.clone(text, h_adv) ─► 保护后语音 protected.wav
+                                                          │
+攻击者行骗 ────────────────────────────────────────────────┘
+  baseline = clone(text, h)            未防御时攻击者克隆音（很像本人）
+  stolen   = GE2E(protected)           攻击者从保护后语音重新提卡
+  cloned   = clone(text, stolen)       防御后攻击者克隆音（应不像本人）
+```
 
----
+- 这条路线**不需要 AutoVC 官方权重**（实测 IBM Box 链接已 404 失效）。
+- 需要上游 RTC 的三个权重：`encoder.pt`(17 MB) + `synthesizer.pt`(371 MB) + `vocoder.pt`(54 MB)，
+  全部在 HuggingFace `CorentinJ/SV2TTS`。
+- **`Sim_clone` 的语义就是 `cos(h, stolen)`** —— 越小说明防御越有效。
+- AutoVC 路线（`bridge_autovc.protect`）保留在 `protect_mel()` 里**按需加载**，
+  等 Stage 1 训完自己的模型再用。
+
+### 4.4 路线取舍：**已解决**
+
+原 §3.1 的两条路线（AutoVC 自带 D_VECTOR vs 论文的 GE2E）**已经收敛到论文路线**：
+`infer.py` 现在用的是 `SpeakerBridge`（上游 GE2E），不再用 `SpeakerEncoderBridge`。
+`SpeakerEncoderBridge` 仍保留在 `bridge_speaker.py` 里，供 AutoVC 权重链那条备选路线使用。
+
+- `scripts/smoke_test.py` 与 `scripts/make_sample.py` 都按 §4.1 调用；
+  `make_sample.py` 兼容两种形态（模块级 `protect(...)` 或 `Protector.protect(...)`）。
+  **签名再变就要同步改这两个脚本。**
+
 
 ## 5. 数据清单格式（成员 B）
 
@@ -202,6 +237,7 @@ data/spk2id.txt  每行：<说话人名> <整数 ID>，只含训练集说话人�
 |---|---|---|---|---|
 | 2026-11-17 | v0.1 | 起草：补齐三个桥接模块签名、`infer.protect()` 签名、清单格式 | 成员 B | ⬜ 待成员 A 确认 |
 | 2026-11-17 | **v0.2** | **按实际代码重写 §1/§3/§4**：预设改为 `model16k`（取消 22.05k）、AutoVC mel 改为自定义链、`AutoVCBridge` 的方法改为 `protect`/`reconstruct`、`VocoderBridge` 改为 `synthesize`、`infer` 改为 `Protector.protect(wav, ...)`；`bridge_speaker.py` 增补路线 B 的 `SpeakerBridge` | 成员 B（合并时核对） | ⬜ 待成员 A 确认 |
+| 2026-11-18 | **v0.3** | **按 A 的新链路重写 §4**：L1 改为「克隆机路线」（上游合成器+声码器，不用 AutoVC 权重）；`infer.protect()` 有模块级接口；新增 `bridge_cloner.py`；**路线取舍已定 —— 用路线 B（论文 GE2E）** | 成员 B（合并时核对） | ⬜ 待成员 A 确认 |
 
 ---
 
@@ -218,5 +254,6 @@ data/spk2id.txt  每行：<说话人名> <整数 ID>，只含训练集说话人�
 > - [ ] A 的 `infer.py` 签名与 §4 一致（`scripts/smoke_test.py` 与 `scripts/make_sample.py` 依赖它）
 > - [ ] `c` 的帧数确实是 `T // 2`
 > - [ ] 双方都同意"只有 GE2E 内部的 40 维 mel 是例外"这一条
-> - [ ] **路线取舍**：L1 用路线 A（AutoVC 自带 D_VECTOR）还是路线 B（论文的 GE2E）？
->       论文要求路线 B，但路线 A 的权重链更完整 —— 见 TASKS.md §0.8
+> - [x] **路线取舍**：已定为**路线 B（论文的 GE2E）** —— `infer.py` 已改用 `SpeakerBridge`
+> - [ ] A 的 `bridge_cloner.py`（攻击者克隆机）依赖的三个上游权重下载方式与 §4.3 一致
+> - [ ] `make_sample.py` / `smoke_test.py` 在 A 改签名后仍能跑通（跑一次确认）

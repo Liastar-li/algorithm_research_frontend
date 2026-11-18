@@ -44,9 +44,10 @@
 | `third_party/AutoVC` | ✅ 已克隆，commit `c1827a6` |
 | `third_party/RTC`（GE2E） | ✅ 已克隆，commit `890f3a0`；权重 `encoder.pt` 已下载并校验 |
 | VCTK 数据 | ✅ 110 说话人 / 11,004 条，划分 80/10/20 已自检通过 |
+| L1 推理链 | ✅ 端到端跑通（成员 A 2026-11-17，克隆机路线）；⏳ 差 `synthesizer.pt` + `vocoder.pt` 才能在本机复现 |
 | **当前阶段** | **W2 · 指南第 3 步 + 第 4 步** |
 | **下一个里程碑** | **M1：L1 推理链跑通**（产出保护后音频）—— 差 `synthesizer.pt` + `vocoder.pt`（见 0.8 路线决策） |
-| **待补依赖** | `python-multipart` 升到 0.0.20（起服务前必须）、`scikit-learn==1.5.2`（上游 GE2E 必需） |
+| **待补依赖** | `python-multipart` 升到 0.0.20（起服务前必须）、`scikit-learn==1.5.2`（上游 GE2E 必需）、`Unidecode` + `inflect`（上游合成器的文字处理，克隆机必需） |
 
 ### ★ 本周已取得的关键结论（2026-11-13 实测，详见 [docs/notes/autovc_alignment.md](docs/notes/autovc_alignment.md)）
 
@@ -56,7 +57,7 @@
 | 2 | **AutoVC 官方权重是 16 kHz 的**（不是 22.05 kHz） | **全程 16 kHz**，原"22.05k 预设"取消 |
 | 3 | **AutoVC 的 mel 不是 librosa**（reflect 填充 + 幅度 + dB + clip[0,1] + fmin=90 + 30Hz 高通） | 已实现 `autovc_mel()`，必须跑对照脚本验证 |
 | 4 | content code 实际 **64 维**（dim_neck 32 × 双向），下采样 `freq=32` | 契约已更正 |
-| 5 | AutoVC 的说话人嵌入用 `D_VECTOR`（**输入 80 维** mel）；论文脚注的 GE2E 用 **40 维** mel | **两套权重不可混用**，L1 用前者、最终系统用后者 |
+| 5 | AutoVC 的说话人嵌入用 `D_VECTOR`（**输入 80 维** mel）；论文脚注的 GE2E 用 **40 维** mel | **两套权重不可混用**；⚠️ 2026-11-17 已改判：**L1 与最终系统都用 GE2E**（AutoVC 权重链 404，见 §0.8） |
 | 6 | AutoVC 官方权重在 **IBM Box**（不是 Google Drive）；Google Drive 直连不通 | 需代理或找镜像 |
 
 ### 0.4 本轮进展（成员 B · 2026-11-17）
