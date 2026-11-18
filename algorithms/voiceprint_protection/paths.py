@@ -116,11 +116,16 @@ def models_dir() -> Path:
     """外部预训练权重目录（GE2E 的 encoder.pt 等）。
 
     权重加起来有 1 GB 级别（Whisper 更大），放 D 盘更合适。
+
+    ★ **默认不跟随 VPP_DATA_ROOT**：模型权重和数据是**两回事**。
+      把 VPP_DATA_ROOT 指到别处（冒烟测试的假数据、云机的数据盘）时，
+      预训练权重不应该跟着搬家 —— 否则 `find_weights` 会突然找不到 encoder.pt。
+      要换权重目录请用 `VPP_MODELS_DIR`。
     """
     env = os.environ.get("VPP_MODELS_DIR")
     if env:
         return Path(env).expanduser()
-    return data_root() / "models"
+    return REPO_ROOT / "data" / "models"
 
 
 def sample_dir(method_id: str) -> Path:

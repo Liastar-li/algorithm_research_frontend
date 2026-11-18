@@ -103,6 +103,30 @@ MEL_PRESETS = {
         "fmax": 7600,
         "chain": "autovc",   # 30Hz 高通 + reflect 幅度 STFT + dB + clip[0,1]
     },
+    # ★ 第二套模型侧 mel：**上游 WaveRNN 声码器**那套约定。
+    #   来源：third_party/Real-Time-Voice-Cloning/synthesizer/audio.py::melspectrogram
+    #     preemphasis(0.97) -> librosa.stft(n_fft=800, hop=200, win=800, center=True)
+    #     -> 幅度 -> librosa.filters.mel(16000, 800, n_mels=80, fmin=55, fmax=7600)
+    #     -> 20*log10(max(1e-5,.)) - 20
+    #     -> 对称归一化 clip(8*(S+100)/100 - 4, -4, 4)
+    #     -> 再 /4 -> **[-1, 1]**（WaveRNN 训练时的量纲，见 vocoder_dataset.py:28）
+    #   ★ 存在的意义：WaveRNN 只吃自己那套 mel 约定。
+    #     喂 model16k（AutoVC 链）的 mel 进去，出来是噪音（且不报错）。
+    #   ★ 取值范围是 [-1, 1]，与 model16k 的 [0, 1] 不同 —— 别混。
+    "rtc16k": {
+        "sample_rate": 16000,
+        "n_fft": 800,
+        "hop_length": 200,
+        "win_length": 800,
+        "n_mels": 80,
+        "fmin": 55,
+        "fmax": 7600,             # ★ synthesizer 的 hparams 写的是 7600（不是 8000）
+        "preemphasis": 0.97,
+        "ref_level_db": 20,
+        "min_level_db": -100,
+        "max_abs_value": 4.0,     # 对称归一化的半幅；WaveRNN 训练时除以它 -> [-1,1]
+        "chain": "rtc",           # preemph + librosa STFT + 幅度 + dB + 对称归一化
+    },
 }
 
 DEFAULT_PRESET = "model16k"
@@ -177,13 +201,36 @@ STAGE1 = {
     "iterations": 500_000,     # 论文值；算力不足时按第 4 章分档缩减
     "lambda_cd": 1.0,          # 论文值
     "lambda_dis": 0.01,        # 论文值
-    "content_dim": 32,         # AutoVC 瓶颈维度
+    "content_dim": 32,         # AutoVC 瓶颈维度 dim_neck（双向 LSTM -> content code 实际 64 维）
+    "content_window": 4,       # ★ L_dis 里沿时间维拼接的 content code 个数
+                                #   4 x 64 = 256 维，正好与论文的 W_s ∈ R^{K×256} 对上
+                                #   （见 stage1/losses.py 文件头的说明）
     "num_speakers": 80,        # 训练集说话人数 K，用于 L_dis 的分类器 Ws
     "batch_size": 8,           # 8 GB 显存下的建议值（第 5 章 2.4）
     "accum_steps": 2,          # 梯度累积
     "max_seconds": 3.0,        # 训练片段截断长度（秒）
-    "amp": True,               # 混合精度
+    "amp": True,               # 混合精度（fp16）：省显存 + 快 1.5~2 倍
     "lr": 1e-4,
+    # ★ 模型侧用哪套 mel 约定（Ec/D 的输入）。
+    #   "rtc16k"   = **上游 WaveRNN 声码器那套**（n_fft 800 / hop 200 / fmin 55 /
+    #                fmax 7600 / preemphasis / 取值 [-1,1]）—— ★ 当前默认
+    #   "model16k" = AutoVC 官方链（n_fft 1024 / hop 256 / fmin 90 / 取值 [0,1]）
+    #
+    #   【为什么默认是 rtc16k】
+    #   论文 §2.3：x_adv = D(c, h_adv) 之后要"用 HiFi-GAN 声码器 V(·) 转成波形"。
+    #   但 **NVIDIA 的 torch.hifi_gan 仓库已下架**（2026-11 实测 GitHub API 404），
+    #   16 kHz 的 HiFi-GAN 权重取不到；我们唯一能用的声码器是上游 WaveRNN，
+    #   而它**只吃 rtc16k 那套 mel**（喂 model16k 的 mel 出来是噪音，且不报错）。
+    #   ⇒ 端到端能跑通比"mel 与 AutoVC 官方逐位相同"更重要。
+    #
+    #   【AutoVC 的架构没变】论文 §3.1 要求的是"Stage 1 采用 AutoVC 的**架构**"
+    #   （3 层卷积 + 双向 LSTM 瓶颈 32 + 解码器 + 5 层 postnet）—— 我们照搬了。
+    #   mel 是**预处理约定**、不是架构，论文没有规定。
+    #   autovc_mel() 仍然保留并通过官方对照（最大差 0.000e+00），
+    #   等将来有 HiFi-GAN / AutoVC 官方权重时可直接切回。
+    #
+    #   ★ 这是**两人共同区**（config.py），改动需双方同意，见 docs/interface-contract.md。
+    "mel_preset": "rtc16k",
 }
 
 # ---------------------------------------------------------------------------

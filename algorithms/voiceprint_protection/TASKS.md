@@ -43,16 +43,13 @@
 | `config.py` / `audio_utils.py` | ✅ 已写好（★ 已按 AutoVC 官方实测对齐） |
 | `third_party/AutoVC` | ✅ 已克隆，commit `c1827a6` |
 | `third_party/RTC`（GE2E） | ✅ 已克隆，commit `890f3a0`；权重 `encoder.pt` 已下载并校验 |
-| VCTK 数据 | ✅ 110 说话人 / 11,004 条，划分 80/10/20 已自检通过 |
-| L1 推理链 | ✅ **端到端跑通并实测通过**（2026-11-18：三个上游权重就位 + `Unidecode`/`inflect` 装好） |
-| 平台算法服务 `service.py` | ✅ **已写完并实测通过 41 项契约自测**（成员 B 2026-11-18，补做 A 的 P3） |
-| 平台接口耗时 | ✅ **201.8s → 21.6s**（声码器折叠块长调优，实测见 experiments.md §3d） |
-| 平台方法登记 | ✅ 已追加进 `public/methods/index.json`（P2） |
-| 平台样例（输入 + 输出） | ✅ `input.wav` / `output.wav` + 两个克隆对比音，**真实跑出来的**（P4） |
-| 基线指标 | ✅ 无防御 / 高斯噪声两条基线已测（40 条，experiments.md §3c） |
-| **当前阶段** | **W3 · 指南第 8 步 + 第 9 步** —— M1 已达成，剩平台端到端联调（P5） |
-| **下一个里程碑** | **M2 平台打通**（P5：在网页上上传 → 处理 → 预览 → 下载） |
-| **待补依赖** | 无 —— `python-multipart` / `scikit-learn` / `Unidecode` / `inflect` **全部装好并实测通过** |
+| VCTK 数据 | ✅ 110 说话人 / 11,004 条，划分 80/10/20 已自检通过 —— ⚠️ **但只在成员 B 的机器上**；成员 A 这边**还没下载**（`data/` 只有 `models/`） |
+| Stage 1 代码 | ✅ 已实现，19 项自检全过（`scripts/test_stage1.py`） |
+| **训练链路** | ✅ **2026-11-18 审计后全部打通**：AMP / 梯度累积 / 断点续训 / 验证回路 / 两种启动方式 / 帧数约定 —— 详见 **§0.10** |
+| **当前阶段** | **W2 收尾 → W3（平台打通）**；W4 的 Stage 1 训练**代码已就绪，等数据** |
+| **下一个里程碑** | **M2 平台打通**（W3：`service.py` + 方法 JSON + 平台端到端） |
+| **开训的唯一阻塞** | **VCTK 数据还没下到成员 A 的机器上** —— 步骤见 §0.10.5 |
+| **待补依赖** | `python-multipart` 升到 0.0.20（起服务前必须）、`scikit-learn==1.5.2`（上游 GE2E 必需） |
 
 ### ★ 本周已取得的关键结论（2026-11-13 实测，详见 [docs/notes/autovc_alignment.md](docs/notes/autovc_alignment.md)）
 
@@ -62,7 +59,7 @@
 | 2 | **AutoVC 官方权重是 16 kHz 的**（不是 22.05 kHz） | **全程 16 kHz**，原"22.05k 预设"取消 |
 | 3 | **AutoVC 的 mel 不是 librosa**（reflect 填充 + 幅度 + dB + clip[0,1] + fmin=90 + 30Hz 高通） | 已实现 `autovc_mel()`，必须跑对照脚本验证 |
 | 4 | content code 实际 **64 维**（dim_neck 32 × 双向），下采样 `freq=32` | 契约已更正 |
-| 5 | AutoVC 的说话人嵌入用 `D_VECTOR`（**输入 80 维** mel）；论文脚注的 GE2E 用 **40 维** mel | **两套权重不可混用**；⚠️ 2026-11-17 已改判：**L1 与最终系统都用 GE2E**（AutoVC 权重链 404，见 §0.8） |
+| 5 | AutoVC 的说话人嵌入用 `D_VECTOR`（**输入 80 维** mel）；论文脚注的 GE2E 用 **40 维** mel | **两套权重不可混用**，L1 用前者、最终系统用后者 |
 | 6 | AutoVC 官方权重在 **IBM Box**（不是 Google Drive）；Google Drive 直连不通 | 需代理或找镜像 |
 
 ### 0.4 本轮进展（成员 B · 2026-11-17）
@@ -81,43 +78,6 @@
 | D3-1 | `docs/interface-contract.md`（**草案 v0.1，待成员 A 签字**） | ⬜ 待 A 确认 |
 | D1-6 | `third_party/README.md`（四个组件的 URL/commit/许可登记表） | ✅ 已合并双方信息 |
 | W3-P1 | `public/methods/group_n005_voiceprint_protection.json` + `npm run check:method` 校验器 | ⬜ 待 A review |
-
-### 0.4b ★ 本轮进展（成员 B · 2026-11-18：平台服务化）
-
-**背景**：任务板 §3 的 P3（`service.py`）原派给成员 A，但 A 还没写，
-而它是 M2 平台打通的**唯一卡点**（平台 POST 不过去）。
-B 先补上这块，两边都不耽误。
-
-| 任务 | 产出 | 状态 |
-|---|---|---|
-| W3-P3 | **`algorithms/voiceprint_protection/service.py`**（FastAPI + CORS + 统一错误格式 + 临时文件清理 + 模型单例缓存） | ✅ **40 项契约自测全通过** |
-| W3-P3 验收 | `algorithms/voiceprint_protection/scripts/test_service.py`（`--mock` 模式不用权重也能验协议） | ✅ |
-| W3-P2 | `public/methods/index.json` 追加本方法 | ✅ |
-| W3-P6 | `npm test`（6/6）+ `npm run build` | ✅ **全绿** |
-| W3-P4 | 样例**输出** `output.wav` | ⏳ **等 `synthesizer.pt` + `vocoder.pt`**（B 不能下 425 MB 权重，需用户执行） |
-
-#### 服务层踩到的三个坑（写下来免得 A 再踩一遍）
-
-| # | 坑 | 后果 | 怎么解 |
-|---|---|---|---|
-| 1 | **FastAPI 默认返回 `{"detail": ...}`** | 前端读的是 `detail.error`（`src/services/algorithms.js:104`），读不到就只显示"算法服务返回 HTTP 422。"，中文说明全丢 | 覆盖全局异常处理器，**所有**错误一律 `{"error": "..."}` |
-| 2 | **`infer.protect()` 每次调用都新建 `Protector()`** | 每次请求重载 400 MB 权重（encoder+synthesizer+vocoder），平台同步等待必然超时 | 服务层缓存**一个** `Protector` 实例，懒加载只建一次 |
-| 3 | 用户上传的**文件名不能拼进路径** | 可能含 `..`、中文、斜杠 | 临时文件一律 uuid 命名，结果文件也用 uuid 前缀 |
-
-#### 服务怎么起
-
-```bash
-conda activate vpp
-uvicorn algorithms.voiceprint_protection.service:app --host 127.0.0.1 --port 8000
-# 或者：python algorithms/voiceprint_protection/service.py
-```
-
-自测（不用下权重）：
-
-```bash
-python algorithms/voiceprint_protection/scripts/test_service.py --mock    # 40 项
-python algorithms/voiceprint_protection/scripts/test_service.py           # 真权重
-```
 
 ### 0.5 ★ 上游 RTC 在 2026-03 做过重构（成员 B 核实，三处影响）
 
@@ -201,7 +161,7 @@ AutoVC 官方 README 给的三件套权重（`autovc.ckpt` / `3000000-BL.ckpt` /
 | **架构**（Ec / D / PostNet、dim_neck=32、双向 LSTM、freq=32） | **Stage 1 我们自己实现并训练**（论文本来就要训） |
 | **mel 预处理链**（reflect 填充 + 幅度 + dB + clip[0,1] + fmin=90 + 30Hz 高通） | 已复刻在 `audio_utils.autovc_mel()`，**自训 Stage 1 时沿用** |
 | 官方权重 `3000000-BL.ckpt`（= GE2E） | 已被上游 `encoder.pt` 取代（同一个 Wan et al. [2018] GE2E 家族） |
-| **备选初始化权重**：`marlenezw/AutoVC_Voice_Conversion` 的 `ckpt_autovc.pth`（171 MB，MakeItTalk 出品，含 Ec + D + GE2E） | **Stage 1 训练的初始化权重来源**（HF 可下载）<br>⚠️ **2026-11-18 实测：不能直接初始化 AutoVC** —— 它的 `weight_hh` 形状不是方阵（多半是 Keras 转换来的），需要写转换脚本。**Stage 1 只能从零训练。** 见 `docs/experiments.md` §3e |
+| **备选初始化权重**：`marlenezw/AutoVC_Voice_Conversion` 的 `ckpt_autovc.pth`（171 MB，MakeItTalk 出品，含 Ec + D + GE2E） | **Stage 1 训练的初始化权重来源**（HF 可下载） |
 
 > `marlenezw` 那个 ckpt 的 README 明确写着：
 > *"The speaker encoder is a pre-trained model provided Wan et al. [2018]"* —— 正是论文用的 GE2E。
@@ -219,8 +179,144 @@ AutoVC 官方 README 给的三件套权重（`autovc.ckpt` / `3000000-BL.ckpt` /
 - [x] `scripts/download_rtc_weights.py`：定点下载 `synthesizer.pt` + `vocoder.pt`（带大小校验）
 - [x] `infer.py` 改写为路线 B，并加**模块级 `protect(wav_path, alpha, output_path)`**（成员 B 的 `make_sample.py` 约定一依赖它）
 - [x] `scripts/smoke_test.py` 步骤 2/3 改为「克隆机分支」与「端到端 + 攻击者对比」
-- [ ] 下载 `synthesizer.pt` / `vocoder.pt`，跑通端到端
-- [ ] Stage 1：按 AutoVC 架构自实现，用 `ckpt_autovc.pth` 初始化
+- [x] 下载 `synthesizer.pt` / `vocoder.pt`，跑通端到端
+      （**M1 已达成**：三个音频都产出，`stolen_embedding_cosine = 0.8985`）
+- [x] Stage 1 代码：模型 / 损失 / 数据集 / 可微 GE2E / 训练主循环 + 自检脚本
+- [ ] Stage 1 训练：等 `data/train.txt` 就绪后跑
+      （第 1 步训 W_s → 第 2 步训解耦网络，**顺序不能反**）
+- [ ] Stage 1 权重初始化：试 `marlenezw/AutoVC_Voice_Conversion` 的 `ckpt_autovc.pth`
+
+---
+
+### 0.9 ★ Stage 1 已实现（成员 A · 2026-11-18）
+
+`algorithms/voiceprint_protection/stage1/` 全部写完，`scripts/test_stage1.py` **19 项自检全过**。
+
+| 文件 | 职责 |
+|---|---|
+| `model.py` | `Ec` / `D` / `Postnet`（照搬 AutoVC 官方 `model_vc.py`），**28,422,464** 参数 |
+| `losses.py` | `L_rec` / `L_cd` / `L_dis` + 说话人分类器 `W_s` |
+| `dataset.py` | VCTK 清单 → **两套 mel** + 说话人 ID，片段裁成 `freq` 的整数倍 |
+| `speaker_encoder.py` | **可微的 GE2E**（论文说它端到端微调） |
+| `train.py` | 两阶段训练主循环（第 1 步训 `W_s`，第 2 步训解耦网络） |
+
+**★ 过程中纠正的两个"论文 vs 代码"矛盾（都以代码为准）：**
+
+| # | 论文写的 | 官方代码实测 | 我们的处理 |
+|---|---|---|---|
+| 1 | `c ∈ R^{T'×32}`，`T' = T//2` | **`(T//32, 64)`**（`freq=32`、`dim_neck=32`×双向） | 以代码为准，已更正契约 §2 |
+| 2 | `W_s ∈ R^{K×256}`，`c̃ ∈ R^256`，但 content code 是 32 维 —— 对不上 | 论文说 c̃ 是 "**concatenated** ... **along the time dimension**" | **沿时间维拼接 4 个 content code = 4×64 = R^256** ✅ 与论文的 `R^{K×256}` 严丝合缝 |
+
+**第二点是这轮最有价值的发现**：把 c̃ 理解成"沿时间维拼接 4 个 content code"，
+论文的每一个数字就都对上了，而且 `W_s` 能同时吃说话人嵌入 `h`(R^256) 和内容表示 `c̃`(R^256)
+—— 两个空间维度相同，分类器才有意义。参数见 `config.STAGE1["content_window"] = 4`。
+
+**第三套 mel 约定**（Stage 1 每条音频要算两次）：
+`audio_utils.autovc_mel()` → 80 维给 Ec/D；`audio_utils.ge2e_mel()` → 40 维给 GE2E。
+
+契约已更新为 **v0.3**（成员 A 已签字，新增 §7 Stage 1 的约定）。
+
+---
+
+## 0.10 ★ 训练链路审计与修补（成员 A · 2026-11-18）
+
+> 起因：W3 结束时准备开训，做了一次**"训练到底能不能跑起来"的全面审计**。
+> 结果：代码写完了，但**一条命令都跑不通**。下面是一次性补齐的清单。
+
+### 0.10.1 审计发现的 6 个真问题（都已修）
+
+| # | 问题 | 现象 | 修法 |
+|---|---|---|---|
+| 1 | **训练脚本两种启动方式都是坏的** | `python -m algorithms.voiceprint_protection.stage1.train` → `No module named 'stage1'`；`python stage1/train.py` → `No module named 'config'` | `stage1/__init__.py` 里做 sys.path 引导 + **相对导入**；`train.py` 用 try/except 包住相对/绝对导入。**两种方式现在都实测通过** |
+| 2 | **配置里的 `amp` / `accum_steps` 根本没被用** | `config.STAGE1["amp"]=True`、`accum_steps=2`，但训练循环里一个字都没引用 | 真正实现混合精度（`torch.amp.GradScaler`）与梯度累积，8 GB 显存下这是必需品不是可选项 |
+| 3 | **没有断点续训** | 论文量级 50 万步要跑几天，而云上是**竞价实例**（随时被抢占），断了就白跑 | 每 `--save-every` 步存完整 checkpoint（模型+优化器+步数），`--resume` 续训；另有 `--max-hours` 时间上限 |
+| 4 | **没有验证集回路** | 论文说超参是在验证集上网格搜索选出来的，我们却连验证都不跑 | 每 `--val-every` 步跑一次验证集并记曲线 |
+| 5 | **帧数会差 1 帧 → `L_rec` 直接崩** | 两套 mel 链都给 `1 + N//hop` 帧，而采样点数取的是 `crop_frames*hop` ⇒ 多出 1 帧；`freq=32` 摊不开 ⇒ 解码输出与输入不等长 | 采样点数改成 `N = (crop_frames-1)*hop`，并在 Dataset 里加断言。见契约 §7.1b |
+| 6 | **短片段时 `content_windows` 维度会错** | 不足 4 个 content code 时退化成 `cat(codes)`，维度变成 `len(codes)*64 ≠ 256`，分类器直接形状报错 | 改成**重复最后一个 code 凑满窗口**，维度恒为 256 |
+
+### 0.10.2 ★ 一处架构性偏离：声码器与 mel 约定
+
+**问题**：论文 §2.3 写的是 `x_adv = D(c, h_adv)` 之后"**用 HiFi-GAN 声码器 V(·) 转成波形**"。
+
+**实测**：**NVIDIA 官方的 `NVIDIA/torch.hifi_gan` 仓库已经下架了**（2026-11-18 验证）：
+
+```
+https://api.github.com/repos/NVIDIA/torch.hifi_gan        -> 404
+https://codeload.github.com/NVIDIA/torch.hifi_gan/...    -> 404
+https://raw.githubusercontent.com/NVIDIA/torch.hifi_gan/..-> 404
+https://api.ngc.nvidia.com/.../hifigan_melbins_16k.pth  -> 404
+```
+
+（`api.github.com/repos/pytorch/pytorch` 是 200，所以不是网络被墙，是仓库真没了。）
+
+**我们唯一能用的声码器**是上游 Real-Time-Voice-Cloning 自带的 **WaveRNN**（`vocoder.pt`，51 MB，已下载校验）。
+但它**只吃自己那套 mel 约定**，喂别的进去**出来是噪音而且不报错**。
+
+**⇒ 决定：模型侧 mel 从 `model16k`（AutoVC 官方链）切换到 `rtc16k`（WaveRNN 那套）。**
+
+| | `model16k`（AutoVC 官方） | **`rtc16k`（WaveRNN）← 当前默认** |
+|---|---|---|
+| n_fft / hop | 1024 / 256 | 800 / 200 |
+| fmin / fmax | 90 / 7600 | 55 / 7600 |
+| 前处理 | 30 Hz 高通 | preemphasis 0.97 |
+| 取值 | [0, 1] | **[-1, 1]** |
+| 有配套声码器？ | ❌（WaveNet 权重 404，HiFi-GAN 下架） | ✅ 上游 WaveRNN |
+| 与论文的关系 | 论文用 AutoVC 架构，未规定 mel | **AutoVC 架构完全照搬**，mel 是预处理约定 |
+
+**依据不是猜的**，有三条硬证据：
+
+1. `vocoder/vocoder_dataset.py:27-28` —— WaveRNN 训练时的 mel 被**明确除以 4** 归到 `[-1,1]`；
+2. `vocoder/inference.py::infer_waveform` 内部 `mel / 4` ⇒ 喂进去必须是 `[-4,4]`；
+3. 上游合成器**真实输出**的 mel 实测范围 `[-4.19, +0.66]` ⇒ 对应
+   `synthesizer/audio.py::melspectrogram`（**带 preemphasis、fmax=7600、对称归一化**）。
+
+> ⚠️ **踩过的坑**：一开始照抄了 `vocoder/audio.py::melspectrogram`
+> （没有 preemphasis、fmax 用默认 8000、归一化成 [0,1]），
+> **数值对照能过（1.6e-07）但送进声码器出来是噪音**。
+> ⇒ 所以 `scripts/verify_rtc_mel.py` 必须有**两层对照**：数值 + 端到端。
+> 现在两层都过：数值 `2.98e-08`，mel 往返 20.8%（错误量纲是 73%）。
+
+### 0.10.3 本轮新增/改动的文件
+
+| 文件 | 状态 | 说明 |
+|---|---|---|
+| `stage1/__init__.py` | 🆕 重写 | sys.path 引导 + 相对导入 |
+| `stage1/train.py` | 🆕 重写 | AMP / 梯度累积 / 断点续训 / 验证回路 / TensorBoard |
+| `stage1/losses.py` | ✏️ 修 | `content_windows` 短片段维度错误 |
+| `stage1/dataset.py` | ✏️ 修 | mel 预设化、hop 硬编码、帧数公式、加断言、加 `deterministic`、返回原波形 |
+| `audio_utils.py` | ✆️ 增 | `rtc_mel()` / `rtc_mel_raw()` / `rtc_mel_filterbank()` / **`model_mel()`（模型侧统一入口）** |
+| `config.py` | ✆️ 增 | `MEL_PRESETS["rtc16k"]`、`STAGE1["mel_preset"]` |
+| `paths.py` | ✏️ 修 | `models_dir()` 不再跟随 `VPP_DATA_ROOT`（否则冒烟测试会找不到 encoder.pt） |
+| `bridge_vocoder.py` | 🆕 重写 | `mel_to_wav` / `wav_to_mel`，内部用上游 WaveRNN |
+| `scripts/verify_rtc_mel.py` | 🆕 新 | 两层对照（数值 + 端到端 mel 往返） |
+| `scripts/eval_stage1.py` | 🆕 新 | **M3 验收脚本**：L_rec / Sim_prot / 内容码泄露率 / 重建音说话人准确率 |
+| `scripts/make_dummy_data.py` | 🆕 新 | 生成假数据，**不用等 55 分钟的 VCTK 就能冒烟测试训练** |
+| `docs/interface-contract.md` | ✏️ v0.4 | §3.3/§3.4/§7.1 重写，新增 §7.1b 帧数约定 |
+
+### 0.10.4 训练链路现在的状态（**假数据实测通过**）
+
+```
+$ python algorithms/voiceprint_protection/scripts/make_dummy_data.py
+$ $env:VPP_DATA_ROOT = "D:/vpp_dummy_data"
+$ python algorithms/voiceprint_protection/stage1/train.py --stage classifier --iterations 3 --smoke
+  → step 1..3  loss 4.3658 → 4.3283（在降）✅
+$ python algorithms/voiceprint_protection/stage1/train.py --stage model --iterations 6 --smoke --val-every 3 --save-every 3
+  → 训练 / 断点 / 验证 三条回路全部跑通 ✅
+$ python algorithms/voiceprint_protection/stage1/train.py --stage model --iterations 9 --resume
+  → "已从 stage1_last_ckpt.pt 续训，起始 step = 6" ✅
+$ python algorithms/voiceprint_protection/scripts/eval_stage1.py --split val --num 4 --save-audio
+  → 端到端跑通（指标是垃圾，因为只训了 9 步）✅
+```
+
+**⇒ 代码层面已经没有任何阻塞开训的东西了。剩下的唯一阻塞是数据。**
+
+### 0.10.5 开训前还缺什么（只剩数据）
+
+| # | 缺什么 | 谁 | 怎么办 |
+|---|---|---|---|
+| 1 | **VCTK 数据** | **你（成员 A）** | `node scripts/download_vctk.mjs`（约 55 分钟 / 1.36 GiB），或让 B 把已下好的打包发你 |
+| 2 | `data/train.txt` / `val.txt` / `test.txt` / `spk2id.txt` | 你（B 的 `prepare_data.py` 已就绪） | `python algorithms/voiceprint_protection/scripts/prepare_data.py` |
+| 3 | 云端 GPU（论文量级训练） | 你 | ⚠️ **代金券能开 ECS(NVIDIA) 还是只有昇腾 ModelArts 仍未确认**（见 §8） |
 
 ---
 
@@ -363,15 +459,15 @@ cut -d' ' -f2 data/train.txt | sort -u | wc -l
 
 | # | 负责人 | 任务 | 🔗 前置 | 📦 产出 | 验收标准 |
 |---|---|---|---|---|---|
-| P1 | **B 主写 / A review** | 写 `public/methods/group_XX_voiceprint_protection.json` | W2 全部 | 方法配置 JSON | ✅ **已完成**；`npm run check:method` 通过（样例输出待补） |
-| P2 | 任一人 | 追加 `public/methods/index.json` | P1 | 索引更新 | ✅ **已完成**（方法能在"方法集合"搜到） |
-| P3 | **A 主写**（B 已代写） | 写 `service.py`（FastAPI + CORS + 错误处理 + 临时文件清理） | P1 | `service.py` | ✅ **已完成**（成员 B 2026-11-18 代写）；`test_service.py --mock` **40 项全通过** |
-| P4 | **B 主写** | 准备样例：`public/samples/<方法ID>/` 输入 + 输出（**必须是真实跑出来的**） | W2-D5 | 样例目录 | ⏳ 输入已就绪；**输出等 `synthesizer.pt` + `vocoder.pt`** |
-| P5 | **共同** | 平台端到端：上传 → 处理 → 预览 → 下载 | P1–P4 | — | ⏳ 等 P4 |
-| P6 | **共同** | `npm test` && `npm run build` | P5 | — | ✅ **全绿**（test 6/6；build 通过） |
-| P7 | **共同** | 建 `docs/experiments.md`，记录已跑通的步骤与结果 | P5 | 实验记录 | ✅ 已建（持续更新） |
-| P8 | **共同** | 过一遍 `docs/接入自查清单.md` | P6 | 勾选结果 | ⏳ B 已过一遍，勾选结果见 `docs/experiments.md` |
-| P9 | **共同** | 补 `python-multipart==0.0.20`（FastAPI 收文件的必需依赖） | — | 环境更新 | ✅ **已装并实测**（`import python_multipart` 成功） |
+| P1 | **B 主写 / A review** | 写 `public/methods/group_XX_voiceprint_protection.json` | W2 全部 | 方法配置 JSON | 通过 `npm test` 的契约校验（字段名、MIME、max_mb、参数范围） |
+| P2 | 任一人 | 追加 `public/methods/index.json` | P1 | 索引更新 | 方法能在"方法集合"搜到 |
+| P3 | **A 主写** | 写 `service.py`（FastAPI + CORS + 错误处理 + 临时文件清理） | P1 | `service.py` | `curl` 能打出 artifacts；错误路径返回 `{"error": "..."}` |
+| P4 | **B 主写** | 准备样例：`public/samples/<方法ID>/` 输入 + 输出（**必须是真实跑出来的**） | W2-D5 | 样例目录 | 输入输出确实对应，参数已记录 |
+| P5 | **共同** | 平台端到端：上传 → 处理 → 预览 → 下载 | P1–P4 | — | 全部成功 |
+| P6 | **共同** | `npm test` && `npm run build` | P5 | — | 全绿 |
+| P7 | **共同** | 建 `docs/experiments.md`，记录已跑通的步骤与结果 | P5 | 实验记录 | 有内容，且与代码同 commit |
+| P8 | **共同** | 过一遍 `docs/接入自查清单.md` | P6 | 勾选结果 | 逐项确认 |
+| P9 | **共同** | 补 `python-multipart==0.0.20`（FastAPI 收文件的必需依赖） | — | 环境更新 | `import python_multipart` 成功 |
 
 > **P3 与 P4 的先后**：P3 需要 P1 里的 `endpoint` 与字段名，所以 **P1 必须先于 P3**；
 > P4 的样例要用真实输出，所以 **P4 需要 W2-D5 的产物**。
@@ -395,32 +491,6 @@ cut -d' ' -f2 data/train.txt | sort -u | wc -l
 | `stage2/train.py` 主循环 | B | **A** review 防御损失 `L_de` 的方向是否正确 |
 | `evaluate.py`（指标脚本） | **共同写** | **共同写** |
 | `docs/experiments.md` | **共同维护** | **共同维护** |
-
-### 4b. ★ W4–W5 Stage 2 的产出清单（成员 B 主责，2026-11-18 起）
-
-| 文件 | 内容 | 状态 |
-|---|---|---|
-| `stage2/generator.py` | 生成器 G：h (256) → δ (256)，**单位长度** | ✅ |
-| `stage2/discriminator.py` | 判别器 D_adv：mel → 真假分数（**LSGAN，无 sigmoid**） | ✅ |
-| `stage2/losses.py` | L_mel / L_mask / L_per / L_GAN / L_D / L_de / L_G（论文式 7–13） | ✅ |
-| `stage2/psychoacoustics.py` | 心理声学掩蔽阈值 θ_x（MPEG-1 模型） | ✅ |
-| `stage2/models.py` | **可求导**的冻结组件（torch 版 GE2E / AutoVC Stage 1 / 替身） | ✅ |
-| `stage2/pipeline.py` | mel ↔ 波形、阈值、对齐、声码器适配 | ✅ |
-| `stage2/dataset.py` | VCTK 数据集（按清单读、随机裁） | ✅ |
-| `stage2/train.py` | 训练主循环 | ✅ |
-| `stage2/verify_gradients.py` | **梯度通路自检**（12 项，全通过） | ✅ |
-| `stage2/verify_mel.py` | torch GE2E ↔ 上游 numpy 数值对照（4 项，全通过） | ✅ |
-| `stage2/verify_psychoacoustics.py` | 心理声学掩蔽自检（20 项，全通过） | ✅ |
-| `algorithms/voiceprint_protection/evaluate.py` | Sim_prot / Sim_clone / DSR / WER + 高斯噪声基线 + 消融入口 | ✅ |
-| `docs/notes/stage2_blockers.md` | **阻塞项清单**（可求导声码器 / Stage 1 checkpoint 等） | ✅ |
-
-> **正式训练还差两样**（都不是代码问题）：
-> ① 一个**可求导**的声码器；② 成员 A 的 Stage 1 checkpoint。
-> 详见 [`docs/notes/stage2_blockers.md`](../../docs/notes/stage2_blockers.md)。
-
-> ⚠️ **A 需要 review 的一点**：`stage2/losses.py::defense_loss` 是**最小化**余弦相似度
-> （论文式 12 的 "Minimizing L_de"）。方向反了训练会把音频毁掉 ——
-> `stage2/verify_gradients.py` 会打印 `L_de`，**它应该下降**。
 
 ---
 
@@ -522,22 +592,3 @@ AutoVC 权重），迁到昇腾要装 CANN + `torch_npu`，并把 `.cuda()` 改�
 - [ ] **组号与选题名称** → 确定后统一改方法 ID、目录名、README 标题
 - [ ] **MOS 听测人数**：论文是 50 人，我们做多少？（如实写明即可）
 - [ ] **W4–W5 是否也交换主责**（W6 起交换是必须的）
-- [ ] **★ Sim_clone 的口径**（2026-11-18 新增，需 A 拍板）
-      - 论文口径：`cos(E_spk(克隆音), h)` —— "克隆出来的**声音**有多像本人"
-      - 契约 §4.3 里写的：`cos(h, h_stolen)` —— "攻击者重新提的**卡**有多像原卡"
-      - 这两个量**不是一回事**：后者其实等于 `Sim_prot`（保护后语音 vs 原语音）
-      - `evaluate.py` 目前以**论文口径**为主，另报 `sim_clone_no_defense` 作对照
-      - 详见 `docs/interface-contract.md` §4.5.5
-- [ ] **★ Stage 2 用哪个声码器**（2026-11-18 新增，需 A 拍板）
-      - 推荐 AutoVC 配套的 `wavenet_vocoder`（mel 约定天然匹配，论文的 L_mel / L_mask 才严格成立）
-      - 备选 HiFi-GAN（论文同款，但 mel 口径要做近似换算）
-      - ⚠️ **2026-11-18 更新**：AutoVC 官方声码器权重 404；`NVIDIA/torch.hifi_gan` 仓库**已不存在**（实测 404）。
-        HiFi-GAN 的**代码**已通过 gitee 镜像克隆好（`third_party/softvc-hifigan`，MIT），
-        **只差 16 kHz 那套权重**（`hifigan_melbins_16k.pt`）—— 需要能连 GitHub 的人补。
-        详见 `docs/notes/stage2_blockers.md` §1
-- [ ] **★ Sim_prot 的天花板 ≈ 0.82 怎么解释**（2026-11-18 新增）
-      - 实测：即使**完全不做防御**，Sim_prot 也只有 0.81（论文 0.95）。
-      - 原因：我们的保护后语音是**用克隆机重新合成**的，不是"原音频 + 扰动"；
-        重新合成本身就改变音色/韵律。
-      - → 要拿到论文那组数字，**必须做 Stage 1**（解码器重建原句，只换音色）。
-        README 里要如实写明这个差异。详见 `docs/experiments.md` §3c

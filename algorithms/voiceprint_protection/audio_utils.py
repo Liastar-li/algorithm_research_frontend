@@ -119,6 +119,61 @@ def duration_seconds(wav: np.ndarray, sample_rate: int) -> float:
 
 
 # ---------------------------------------------------------------------------
+# mel 频谱：GE2E 侧（第二套约定，只喂给说话人编码器）
+# ---------------------------------------------------------------------------
+# ⚠️ **这是第三套 mel 约定**，来自上游 Real-Time-Voice-Cloning 的
+#    `encoder/params_data.py`：
+#       mel_window_length = 25 ms  -> n_fft       = int(16000*25/1000) = 400
+#       mel_window_step   = 10 ms  -> hop_length = int(16000*10/1000) = 160
+#       mel_n_channels    = 40
+#       fmin/fmax = 0 / 8000（librosa 默认）
+#       power = 2（librosa 默认）
+#       ★ **线性幅度，不取 log**（上游源码注释原话："Note: this not a log-mel spectrogram."）
+#
+# 【为什么 Stage 1 要同时用两套 mel】
+#   AutoVC 架构的 Ec/D 吃 **80 维** AutoVC mel；
+#   论文的说话人编码器是 GE2E，吃 **40 维** mel。
+#   两者维度不同、不能互换，所以 Stage 1 训练时每条音频要算两次 mel。
+#
+# 【不可微也没关系】
+#   mel 是从波形算出来的前处理，梯度不需要穿过它；
+#   Stage 1 要"端到端微调"的是 GE2E 的**参数**，不是 mel 的计算过程。
+#   所以这里用 numpy 实现即可（快、稳、无需 autograd）。
+
+GE2E_MEL = {
+    "sample_rate": 16000,
+    "n_fft": 400,
+    "hop_length": 160,
+    "n_mels": 40,
+    "fmin": 0,
+    "fmax": 8000,
+    "power": 2.0,
+}
+
+
+def ge2e_mel(wav: np.ndarray) -> np.ndarray:
+    """GE2E 说话人编码器用的 mel，形状 (T, 40)，**线性幅度不取 log**。
+
+    与上游 `encoder/audio.py::wav_to_mel_spectrogram` 数值等价
+    （上游按 librosa 0.9.2 写的，用位置参数；这里改成 0.10 的仅关键字写法）。
+    """
+    import librosa
+
+    wav = np.asarray(wav, dtype=np.float32)
+    mel = librosa.feature.melspectrogram(
+        y=wav,
+        sr=GE2E_MEL["sample_rate"],
+        n_fft=GE2E_MEL["n_fft"],
+        hop_length=GE2E_MEL["hop_length"],
+        n_mels=GE2E_MEL["n_mels"],
+        fmin=GE2E_MEL["fmin"],
+        fmax=GE2E_MEL["fmax"],
+        power=GE2E_MEL["power"],
+    )
+    return np.ascontiguousarray(mel.T, dtype=np.float32)   # (T, 40)
+
+
+# ---------------------------------------------------------------------------
 # mel 频谱：模型侧（AutoVC 链，★ 实测对齐后的唯一实现）
 # ---------------------------------------------------------------------------
 def _butter_highpass(cutoff: float, fs: int, order: int = 5):
@@ -224,9 +279,122 @@ def autovc_mel(wav: np.ndarray, noise_seed: int | None = 0) -> np.ndarray:
     return np.ascontiguousarray(np.clip((decibels + 100) / 100, 0, 1), dtype=np.float32)
 
 
+# ---------------------------------------------------------------------------
+# mel 频谱：模型侧第二套约定（**WaveRNN 声码器那套**）
+# ---------------------------------------------------------------------------
+def rtc_mel_filterbank() -> np.ndarray:
+    """上游的 mel 滤波器组，形状 (n_fft//2+1, 80) = (401, 80)。
+
+    对应 `third_party/Real-Time-Voice-Cloning/synthesizer/audio.py::_build_mel_basis`：
+        librosa.filters.mel(sr=16000, n_fft=800, n_mels=80, fmin=55, fmax=7600)
+
+    ⚠️ 上游的 `vocoder/audio.py::build_mel_basis` 用的是 **fmax 默认值 8000**，
+       而 `synthesizer/audio.py` 用的是 **fmax=7600**（hparams 里显式写的）。
+       两者**不一样**！我们跟的是 synthesizer 那份（实测验证过，见
+       `scripts/verify_rtc_mel.py` 与 docs/notes/autovc_alignment.md 的同类记录）。
+    """
+    from librosa.filters import mel
+
+    preset = config.MEL_PRESETS["rtc16k"]
+    return mel(
+        sr=preset["sample_rate"],
+        n_fft=preset["n_fft"],
+        fmin=preset["fmin"],
+        fmax=preset["fmax"],
+        n_mels=preset["n_mels"],
+    ).T.astype(np.float32)
+
+
+def rtc_mel_raw(wav: np.ndarray) -> np.ndarray:
+    """上游 `synthesizer/audio.py::melspectrogram` 的等价复刻，形状 (T, 80)，取值 **[-4, 4]**。
+
+    步骤（逐行对照上游源码）：
+      1. preemphasis：y = lfilter([1, -0.97], [1], wav)
+      2. STFT：librosa.stft(n_fft=800, hop=200, win=800, center=True) -> **幅度**
+      3. mel：librosa.filters.mel(16000, 800, n_mels=80, fmin=55, fmax=7600)
+      4. dB：S = 20*log10(max(1e-5, mel)) - ref_level_db(20)
+      5. 对称归一化（hparams.symmetric_mels=True）：
+         m = clip(8*(S+100)/100 - 4, -4, 4)
+    """
+    import librosa
+    from scipy import signal
+
+    preset = config.MEL_PRESETS["rtc16k"]
+    wav = np.asarray(wav, dtype=np.float32)
+
+    # 1) preemphasis
+    y = signal.lfilter([1, -preset["preemphasis"]], [1], wav)
+
+    # 2) STFT（幅度）
+    spectrum = librosa.stft(
+        y=y,
+        n_fft=preset["n_fft"],
+        hop_length=preset["hop_length"],
+        win_length=preset["win_length"],
+        window="hann",
+        center=True,
+    )
+
+    # 3) mel
+    mel_energy = np.abs(spectrum).T @ rtc_mel_filterbank()
+
+    # 4) dB（减 ref_level_db）
+    decibels = (20 * np.log10(np.maximum(1e-5, mel_energy))
+                - preset["ref_level_db"])
+
+    # 5) 对称归一化 -> [-4, 4]
+    maximum = preset["max_abs_value"]
+    normalized = ((2 * maximum) * ((decibels - preset["min_level_db"])
+                                   / (-preset["min_level_db"])) - maximum)
+    return np.ascontiguousarray(
+        np.clip(normalized, -maximum, maximum), dtype=np.float32)
+
+
+def rtc_mel(wav: np.ndarray) -> np.ndarray:
+    """**WaveRNN 声码器的输入 mel**，形状 (T, 80)，取值 **[-1, 1]**。
+
+    = `rtc_mel_raw(wav) / max_abs_value`。
+
+    【为什么是 [-1, 1】—— 依据是上游的**训练代码**，不是猜的】
+    `third_party/Real-Time-Voice-Cloning/vocoder/vocoder_dataset.py` 第 27-28 行：
+
+        # Load the mel spectrogram and adjust its range to [-1, 1]
+        mel = np.load(mel_path).T.astype(np.float32) / hp.mel_max_abs_value
+
+    而 `hp.mel_max_abs_value = 4.0`，所以 WaveRNN 训练时见到的 mel ∈ [-1, 1]。
+    反过来，`vocoder/inference.py::infer_waveform` 内部会 `mel / 4`，
+    所以**喂给它之前要先乘 4**（见 `bridge_vocoder.VocoderBridge.mel_to_wav`）。
+
+    【实测怎么验的】
+    先取上游合成器**真实输出**的 mel（范围实测 [-4.19, +0.66]）当基准，
+    再看哪种约定能算回来 —— 见 `scripts/verify_rtc_mel.py`。
+    """
+    preset = config.MEL_PRESETS["rtc16k"]
+    return np.ascontiguousarray(
+        rtc_mel_raw(wav) / preset["max_abs_value"], dtype=np.float32)
+
+
+def model_mel(wav: np.ndarray, preset_name: str | None = None) -> np.ndarray:
+    """**模型侧 mel 的统一入口**（Ec / D 的输入）。
+
+    preset_name 省略时用 `config.STAGE1["mel_preset"]`（契约字段，两人共同区）。
+
+    ★ 别再直接调 autovc_mel / rtc_mel —— 统一从这里走，
+      否则"训练用一套 mel、评测用另一套"这种坑会以"指标莫名不对"的形式出现。
+    """
+    name = preset_name or config.STAGE1.get("mel_preset", config.DEFAULT_PRESET)
+    if name == "model16k":
+        return autovc_mel(wav)
+    if name == "rtc16k":
+        return rtc_mel(wav)
+    raise ValueError(
+        f"未知的模型侧 mel 预设：{name!r}。"
+        f"可选：{sorted(config.MEL_PRESETS)}"
+    )
+
+
 class MelSpec:
     """模型侧 mel 的可复用计算器（AutoVC 链）。
-
     用法：
         spec = MelSpec()
         mel = spec.mel(wav)              # (samples,) -> (T, 80)，取值 [0,1]
