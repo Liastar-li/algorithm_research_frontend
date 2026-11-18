@@ -38,22 +38,43 @@ Stage 2 训不起来（静默失败，最坏的一种）。
 
 | 候选 | 优点 | 缺点 | 建议 |
 |---|---|---|---|
-| **A. AutoVC 配套的 `wavenet_vocoder`** | mel 约定与 AutoVC **天然一致**，论文的 L_mel / L_mask 才严格成立 | 上游 `vocoder.generate()` 最后一步转 numpy，要搬成 torch | ★ **推荐** |
-| **B. HiFi-GAN**（论文同款，[15]） | 论文用的就是它；torch.hub 一行装好 | mel 约定不同（`log10` 幅度 + `(x+4.5)/5` vs AutoVC 的 `20log10` + `clip[0,1]`），要做**近似**换算 | 次选 |
+| **A. AutoVC 配套的 `wavenet_vocoder`** | mel 约定与 AutoVC **天然一致**，论文的 L_mel / L_mask 才严格成立 | 上游 `vocoder.generate()` 最后一步转 numpy，要搬成 torch；**而且官方权重 404（IBM Box），拿不到** | 暂时搁置 |
+| **B. HiFi-GAN**（论文同款，[15]） | 论文用的就是它；torch 原生、可导 | ⚠️ **原来的 `NVIDIA/torch.hifi_gan` 仓库已经不存在了**（实测 404，网页和 API 都是 404） | ★ **推荐，但需要另找权重** |
 | **C. 上游 RTC 的 WaveRNN** | 权重已经有了 | 它的输入是**线性频谱**不是 mel，要多加一层转换；而且 `infer_waveform` 也是 numpy | 不推荐 |
 
-**候选 A 的具体做法**（`stage2/pipeline.py::WaveNetVocoder` 里已经留好了位置和 5 步说明）：
+### ★ 2026-11-18 更新：HiFi-GAN 这条路的最新情况（实测）
 
-```text
-1. git clone --depth 1 https://github.com/r9y9/wavenet_vocoder third_party/wavenet_vocoder
-   （固定 commit d4333546 —— 见 config.THIRD_PARTY_COMPONENTS）
-2. from wavenet_vocoder import builder → builder.build_model()
-3. 加载 checkpoint_step001000000_ema.pth 的 state_dict
-4. 把上游 vocoder.py 的 extract_features + model(c, None) 照抄成 torch
-5. ★ 只有最后"转 numpy"那一步要留在 torch 里 —— 梯度就断在那里
+| 查的东西 | 结果 |
+|---|---|
+| `NVIDIA/torch.hifi_gan`（torch.hub 的老入口） | **404，仓库已不存在** |
+| `torch.hub.load('NVIDIA/torch.hifi_gan', 'hifigan_melbins_16k')` | 404（同一个原因） |
+| `bshall/hifigan` / `jik876/hifigan` | 是 soft-vc 变体，**没有 `hifigan_melbins_16k` 入口** |
+| HuggingFace 上的 hifigan 权重 | 多为 22/24 kHz 的 LJSpeech 声码器，**没有 16 kHz mel-bins 那套** |
+| `gitee.com/mirrors/*` | 网页返回 405（反爬），但 **git clone 可用** ✓ |
+| `toscode.gitee.com/s-water/softvc-hifigan` | ✅ **克隆成功**（MIT，`bshall/hifigan` 的镜像，HiFi-GAN v1 生成器代码） |
+| 当天 GitHub 直连 | **整体不可达**（hf-mirror / gitee / PyPI 镜像都通） |
+
+**已经做好的部分**：
+- `third_party/softvc-hifigan/` —— HiFi-GAN v1 的生成器代码（MIT）✓
+- `stage2/models.py::TorchHiFiGANVocoder` —— torch 原生的 HiFi-GAN 封装 ✓
+- `stage2/pipeline.py::autovc_mel_to_hifigan()` —— AutoVC mel → HiFi-GAN mel 的换算 ✓
+
+**还差的部分（需要能连 GitHub 的人补）**：
+
+```bash
+# 16 kHz mel-bins 那套的权重（NVIDIA 原来的 release；仓库没了，release 附件可能还在）
+curl -L -o hifigan_melbins_16k.pt \
+  https://github.com/NVIDIA/torch.hifi_gan/releases/download/v0.1/hifigan_melbins_16k.pt
 ```
 
-**谁做**：成员 B（实现很快）—— 但**前提是 `third_party/wavenet_vocoder` 先克隆下来**。
+拿到后放进 `algorithms/voiceprint_protection/weights/`，
+`TorchHiFiGANVocoder` 就能直接用（加载逻辑已经写好）。
+
+> ★ **如果这个权重彻底拿不到**：退路是用 `bshall/hifigan` 的 22 kHz 权重
+> （它的 release 也在 GitHub 上，同样受网络影响），或者**自己训一个声码器**（成本太高，不推荐）。
+> 实在不行就**先做 Stage 1** —— Stage 1 的 AutoVC 解码器 + 上游 RTC 克隆机
+> 就能把 L1 的 Sim_prot 从 0.82 提到 0.9 以上（见 `docs/experiments.md` §3c），
+> Stage 2 的声码器问题往后放。
 
 ---
 

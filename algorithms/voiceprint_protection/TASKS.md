@@ -46,8 +46,10 @@
 | VCTK 数据 | ✅ 110 说话人 / 11,004 条，划分 80/10/20 已自检通过 |
 | L1 推理链 | ✅ **端到端跑通并实测通过**（2026-11-18：三个上游权重就位 + `Unidecode`/`inflect` 装好） |
 | 平台算法服务 `service.py` | ✅ **已写完并实测通过 41 项契约自测**（成员 B 2026-11-18，补做 A 的 P3） |
+| 平台接口耗时 | ✅ **201.8s → 21.6s**（声码器折叠块长调优，实测见 experiments.md §3d） |
 | 平台方法登记 | ✅ 已追加进 `public/methods/index.json`（P2） |
 | 平台样例（输入 + 输出） | ✅ `input.wav` / `output.wav` + 两个克隆对比音，**真实跑出来的**（P4） |
+| 基线指标 | ✅ 无防御 / 高斯噪声两条基线已测（40 条，experiments.md §3c） |
 | **当前阶段** | **W3 · 指南第 8 步 + 第 9 步** —— M1 已达成，剩平台端到端联调（P5） |
 | **下一个里程碑** | **M2 平台打通**（P5：在网页上上传 → 处理 → 预览 → 下载） |
 | **待补依赖** | 无 —— `python-multipart` / `scikit-learn` / `Unidecode` / `inflect` **全部装好并实测通过** |
@@ -199,7 +201,7 @@ AutoVC 官方 README 给的三件套权重（`autovc.ckpt` / `3000000-BL.ckpt` /
 | **架构**（Ec / D / PostNet、dim_neck=32、双向 LSTM、freq=32） | **Stage 1 我们自己实现并训练**（论文本来就要训） |
 | **mel 预处理链**（reflect 填充 + 幅度 + dB + clip[0,1] + fmin=90 + 30Hz 高通） | 已复刻在 `audio_utils.autovc_mel()`，**自训 Stage 1 时沿用** |
 | 官方权重 `3000000-BL.ckpt`（= GE2E） | 已被上游 `encoder.pt` 取代（同一个 Wan et al. [2018] GE2E 家族） |
-| **备选初始化权重**：`marlenezw/AutoVC_Voice_Conversion` 的 `ckpt_autovc.pth`（171 MB，MakeItTalk 出品，含 Ec + D + GE2E） | **Stage 1 训练的初始化权重来源**（HF 可下载） |
+| **备选初始化权重**：`marlenezw/AutoVC_Voice_Conversion` 的 `ckpt_autovc.pth`（171 MB，MakeItTalk 出品，含 Ec + D + GE2E） | **Stage 1 训练的初始化权重来源**（HF 可下载）<br>⚠️ **2026-11-18 实测：不能直接初始化 AutoVC** —— 它的 `weight_hh` 形状不是方阵（多半是 Keras 转换来的），需要写转换脚本。**Stage 1 只能从零训练。** 见 `docs/experiments.md` §3e |
 
 > `marlenezw` 那个 ckpt 的 README 明确写着：
 > *"The speaker encoder is a pre-trained model provided Wan et al. [2018]"* —— 正是论文用的 GE2E。
@@ -529,4 +531,13 @@ AutoVC 权重），迁到昇腾要装 CANN + `torch_npu`，并把 `.cuda()` 改�
 - [ ] **★ Stage 2 用哪个声码器**（2026-11-18 新增，需 A 拍板）
       - 推荐 AutoVC 配套的 `wavenet_vocoder`（mel 约定天然匹配，论文的 L_mel / L_mask 才严格成立）
       - 备选 HiFi-GAN（论文同款，但 mel 口径要做近似换算）
-      - 详见 `docs/notes/stage2_blockers.md` §1
+      - ⚠️ **2026-11-18 更新**：AutoVC 官方声码器权重 404；`NVIDIA/torch.hifi_gan` 仓库**已不存在**（实测 404）。
+        HiFi-GAN 的**代码**已通过 gitee 镜像克隆好（`third_party/softvc-hifigan`，MIT），
+        **只差 16 kHz 那套权重**（`hifigan_melbins_16k.pt`）—— 需要能连 GitHub 的人补。
+        详见 `docs/notes/stage2_blockers.md` §1
+- [ ] **★ Sim_prot 的天花板 ≈ 0.82 怎么解释**（2026-11-18 新增）
+      - 实测：即使**完全不做防御**，Sim_prot 也只有 0.81（论文 0.95）。
+      - 原因：我们的保护后语音是**用克隆机重新合成**的，不是"原音频 + 扰动"；
+        重新合成本身就改变音色/韵律。
+      - → 要拿到论文那组数字，**必须做 Stage 1**（解码器重建原句，只换音色）。
+        README 里要如实写明这个差异。详见 `docs/experiments.md` §3c

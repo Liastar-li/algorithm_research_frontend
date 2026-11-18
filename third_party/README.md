@@ -38,6 +38,7 @@ bash scripts/setup_third_party.sh
 | **AutoVC** | <https://github.com/auspicious3000/autovc> | `c1827a60e83e6d26030b8953843b2f7cf2bd36db`（2024-10-23） | MIT | Stage 1 的模型架构（`Ec`/`D`/PostNet）+ 官方预训练权重 + 配套声码器封装 |
 | **wavenet_vocoder** | <https://github.com/r9y9/wavenet_vocoder> | `d4333546eccd3b681b7092e4f52160ad7e62dcc9`（2019-08-25） | MIT | WaveNet 声码器（与 AutoVC 的 mel 格式配套） |
 | **Real-Time-Voice-Cloning** | <https://github.com/CorentinJ/Real-Time-Voice-Cloning>（国内镜像 <https://gitee.com/mirrors/real-time-voice-cloning>） | **`890f3a03187195b9829db2079b75c2ba2ab0405c`**（2026-03-09）✅ 已核实 | MIT | GE2E 说话人编码器 `E_spk`（**论文脚注 2 直接引用**），最终系统使用 |
+| **softvc-hifigan** | <https://gitee.com/s-water/softvc-hifigan>（`bshall/hifigan` 的镜像；原仓库 <https://github.com/bshall/hifigan>） | `49c16c9`（2026-11-18 克隆） | **MIT**（Copyright (c) 2021 Benjamin van Niekerk） | HiFi-GAN v1 生成器代码 —— Stage 2 需要一个**可求导**的声码器（论文用 HiFi-GAN [15]） |
 | **VCTK Corpus**（数据集，非代码） | <https://datashare.ed.ac.uk/handle/10283/3443> | version 0.92 | **CC BY 4.0** | 训练 / 验证 / 测试语音（80 / 10 / 20 人） |
 
 ### 三条必须知道的版本约束
@@ -79,13 +80,25 @@ bash scripts/setup_third_party.sh
 | `3000000-BL.ckpt` | 说话人编码器 `D_VECTOR`（**80 维 mel** 输入，AutoVC 自带） | AutoVC 官方 README 的 IBM Box 链接 |
 | `checkpoint_step001000000_ema.pth` | WaveNet 声码器 | `https://ibm.box.com/s/asvv554v0zd09yipl2qadz49i7jpdhta` |
 | **`encoder.pt`** | **GE2E 说话人编码器（40 维 mel 输入，论文脚注引用）** | HuggingFace <https://huggingface.co/CorentinJ/SV2TTS> → `encoder.pt`（17,090,379 字节）<br>国内：`set HF_ENDPOINT=https://hf-mirror.com` |
+| `synthesizer.pt` / `vocoder.pt` | 上游 Tacotron 合成器 + WaveRNN 声码器（= 论文里的"攻击者"） | 同上（`CorentinJ/SV2TTS`）<br>由 `scripts/download_rtc_weights.py` 自动下载并校验 |
+| `ckpt_autovc.pth` | MakeItTalk 版 AutoVC Generator（**只当参考，不能当初始化** —— 见下） | HuggingFace <https://huggingface.co/marlenezw/AutoVC_Voice_Conversion> → `ckpt_autovc.pth`（171,881,992 字节）<br>国内：`set HF_ENDPOINT=https://hf-mirror.com` |
+| `hifigan_melbins_16k.pt` | HiFi-GAN 16 kHz（论文的声码器 [15]）—— Stage 2 需要它 | ⚠️ **原仓库 `NVIDIA/torch.hifi_gan` 已不存在**（实测 404）<br>试这个地址（release 附件可能还在）：<br>`https://github.com/NVIDIA/torch.hifi_gan/releases/download/v0.1/hifigan_melbins_16k.pt` |
 
 > ⚠️ **两套说话人编码器权重不可混用**：输入 mel 维度不同（80 vs 40），结构也不同。
 > AutoVC 的 `D_VECTOR` 吃 80 维 mel；论文的 GE2E 吃 40 维线性 mel。
 
+> ⚠️ **`ckpt_autovc.pth` 不能直接初始化 AutoVC**（实测）：
+> 它的 `encoder.lstm.weight_hh_*` 形状是 `(64, 16)` —— **不是方阵**，
+> 说明不是标准 PyTorch LSTM 的布局（多半是 Keras/TF 转过来的）。
+> 试过 `dim_neck ∈ {32,64} × dim_pre ∈ {512,1024}`，全部形状不匹配。
+> **→ Stage 1 只能从零训练。** 详见 `docs/experiments.md` §3e。
+
 **放到：**
 - AutoVC 三件套 → `algorithms/voiceprint_protection/weights/`
-- `encoder.pt` → `<数据根>/models/default/`（由 `scripts/download_encoder_weights.py` 自动放好；
+- `ckpt_autovc.pth` → `algorithms/voiceprint_protection/weights/`（gitignored）
+- `hifigan_melbins_16k.pt` → `algorithms/voiceprint_protection/weights/`
+- `encoder.pt` / `synthesizer.pt` / `vocoder.pt` → `<数据根>/models/default/`
+  （由 `scripts/download_encoder_weights.py` / `download_rtc_weights.py` 自动放好；
   也可用 `VPP_MODELS_DIR` 指定到别的盘）
 
 （`.gitignore` 已忽略 `*.pt` / `*.pth`，不会被误提交）
