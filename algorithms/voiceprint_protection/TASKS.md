@@ -45,9 +45,11 @@
 | `third_party/RTC`（GE2E） | ✅ 已克隆，commit `890f3a0`；权重 `encoder.pt` 已下载并校验 |
 | VCTK 数据 | ✅ 110 说话人 / 11,004 条，划分 80/10/20 已自检通过 |
 | L1 推理链 | ✅ 端到端跑通（成员 A 2026-11-17，克隆机路线）；⏳ 差 `synthesizer.pt` + `vocoder.pt` 才能在本机复现 |
-| **当前阶段** | **W2 · 指南第 3 步 + 第 4 步** |
+| 平台算法服务 `service.py` | ✅ **已写完并实测通过 40 项契约自测**（成员 B 2026-11-18，补做 A 的 P3） |
+| 平台方法登记 | ✅ 已追加进 `public/methods/index.json`（P2） |
+| **当前阶段** | **W3 · 指南第 8 步 + 第 9 步**（W2 只差权重下载） |
 | **下一个里程碑** | **M1：L1 推理链跑通**（产出保护后音频）—— 差 `synthesizer.pt` + `vocoder.pt`（见 0.8 路线决策） |
-| **待补依赖** | `python-multipart` 升到 0.0.20（起服务前必须）、`scikit-learn==1.5.2`（上游 GE2E 必需）、`Unidecode` + `inflect`（上游合成器的文字处理，克隆机必需） |
+| **待补依赖** | `Unidecode` + `inflect`（上游合成器的文字处理，克隆机必需）—— `python-multipart==0.0.20` 与 `scikit-learn==1.5.2` **已装好并实测通过** |
 
 ### ★ 本周已取得的关键结论（2026-11-13 实测，详见 [docs/notes/autovc_alignment.md](docs/notes/autovc_alignment.md)）
 
@@ -76,6 +78,43 @@
 | D3-1 | `docs/interface-contract.md`（**草案 v0.1，待成员 A 签字**） | ⬜ 待 A 确认 |
 | D1-6 | `third_party/README.md`（四个组件的 URL/commit/许可登记表） | ✅ 已合并双方信息 |
 | W3-P1 | `public/methods/group_n005_voiceprint_protection.json` + `npm run check:method` 校验器 | ⬜ 待 A review |
+
+### 0.4b ★ 本轮进展（成员 B · 2026-11-18：平台服务化）
+
+**背景**：任务板 §3 的 P3（`service.py`）原派给成员 A，但 A 还没写，
+而它是 M2 平台打通的**唯一卡点**（平台 POST 不过去）。
+B 先补上这块，两边都不耽误。
+
+| 任务 | 产出 | 状态 |
+|---|---|---|
+| W3-P3 | **`algorithms/voiceprint_protection/service.py`**（FastAPI + CORS + 统一错误格式 + 临时文件清理 + 模型单例缓存） | ✅ **40 项契约自测全通过** |
+| W3-P3 验收 | `algorithms/voiceprint_protection/scripts/test_service.py`（`--mock` 模式不用权重也能验协议） | ✅ |
+| W3-P2 | `public/methods/index.json` 追加本方法 | ✅ |
+| W3-P6 | `npm test`（6/6）+ `npm run build` | ✅ **全绿** |
+| W3-P4 | 样例**输出** `output.wav` | ⏳ **等 `synthesizer.pt` + `vocoder.pt`**（B 不能下 425 MB 权重，需用户执行） |
+
+#### 服务层踩到的三个坑（写下来免得 A 再踩一遍）
+
+| # | 坑 | 后果 | 怎么解 |
+|---|---|---|---|
+| 1 | **FastAPI 默认返回 `{"detail": ...}`** | 前端读的是 `detail.error`（`src/services/algorithms.js:104`），读不到就只显示"算法服务返回 HTTP 422。"，中文说明全丢 | 覆盖全局异常处理器，**所有**错误一律 `{"error": "..."}` |
+| 2 | **`infer.protect()` 每次调用都新建 `Protector()`** | 每次请求重载 400 MB 权重（encoder+synthesizer+vocoder），平台同步等待必然超时 | 服务层缓存**一个** `Protector` 实例，懒加载只建一次 |
+| 3 | 用户上传的**文件名不能拼进路径** | 可能含 `..`、中文、斜杠 | 临时文件一律 uuid 命名，结果文件也用 uuid 前缀 |
+
+#### 服务怎么起
+
+```bash
+conda activate vpp
+uvicorn algorithms.voiceprint_protection.service:app --host 127.0.0.1 --port 8000
+# 或者：python algorithms/voiceprint_protection/service.py
+```
+
+自测（不用下权重）：
+
+```bash
+python algorithms/voiceprint_protection/scripts/test_service.py --mock    # 40 项
+python algorithms/voiceprint_protection/scripts/test_service.py           # 真权重
+```
 
 ### 0.5 ★ 上游 RTC 在 2026-03 做过重构（成员 B 核实，三处影响）
 
@@ -321,15 +360,15 @@ cut -d' ' -f2 data/train.txt | sort -u | wc -l
 
 | # | 负责人 | 任务 | 🔗 前置 | 📦 产出 | 验收标准 |
 |---|---|---|---|---|---|
-| P1 | **B 主写 / A review** | 写 `public/methods/group_XX_voiceprint_protection.json` | W2 全部 | 方法配置 JSON | 通过 `npm test` 的契约校验（字段名、MIME、max_mb、参数范围） |
-| P2 | 任一人 | 追加 `public/methods/index.json` | P1 | 索引更新 | 方法能在"方法集合"搜到 |
-| P3 | **A 主写** | 写 `service.py`（FastAPI + CORS + 错误处理 + 临时文件清理） | P1 | `service.py` | `curl` 能打出 artifacts；错误路径返回 `{"error": "..."}` |
-| P4 | **B 主写** | 准备样例：`public/samples/<方法ID>/` 输入 + 输出（**必须是真实跑出来的**） | W2-D5 | 样例目录 | 输入输出确实对应，参数已记录 |
-| P5 | **共同** | 平台端到端：上传 → 处理 → 预览 → 下载 | P1–P4 | — | 全部成功 |
-| P6 | **共同** | `npm test` && `npm run build` | P5 | — | 全绿 |
-| P7 | **共同** | 建 `docs/experiments.md`，记录已跑通的步骤与结果 | P5 | 实验记录 | 有内容，且与代码同 commit |
-| P8 | **共同** | 过一遍 `docs/接入自查清单.md` | P6 | 勾选结果 | 逐项确认 |
-| P9 | **共同** | 补 `python-multipart==0.0.20`（FastAPI 收文件的必需依赖） | — | 环境更新 | `import python_multipart` 成功 |
+| P1 | **B 主写 / A review** | 写 `public/methods/group_XX_voiceprint_protection.json` | W2 全部 | 方法配置 JSON | ✅ **已完成**；`npm run check:method` 通过（样例输出待补） |
+| P2 | 任一人 | 追加 `public/methods/index.json` | P1 | 索引更新 | ✅ **已完成**（方法能在"方法集合"搜到） |
+| P3 | **A 主写**（B 已代写） | 写 `service.py`（FastAPI + CORS + 错误处理 + 临时文件清理） | P1 | `service.py` | ✅ **已完成**（成员 B 2026-11-18 代写）；`test_service.py --mock` **40 项全通过** |
+| P4 | **B 主写** | 准备样例：`public/samples/<方法ID>/` 输入 + 输出（**必须是真实跑出来的**） | W2-D5 | 样例目录 | ⏳ 输入已就绪；**输出等 `synthesizer.pt` + `vocoder.pt`** |
+| P5 | **共同** | 平台端到端：上传 → 处理 → 预览 → 下载 | P1–P4 | — | ⏳ 等 P4 |
+| P6 | **共同** | `npm test` && `npm run build` | P5 | — | ✅ **全绿**（test 6/6；build 通过） |
+| P7 | **共同** | 建 `docs/experiments.md`，记录已跑通的步骤与结果 | P5 | 实验记录 | ✅ 已建（持续更新） |
+| P8 | **共同** | 过一遍 `docs/接入自查清单.md` | P6 | 勾选结果 | ⏳ B 已过一遍，勾选结果见 `docs/experiments.md` |
+| P9 | **共同** | 补 `python-multipart==0.0.20`（FastAPI 收文件的必需依赖） | — | 环境更新 | ✅ **已装并实测**（`import python_multipart` 成功） |
 
 > **P3 与 P4 的先后**：P3 需要 P1 里的 `endpoint` 与字段名，所以 **P1 必须先于 P3**；
 > P4 的样例要用真实输出，所以 **P4 需要 W2-D5 的产物**。
@@ -353,6 +392,31 @@ cut -d' ' -f2 data/train.txt | sort -u | wc -l
 | `stage2/train.py` 主循环 | B | **A** review 防御损失 `L_de` 的方向是否正确 |
 | `evaluate.py`（指标脚本） | **共同写** | **共同写** |
 | `docs/experiments.md` | **共同维护** | **共同维护** |
+
+### 4b. ★ W4–W5 Stage 2 的产出清单（成员 B 主责，2026-11-18 起）
+
+| 文件 | 内容 | 状态 |
+|---|---|---|
+| `stage2/generator.py` | 生成器 G：h (256) → δ (256)，**单位长度** | ✅ |
+| `stage2/discriminator.py` | 判别器 D_adv：mel → 真假分数（**LSGAN，无 sigmoid**） | ✅ |
+| `stage2/losses.py` | L_mel / L_mask / L_per / L_GAN / L_D / L_de / L_G（论文式 7–13） | ✅ |
+| `stage2/psychoacoustics.py` | 心理声学掩蔽阈值 θ_x（MPEG-1 模型） | ✅ |
+| `stage2/models.py` | **可求导**的冻结组件（torch 版 GE2E / AutoVC Stage 1 / 替身） | ✅ |
+| `stage2/pipeline.py` | mel ↔ 波形、阈值、对齐、声码器适配 | ✅ |
+| `stage2/dataset.py` | VCTK 数据集（按清单读、随机裁） | ✅ |
+| `stage2/train.py` | 训练主循环 | ✅ |
+| `stage2/verify_gradients.py` | **梯度通路自检**（12 项，全通过） | ✅ |
+| `stage2/verify_mel.py` | torch GE2E ↔ 上游 numpy 数值对照 | ✅ |
+| `algorithms/voiceprint_protection/evaluate.py` | Sim_prot / Sim_clone / DSR / WER + 高斯噪声基线 + 消融入口 | ✅ |
+| `docs/notes/stage2_blockers.md` | **阻塞项清单**（可求导声码器 / Stage 1 checkpoint 等） | ✅ |
+
+> **正式训练还差两样**（都不是代码问题）：
+> ① 一个**可求导**的声码器；② 成员 A 的 Stage 1 checkpoint。
+> 详见 [`docs/notes/stage2_blockers.md`](../../docs/notes/stage2_blockers.md)。
+
+> ⚠️ **A 需要 review 的一点**：`stage2/losses.py::defense_loss` 是**最小化**余弦相似度
+> （论文式 12 的 "Minimizing L_de"）。方向反了训练会把音频毁掉 ——
+> `stage2/verify_gradients.py` 会打印 `L_de`，**它应该下降**。
 
 ---
 

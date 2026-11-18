@@ -133,12 +133,57 @@ python algorithms/voiceprint_protection/scripts/make_sample.py
 
 - [ ] **M1 验收**：成员 A 的 `infer.py` 就位后跑 `scripts/smoke_test.py`，
       产出 `protected.wav` + 打印全部张量形状
+      —— ⏳ **代码已就位，只差 `synthesizer.pt` + `vocoder.pt`（425 MB，需手动下载）**
 - [ ] **D5-1**：两位成员**各自独立**跑一次 `smoke_test.py`（换环境、不给解释）
 - [ ] **指标表**：Sim_prot / Sim_clone / DSR（τ=0.3/0.4/0.5）/ WER
+      —— ✅ 评测脚本已写好（`evaluate.py`），⏳ 等权重
 - [ ] **朴素基线**：h 上加高斯噪声，同样算一套指标（论文里 DSR 只有 45.2%）
+      —— ✅ `evaluate.py --mode random` 已实现
 - [ ] **消融**：至少 `w/o L_de`（DSR 应从 87.2% 崩到 12.5%）与 `w/o L_mask`
+      —— ⚠️ 消融要等 Stage 2 训完才能测
 - [ ] **黑盒迁移**（可选，最难，放最后）
 - [ ] **MOS 听测**（记录实际人数）
+
+---
+
+## 4b. ★ 2026-11-18 新增：平台服务化与 Stage 2 骨架（成员 B）
+
+### 4b.1 平台算法服务（任务板 W3-P3，**B 代 A 写**）
+
+| 项 | 结果 |
+|---|---|
+| `algorithms/voiceprint_protection/service.py` | ✅ FastAPI + CORS + 统一错误格式 + 临时文件清理 + 模型单例缓存 |
+| `scripts/test_service.py` | ✅ 契约自测 **40/40 通过**（`--mock` 模式**不需要权重**就能验协议） |
+| `public/methods/index.json` | ✅ 已追加本方法 |
+| `npm test` / `npm run build` | ✅ 6/6 通过 / 构建通过 |
+| 真实请求（权重未到） | 503 + 明确提示"缺哪个文件、去哪儿下"（**不是** 500 traceback） |
+
+**三个踩到的坑**（细节见 TASKS.md §0.4b）：
+
+| # | 坑 | 后果 |
+|---|---|---|
+| 1 | FastAPI 默认返回 `{"detail":...}`，前端读的是 `detail.error` | 中文说明全丢，只显示"算法服务返回 HTTP 422。" |
+| 2 | `infer.protect()` 每次调用新建 `Protector()` | 每次请求重载 400 MB 权重 → 平台同步等待必超时 |
+| 3 | 用户上传的文件名不能拼进路径 | 目录穿越 / 中文名炸路径 |
+
+### 4b.2 Stage 2 骨架（任务板 W4–W5，**B 主责**）
+
+| 项 | 结果 |
+|---|---|
+| `stage2/` 8 个模块 | ✅ 代码写完（generator / discriminator / psychoacoustics / losses / models / pipeline / dataset / train） |
+| 训练机制跑通 | ✅ `--stub --steps 6` 正常训练（8004 条 / 80 说话人） |
+| **梯度通路自检** | ✅ **12/12 通过**（`stage2/verify_gradients.py`） |
+| torch GE2E vs 上游数值对照 | ✅ mel 最大绝对误差 **2.3e-05**；嵌入余弦 **0.99999481**（`stage2/verify_mel.py`） |
+| 正式训练 | ⛔ **缺可求导声码器 + 缺 Stage 1 checkpoint** → 见 [notes/stage2_blockers.md](notes/stage2_blockers.md) |
+
+**★ 本轮最重要的两个发现**（都已变成会失败的断言）：
+
+1. **指南伪代码里的 `with torch.no_grad()` 不能照抄** ——
+   照抄会让梯度被切断，G 收不到任何梯度，loss 一步不动，**而且不报错**。
+   「冻结」= 不更新参数（`requires_grad_(False)` + `eval()`），
+   **不等于**切断梯度（那才是 `no_grad()` / `.detach()`）。
+2. **torch 版 GE2E 必须与上游 numpy 版逐值一致** ——
+   不一致时训练与推理的说话人嵌入不是一回事，**同样不报错**。
 
 ---
 
@@ -155,6 +200,10 @@ python algorithms/voiceprint_protection/scripts/make_sample.py
 | VCTK 的第 110 人叫 `s5` | 按 `p+数字` 筛会只剩 109 人 → 划分失败 | TASKS.md §0.7 |
 | 忘了 `conda activate vpp` | `No module named 'numpy'`（跑的是系统 Python） | 脚本现在会给出人话提示 |
 | f-string 表达式 | 括号多打一个 → SyntaxError（我的检查器 v1 漏报，已升级） | — |
+| **FastAPI 的错误格式** | 默认是 `{"detail":...}`，前端读 `detail.error` → 说明全丢 | TASKS.md §0.4b |
+| **每次请求重载模型** | `infer.protect()` 每次新建 `Protector()` → 400 MB 重载 → 必超时 | TASKS.md §0.4b |
+| **冻结 ≠ 断梯度** | 伪代码里的 `no_grad()` 会让训练**静默失效** | notes/stage2_blockers.md §6.1 |
+| **numpy 封装断梯度** | `bridge_autovc` / `bridge_vocoder` 内部 `no_grad()` → Stage 2 用不了 | notes/stage2_blockers.md §1 |
 
 ---
 
