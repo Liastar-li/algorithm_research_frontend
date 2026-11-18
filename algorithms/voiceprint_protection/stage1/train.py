@@ -80,6 +80,10 @@ def set_seed(seed: int = config.SEED) -> None:
     np.random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
+    # ★ cuDNN 自动选最快卷积算法。训练时输入形状是**固定的**（裁成固定帧数），
+    #   所以第一次前向会花一点时间做算法搜索，之后每步都走最快的那个 —— 白赚 10~30%。
+    if torch.cuda.is_available():
+        torch.backends.cudnn.benchmark = True
 
 
 def ensure_weights_dir() -> Path:

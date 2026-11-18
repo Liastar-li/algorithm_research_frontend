@@ -233,4 +233,9 @@ def build_dataloader(split: str = "train", batch_size: int | None = None,
         drop_last=(split == "train"),
         generator=generator,
         pin_memory=False,   # NPU/Windows 下用 False 更稳
+        # ★ persistent_workers=True：否则**每个 epoch 都会重新拉起一批 worker 进程**。
+        #   在 Windows 上 worker 是 spawn 模式，每次启动都要重新 import torch
+        #   和全部依赖（十几秒）。数据集小的时候（比如冒烟测试）这一步的开销
+        #   甚至超过训练本身。开启后 worker 常驻，只启动一次。
+        persistent_workers=(num_workers > 0),
     )

@@ -310,6 +310,41 @@ $ python algorithms/voiceprint_protection/scripts/eval_stage1.py --split val --n
 
 **⇒ 代码层面已经没有任何阻塞开训的东西了。剩下的唯一阻塞是数据。**
 
+### 0.10.4b ★ 训练速度实测（2026-11-18，RTX 4060 Laptop）
+
+一开始测出来 **5.3 秒/步**（50 万步 = 74 小时，根本没法训）。
+profile 之后发现**三个原因叠加**，修完变成 **0.3 秒/步**（提速 ~18 倍）：
+
+| # | 原因 | 修法 |
+|---|---|---|
+| 1 | **DataLoader 每个 epoch 重新 spawn worker**（Windows 上 spawn 要重新 import torch，十几秒）。假数据只有 32 条 → 一个 epoch 才 2 步 → **每 2 步就重启一次 worker**，平均下来 5 秒/步 | `persistent_workers=True`（`stage1/dataset.py`） |
+| 2 | **LSTM 输入非连续张量** → cuDNN 走不了快路径，退回纯 Python 慢路径 | `transpose(...).contiguous()`（`stage1/model.py` 三处） |
+| 3 | **batch 8 时 GPU 严重欠利用** | 实测 batch 8 只用 949 MiB / 8 GB，吞吐 69 条/秒；batch 16 用 1.01 GB、吞吐 **149 条/秒**。⇒ `config` 改成 `batch_size=16, accum_steps=1`（有效 batch 不变，但少跑一次前向） |
+
+**profile 明细（batch 16）：**
+
+```
+取一个 batch（从 loader）   : 0.057 s
+GE2E 编码器单独             : 0.017 s
+GE2E + Stage1 前向          : 0.036 s
+完整一步（不含取数据）      : 0.116 s
+batch= 16: 0.107 s/step -> 149.0 条/秒   显存 1.01 GB
+batch= 32: 0.143 s/step -> 223.2 条/秒   显存 1.34 GB
+```
+
+**⇒ 时间预算（本机 4060，按 0.3 s/步保守估）**
+
+| 迭代数 | 耗时 | 说明 |
+|---|---|---|
+| 5k | ~25 分钟 | 第一次跑，先看 loss 形状 |
+| 20k | ~1.7 小时 | 应该有像样的重建效果 |
+| 100k | ~8 小时 | 建议目标 |
+| **500k（论文量级）** | **~42 小时** | ⚠️ 建议还是上云，本机跑要一天半 |
+
+> ⚠️ **本机只有 15.7 GB 内存（可用 4.3 GB）** ——
+> `num_workers` **最多 2**，开 4 个会被系统直接杀掉（报 "worker exited unexpectedly"）。
+> 云机上内存多，可以开到 8。
+
 ### 0.10.5 开训前还缺什么（只剩数据）
 
 | # | 缺什么 | 谁 | 怎么办 |

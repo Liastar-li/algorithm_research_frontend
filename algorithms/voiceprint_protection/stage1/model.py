@@ -119,7 +119,10 @@ class ContentEncoder(nn.Module):
 
         for conv in self.convolutions:
             x = F.relu(conv(x))                                   # (B, 512, T)
-        x = x.transpose(1, 2)                                     # (B, T, 512)
+        # ★ .contiguous()：transpose 出来的是**非连续**张量，
+        #   而 cuDNN 的 LSTM 只在输入连续时才走快路径，否则 PyTorch 会退回
+        #   纯 Python 实现的慢路径（慢好几倍）。这是训练提速的大头。
+        x = x.transpose(1, 2).contiguous()                         # (B, T, 512)
 
         outputs, _ = self.lstm(x)                                 # (B, T, 2*dim_neck)
         out_forward = outputs[:, :, : self.dim_neck]
@@ -164,12 +167,13 @@ class SpeakerDecoder(nn.Module):
         返回      : (B, T, n_mels)
         """
         x, _ = self.lstm1(codes)                        # (B, T, dim_pre)
-        x = x.transpose(1, 2)                            # (B, dim_pre, T)
+        x = x.transpose(1, 2).contiguous()              # (B, dim_pre, T)
         for conv in self.convolutions:
             x = F.relu(conv(x))
-        x = x.transpose(1, 2)                            # (B, T, dim_pre)
-        outputs, _ = self.lstm2(x)                       # (B, T, 1024)
-        return self.linear_projection(outputs)            # (B, T, n_mels)
+        # ★ 同上：给 LSTM 的输入必须是连续张量，否则走慢路径
+        x = x.transpose(1, 2).contiguous()              # (B, T, dim_pre)
+        outputs, _ = self.lstm2(x)                     # (B, T, 1024)
+        return self.linear_projection(outputs)          # (B, T, n_mels)
 
 
 # ---------------------------------------------------------------------------
@@ -258,7 +262,7 @@ class Stage1Model(nn.Module):
         )                                                  # (B, T, 64+256)
 
         mel_out = self.decoder(decoder_input, target_embedding)      # (B, T, 80)
-        mel_postnet = self.postnet(mel_out.transpose(2, 1))            # (B, 80, T)
+        mel_postnet = self.postnet(mel_out.transpose(2, 1).contiguous())   # (B, 80, T)
         mel_postnet = mel_out + mel_postnet.transpose(2, 1)            # 残差
         return mel_out, mel_postnet, codes
 
