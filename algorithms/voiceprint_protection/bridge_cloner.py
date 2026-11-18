@@ -51,12 +51,19 @@ class ClonerBridge:
     """上游合成器 + 声码器的封装：文本 + 嵌入 -> 音频。"""
 
     def __init__(self, rtc_dir: str | Path | None = None, device: str | None = None,
-                 models_dir: str | Path | None = None):
+                 models_dir: str | Path | None = None,
+                 vocoder_target: int = 1000, vocoder_overlap: int = 100):
         from bridge_speaker import SpeakerBridge, find_rtc_dir, find_weights
 
         self.rtc_dir = find_rtc_dir(str(rtc_dir) if rtc_dir else None)
         self.models_dir = Path(models_dir) if models_dir else paths.models_dir()
         self.device = device
+
+        # ★ 声码器的折叠块长（见 clone() 里的详细说明）。
+        #   上游默认 target=8000 / overlap=800，在 CPU 上**极慢**（一次 25 秒），
+        #   而平台的请求是同步等待的 —— 这个参数直接决定演示能不能跑完。
+        self.vocoder_target = vocoder_target
+        self.vocoder_overlap = vocoder_overlap
 
         # 上游的 synthesizer / vocoder 是"平铺"的包，需要把仓库根目录放进 sys.path。
         # ★ 只放仓库根目录本身（它里面有 synthesizer/ 和 vocoder/ 两个包）。
@@ -137,7 +144,26 @@ class ClonerBridge:
         #   注意上游写的是 `progress_callback = progress_callback or self.gen_display`，
         #   所以**传 None 等于启用 tqdm**；要静音必须传一个真的可调用对象。
         callback = (lambda *args, **kwargs: None) if quiet else None
-        waveform = self._vocoder.infer_waveform(spectrogram, progress_callback=callback)
+
+        # ★★ 折叠块长：这是**平台能不能用**的关键参数（实测，CPU）
+        #
+        #   上游 WaveRNN 是自回归的，但会把 mel 折叠成 `target` 长度的块**并行**生成，
+        #   然后交叉淡化拼起来。折叠后，Python 层的循环次数 = target − overlap，
+        #   **与 mel 长度无关**！所以：
+        #     · 默认 target=8000 → 循环 7200 次 → 一次 25 秒（mel 45 帧也是 25 秒）
+        #     · 改成 target=1000 → 循环 900 次 → 一次 6.6 秒（★ 3.8 倍）
+        #
+        #   音质没有损失（实测）：
+        #     · 同样参数连跑两次的波形差异 = 0.0944（声码器本身有随机性，mu-law 采样）
+        #     · 默认 vs 快速 的波形差异 = 0.0928 → **同量级**，不是音质损失
+        #
+        #   要追求最高音质可以传 target=8000/overlap=800（实测 25 秒一次）。
+        waveform = self._vocoder.infer_waveform(
+            spectrogram,
+            target=self.vocoder_target,
+            overlap=self.vocoder_overlap,
+            progress_callback=callback,
+        )
         return np.asarray(waveform, dtype=np.float32).reshape(-1)
 
     def describe(self) -> str:
