@@ -46,12 +46,12 @@ import sys
 import time
 from pathlib import Path
 
-import torch
-
 MODULE_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(MODULE_DIR.parent))
 
 try:
+    import torch  # noqa: E402
+
     import config  # noqa: E402
     import paths  # noqa: E402
 except ImportError as error:  # 依赖缺失（多半是忘了 conda activate vpp）

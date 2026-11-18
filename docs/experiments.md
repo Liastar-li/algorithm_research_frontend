@@ -129,6 +129,55 @@ python algorithms/voiceprint_protection/scripts/make_sample.py
 
 ---
 
+## 3b. ★★ M1 达成：L1 推理链在本机跑通（2026-11-18）
+
+三个上游权重（`encoder.pt` 17 MB / `synthesizer.pt` 370 MB / `vocoder.pt` 54 MB）
+就位、补装 `Unidecode` + `inflect` 之后，**整条链一次跑通**。
+
+### 实测记录（`scripts/smoke_test.py`）
+
+| 项 | 实测值 |
+|---|---|
+| 原始卡 vs 扰动卡 余弦相似度 | **0.9950**（α = 0.1；1.0 = 没扰动） |
+| 保护后语音 RMS | 0.06780 |
+| 未防御克隆音 RMS | 0.07663 |
+| 防御后克隆音 RMS | 0.09838 |
+| 攻击者重新提的卡 vs 原卡（Sim_clone 的卡片口径） | **0.8971** |
+| GE2E 嵌入范数 | 1.000000（L2 归一化 ✓） |
+
+> ★ **Sim_clone = 0.8971 是预期结果**，不是 bug：
+> L1 阶段的 δ 是**随机高斯方向**，还没有训练生成器 G，
+> 所以防御几乎无效。论文报告 0.13 —— 那要等 Stage 2 训完。
+
+### 平台样例（真实产出，P4）
+
+| 文件 | 时长 | RMS | 说明 |
+|---|---|---|---|
+| `public/samples/.../input.wav` | 2.66 s | 0.05394 | 原始语音（测试集说话人 p228） |
+| `public/samples/.../output.wav` | 3.30 s | 0.07429 | 保护后语音 |
+| `public/samples/.../output_clone_baseline.wav` | 3.13 s | — | 未防御时攻击者的克隆音 |
+| `public/samples/.../output_clone_protected.wav` | 2.57 s | — | 防御后攻击者的克隆音 |
+
+`node scripts/check_method_config.mjs` → **全部通过**（含"样例引用的文件已存在"）。
+
+### 服务端到端（`scripts/test_service.py`，**真权重**）
+
+**41/41 通过** —— 覆盖参数校验、错误格式、artifacts 结构、文件下载、空文本兜底。
+
+### ★ 这轮踩到的坑：上游 Tacotron 的**空文本**会间歇性崩
+
+| 项 | 内容 |
+|---|---|
+| 现象 | 服务偶发返回 500：`index -1 is out of bounds for axis 1 with size 0` |
+| 根因 | 服务把**空文本**传给了上游合成器。上游 Tacotron 拿到空文本会吐出一段退化的 mel，它自己的"裁尾部静音"循环（`while np.max(m[:, -1]) < stop_threshold: m = m[:, :-1]`）会把这 mel 一路裁空，然后在 `m[:, -1]` 上越界 |
+| 为什么难查 | **间歇性**：同一份输入，有时成功（输出 0.3 s、RMS 抖动 10 倍），有时越界 |
+| 解法 | ① 服务端把空文本兜底成 `infer.DEFAULT_REFERENCE_TEXT`；② `bridge_cloner.clone()` 显式拒绝空文本并给一句人话；③ `test_service.py` 加了一条**回归断言**（第 41 项） |
+
+> 这条坑值得记：**上游的"自动裁静音"逻辑，在退化输入下会把数组裁空。**
+> 任何把外部输入直接喂给上游的地方，都要先挡一道。
+
+---
+
 ## 4. 待补充（未做的不要填数字）
 
 - [ ] **M1 验收**：成员 A 的 `infer.py` 就位后跑 `scripts/smoke_test.py`，
@@ -214,6 +263,7 @@ python algorithms/voiceprint_protection/scripts/make_sample.py
 | **掩蔽阈值与 PSD 参考电平不一致** | `L_mask` 恒为 0，约束形同虚设 | notes/stage2_blockers.md §6.4 |
 | **"掩蔽不到"≠"极低阈值"** | 整条阈值曲线被压到绝对听阈上 | notes/stage2_blockers.md §6.4 |
 | **调性判定方向反了** | 纯音被当成噪声 → 阈值偏高 14 dB | notes/stage2_blockers.md §6.4 |
+| **上游 Tacotron 不能喂空文本** | 它自己的裁静音循环会把退化的 mel 裁空 → `index -1 is out of bounds`，而且**间歇性** | experiments.md §3b |
 
 ---
 

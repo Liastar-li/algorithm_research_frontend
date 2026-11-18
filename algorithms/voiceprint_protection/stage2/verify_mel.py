@@ -26,13 +26,19 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-import numpy as np
-import torch
-
 MODULE_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(MODULE_DIR.parent))
 
-import config  # noqa: E402
+try:
+    import numpy as np  # noqa: E402
+    import torch  # noqa: E402
+
+    import config  # noqa: E402
+except ImportError as error:  # 依赖缺失（多半是忘了 conda activate vpp）
+    from paths import print_env_hint  # noqa: E402
+
+    print_env_hint(error)
+    raise SystemExit(1) from error
 from stage2.models import TorchSpeakerEncoder  # noqa: E402
 
 PASSED = 0

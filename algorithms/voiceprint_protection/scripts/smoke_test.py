@@ -24,15 +24,16 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import sys
 from pathlib import Path
 
-import numpy as np
-
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 try:
+    import numpy as np  # noqa: E402
+
     import audio_utils  # noqa: E402
     import config  # noqa: E402
     import paths  # noqa: E402
@@ -123,6 +124,13 @@ def check_cloner_branch() -> bool:
 
     try:
         bridge = ClonerBridge()
+    except ModuleNotFoundError as error:
+        # ★ 上游合成器的文字处理要这两个包，缺了会在这里炸。
+        #   这是**依赖没装**，不是"权重不齐"，提示必须说清楚，否则会白找半天。
+        print(f"  [跳过] 缺少 Python 依赖：{error.name}")
+        print("         上游合成器要用 Unidecode + inflect 把文字转成音素：")
+        print("           pip install Unidecode==1.3.2 inflect==5.3.0")
+        return False
     except Exception as error:  # noqa: BLE001
         print(f"  [跳过] {error}")
         return False
@@ -171,6 +179,14 @@ def main() -> int:
         print("         → 第 1 步（GE2E）不受影响，第 2/3 步会跳过。")
     else:
         print("  [OK] 论文主线权重齐备（encoder / synthesizer / vocoder）")
+
+    # 上游合成器的文字处理依赖（Unidecode + inflect）—— 少一个克隆机就起不来
+    missing_packages = [name for name in ("unidecode", "inflect")
+                        if importlib.util.find_spec(name) is None]
+    if missing_packages:
+        print(f"\n  [注意] 缺少 Python 依赖：{', '.join(missing_packages)}")
+        print("         上游合成器要用它们把文字转成音素，克隆机（攻击者）起不来：")
+        print("           pip install Unidecode==1.3.2 inflect==5.3.0")
 
     # AutoVC 全家桶（可选路线：Stage 1 之后才用得上）
     autovc_missing = [name for name in paths.WEIGHT_FILES.values()

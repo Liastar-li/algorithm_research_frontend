@@ -4,14 +4,33 @@
 
 | 文件 | 说明 |
 |---|---|
-| `input.wav` | 原始语音（VCTK 测试集说话人） |
-| `output.wav` | **待生成** —— 需要成员 A 的 `infer.py` 就位后重跑本脚本 |
+| `input.wav` | 原始语音（VCTK 测试集说话人 p228） |
+| `output.wav` | **保护后语音**，由本项目推理链实际生成（α = 0.1） |
+| `output_clone_baseline.wav` | **未防御时**攻击者克隆出来的声音（用原始身份卡）—— 应与本人很像 |
+| `output_clone_protected.wav` | **防御后**攻击者克隆出来的声音（攻击者从保护后语音重新提卡）—— 应明显不像本人 |
+
+> ★ 三个音频一起听，差别就是**防御效果本身**：
+> `output.wav` 听起来跟 `input.wav` 差不多（人耳听不出扰动），
+> 但 `output_clone_baseline.wav` 像本人而 `output_clone_protected.wav` 不像。
+> 这是论文 Figure 1 的直观演示。
 
 ## 参数
 
 ```json
-{ "alpha": 0.1 }
+{ "alpha": 0.1, "attack_mode": "clone", "report": true }
 ```
+
+生成命令：
+
+```bash
+conda activate vpp
+python algorithms/voiceprint_protection/scripts/make_sample.py
+```
+
+> ⚠️ **L1 阶段**：扰动 δ 是**随机高斯方向**（Stage 2 的生成器 G 还没训练），
+> 所以 `output_clone_protected.wav` 与 `output_clone_baseline.wav` 的差别
+> 还**不够大**（当前 Sim_clone ≈ 0.90，论文是 0.13）。
+> 等 Stage 2 训练完成后需要**重新生成**这组样例。
 
 ## 样例来源与许可
 

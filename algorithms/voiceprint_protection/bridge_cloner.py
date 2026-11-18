@@ -108,12 +108,30 @@ class ClonerBridge:
         text      : 要念的文本（英文最佳，上游是英文 Tacotron）
         embedding : (256,) 说话人嵌入
         quiet     : True 时屏蔽上游 WaveRNN 的 tqdm 进度条（默认屏蔽）
+
+        ⚠️ **text 不能是空字符串**。上游 Tacotron 拿到空文本会吐出一段退化的 mel，
+        它自己的"裁尾部静音"循环（`while np.max(m[:, -1]) < stop_threshold: m = m[:, :-1]`）
+        会把这段 mel 一路裁空，然后越界报
+        `index -1 is out of bounds for axis 1 with size 0`。
+        这个失败还是**间歇性**的（同一次调用有时成功有时越界），极难查 ——
+        所以这里显式拦下来，给一句人话。
         """
+        if not text or not text.strip():
+            raise ValueError(
+                "克隆机需要非空的参考文本（上游 Tacotron 是英文模型）。\n"
+                "空文本会让上游吐出一段退化 mel，然后越界报错。"
+            )
+
         embedding = np.asarray(embedding, dtype=np.float32).reshape(-1)
         specs = self._synthesizer.synthesize_spectrograms([text.strip()], [embedding])
         if not specs:
             raise RuntimeError("上游合成器没有返回结果。")
         spectrogram = np.asarray(specs[0], dtype=np.float32)
+        if spectrogram.size == 0:
+            raise RuntimeError(
+                "上游合成器返回了空频谱（参考文本可能有问题）。\n"
+                "换一个非空、英文的句子再试。"
+            )
 
         # ★ 上游 WaveRNN 默认会刷 tqdm 进度条（几百行）。
         #   注意上游写的是 `progress_callback = progress_callback or self.gen_display`，

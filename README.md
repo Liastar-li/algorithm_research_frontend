@@ -204,10 +204,11 @@ python algorithms/voiceprint_protection/scripts/smoke_test.py
 
 | 样例 | 输入链接 | 输出链接 | 参数 | 观察重点 |
 |---|---|---|---|---|
-| 保护前后与攻击者克隆对比 | [`input.wav`](public/samples/group_n005_voiceprint_protection/input.wav) | 【待填：`output.wav`】 | `alpha=0.1, attack_mode=clone, report=true` | 未防御的克隆音应像本人；防御后的克隆音应明显不像，而保护后语音听感基本不变 |
+| 保护前后与攻击者克隆对比 | [`input.wav`](public/samples/group_n005_voiceprint_protection/input.wav) | [`output.wav`](public/samples/group_n005_voiceprint_protection/output.wav)<br>[`output_clone_baseline.wav`](public/samples/group_n005_voiceprint_protection/output_clone_baseline.wav)<br>[`output_clone_protected.wav`](public/samples/group_n005_voiceprint_protection/output_clone_protected.wav) | `alpha=0.1, attack_mode=clone, report=true` | 三个音频一起听：`output.wav` 跟 `input.wav` 差不多；但未防御的克隆音像本人，防御后的克隆音明显不像 |
 
-> ⏳ **输出样例还没生成** —— 差 `synthesizer.pt` + `vocoder.pt`（425 MB）。
-> 平台示例卡在输出缺失时会显示"暂时无法预览素材"（不会白屏）。
+> ⚠️ **L1 阶段**：扰动 δ 还是**随机高斯方向**（Stage 2 的生成器 G 尚未训练），
+> 所以两个克隆音的差别**还不够大**（当前 Sim_clone ≈ 0.90，论文是 0.13）。
+> Stage 2 训练完成后需要**重新生成**这组样例。
 
 ---
 
@@ -218,7 +219,8 @@ python algorithms/voiceprint_protection/scripts/smoke_test.py
 | 测试 | 结果 |
 |---|---|
 | `npm test` / `npm run build` | ✅ 6/6 通过 / 构建通过 |
-| `scripts/test_service.py --mock` | ✅ **40/40** 通过（协议全项） |
+| `scripts/test_service.py --mock` | ✅ **40/40** 通过（协议全项，不需要权重） |
+| `scripts/test_service.py`（真权重） | ✅ **41/41** 通过（含真实推理 + 文件下载 + 空文本兜底） |
 | `stage2/verify_gradients.py` | ✅ **12/12** 通过（梯度确实穿过三层冻结组件回到 G） |
 | `stage2/verify_mel.py` | ✅ **4/4** 通过（torch 版 GE2E 与上游 mel 误差 2.3e-05，嵌入余弦 0.99999481） |
 | `stage2/train.py --stub --steps 6` | ✅ 训练机制跑通（8004 条 / 80 说话人） |

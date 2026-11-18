@@ -45,12 +45,12 @@ import sys
 import time
 from pathlib import Path
 
-import numpy as np
-
 MODULE_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(MODULE_DIR))
 
 try:
+    import numpy as np  # noqa: E402
+
     import audio_utils  # noqa: E402
     import config  # noqa: E402
     import paths  # noqa: E402

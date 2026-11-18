@@ -311,11 +311,19 @@ async def process(
         # -- 推理 -------------------------------------------------------
         protector = get_protector()
         started = time.time()
+        # ★ 文本**不能为空**：上游 Tacotron 拿到空文本会吐出一段退化的 mel，
+        #   它自己的"裁尾部静音"循环会把这段 mel 一路裁空，
+        #   然后在 m[:, -1] 上越界（"index -1 is out of bounds for axis 1 with size 0"）。
+        #   而且这个失败是**间歇性**的（输出长度 0.3 s、RMS 抖动 10 倍），
+        #   极难查 —— 所以这里直接兜底成默认参考文本。
+        from infer import DEFAULT_REFERENCE_TEXT
+
+        text = params["text"] or DEFAULT_REFERENCE_TEXT
         result = protector.protect(
             wav,
             alpha=params["alpha"],
             seed=params["seed"],
-            text=params["text"] or "",
+            text=text,
             attack_mode=params["attack_mode"],
             verbose=False,
         )

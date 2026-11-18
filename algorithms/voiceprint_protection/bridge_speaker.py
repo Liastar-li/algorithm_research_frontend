@@ -53,12 +53,12 @@ import os
 import sys
 from pathlib import Path
 
-import numpy as np
-
 import config
 import paths
 
 try:
+    import numpy as np
+
     import torch
 
     import audio_utils  # noqa: E402

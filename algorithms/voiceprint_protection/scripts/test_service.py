@@ -254,6 +254,22 @@ def run_checks(base_url: str, expect_success: bool) -> Checker:
     else:
         print(f"  [跳过] 服务返回 {response.status_code}")
 
+    # -- 6. 空文本必须被兜底（★ 间歇性崩溃的回归测试）---------------------
+    print("\n【6】空文本兜底")
+    print("    上游 Tacotron 拿到空文本会吐出退化 mel，它自己的裁静音循环会越界，")
+    print("    而且是**间歇性**的 —— 所以这里显式验一次。")
+    with audio_path.open("rb") as handle:
+        files = {"input_file": (audio_path.name, handle, "audio/wav")}
+        data = {
+            "method_id": METHOD_ID,
+            "parameters": json.dumps({"alpha": 0.1, "attack_mode": "none",
+                                      "report": False, "text": ""}),
+        }
+        response = requests.post(endpoint, files=files, data=data, timeout=180)
+    checker.check(response.status_code == 200,
+                  "空文本 -> 200（用默认参考文本兜底）",
+                  f"实际 {response.status_code}：{response.text[:200]}")
+
     return checker
 
 

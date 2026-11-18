@@ -21,12 +21,18 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-import torch
-
 MODULE_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(MODULE_DIR.parent))
 
-import config  # noqa: E402
+try:
+    import torch  # noqa: E402
+
+    import config  # noqa: E402
+except ImportError as error:  # 依赖缺失（多半是忘了 conda activate vpp）
+    from paths import print_env_hint  # noqa: E402
+
+    print_env_hint(error)
+    raise SystemExit(1) from error
 from stage2 import losses as loss_module  # noqa: E402
 from stage2.common import perturb_embedding, set_seed  # noqa: E402
 from stage2.discriminator import MelDiscriminator  # noqa: E402

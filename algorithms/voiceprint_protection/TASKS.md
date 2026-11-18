@@ -44,12 +44,13 @@
 | `third_party/AutoVC` | ✅ 已克隆，commit `c1827a6` |
 | `third_party/RTC`（GE2E） | ✅ 已克隆，commit `890f3a0`；权重 `encoder.pt` 已下载并校验 |
 | VCTK 数据 | ✅ 110 说话人 / 11,004 条，划分 80/10/20 已自检通过 |
-| L1 推理链 | ✅ 端到端跑通（成员 A 2026-11-17，克隆机路线）；⏳ 差 `synthesizer.pt` + `vocoder.pt` 才能在本机复现 |
-| 平台算法服务 `service.py` | ✅ **已写完并实测通过 40 项契约自测**（成员 B 2026-11-18，补做 A 的 P3） |
+| L1 推理链 | ✅ **端到端跑通并实测通过**（2026-11-18：三个上游权重就位 + `Unidecode`/`inflect` 装好） |
+| 平台算法服务 `service.py` | ✅ **已写完并实测通过 41 项契约自测**（成员 B 2026-11-18，补做 A 的 P3） |
 | 平台方法登记 | ✅ 已追加进 `public/methods/index.json`（P2） |
-| **当前阶段** | **W3 · 指南第 8 步 + 第 9 步**（W2 只差权重下载） |
-| **下一个里程碑** | **M1：L1 推理链跑通**（产出保护后音频）—— 差 `synthesizer.pt` + `vocoder.pt`（见 0.8 路线决策） |
-| **待补依赖** | `Unidecode` + `inflect`（上游合成器的文字处理，克隆机必需）—— `python-multipart==0.0.20` 与 `scikit-learn==1.5.2` **已装好并实测通过** |
+| 平台样例（输入 + 输出） | ✅ `input.wav` / `output.wav` + 两个克隆对比音，**真实跑出来的**（P4） |
+| **当前阶段** | **W3 · 指南第 8 步 + 第 9 步** —— M1 已达成，剩平台端到端联调（P5） |
+| **下一个里程碑** | **M2 平台打通**（P5：在网页上上传 → 处理 → 预览 → 下载） |
+| **待补依赖** | 无 —— `python-multipart` / `scikit-learn` / `Unidecode` / `inflect` **全部装好并实测通过** |
 
 ### ★ 本周已取得的关键结论（2026-11-13 实测，详见 [docs/notes/autovc_alignment.md](docs/notes/autovc_alignment.md)）
 
