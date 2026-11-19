@@ -374,19 +374,126 @@ def rtc_mel(wav: np.ndarray) -> np.ndarray:
         rtc_mel_raw(wav) / preset["max_abs_value"], dtype=np.float32)
 
 
+# ---------------------------------------------------------------------------
+# mel 频谱：模型侧第三套约定（**HiFi-GAN 声码器**那套）★ 当前默认
+# ---------------------------------------------------------------------------
+def _hifigan_transforms():
+    """构造 torchaudio 的 Spectrogram + MelScale（HiFi-GAN 那套）。
+
+    ★ 为什么用 torchaudio 而不是自己写 numpy：
+      我们这版权重（HF `speechbrain/tts-hifigan-libritts-16kHz`）是
+      SpeechBrain 用**他们自己的** torchaudio 变换链训练的。
+      用**同一套 torchaudio 调用**算 mel，才能保证**逐位一致** ——
+      自己重写 numpy 版很容易在"窗口是不是周期的""reflect 填不填"这类细节上偏一点，
+      而 mel 偏一点，声码器出来的就是噪音，**而且不报错**。
+
+    参数来自该模型的 README（"IMPORTANT: Use these specific parameters to
+    match the Vocoder's training settings"）：
+
+        Spectrogram(hop_length=256, win_length=1024, n_fft=1024,
+                    power=1, normalized=False)
+        MelScale(sample_rate=16000, n_mels=80, f_min=0.0, f_max=8000.0,
+                 norm="slaney", mel_scale="slaney")
+    """
+    import torchaudio
+
+    preset = config.MEL_PRESETS["hifigan16k"]
+    spectrogram = torchaudio.transforms.Spectrogram(
+        hop_length=preset["hop_length"],
+        win_length=preset["win_length"],
+        n_fft=preset["n_fft"],
+        power=preset["power"],
+        normalized=preset["normalized"],
+    )
+    mel_scale = torchaudio.transforms.MelScale(
+        sample_rate=preset["sample_rate"],
+        n_stft=preset["n_fft"] // 2 + 1,
+        n_mels=preset["n_mels"],
+        f_min=preset["fmin"],
+        f_max=preset["fmax"],
+        norm=preset["norm"],
+        mel_scale=preset["mel_scale"],
+    )
+    return spectrogram, mel_scale
+
+
+def hifigan_mel_torch(wav: torch.Tensor) -> torch.Tensor:
+    """HiFi-GAN 约定的 mel，torch 版，形状 **(80, T)**。
+
+    ⚠️ 方向注意：HiFi-GAN 生成器吃的是 **(80, T)**（通道在前），
+    而本项目其它 mel 函数返回 **(T, 80)**。
+    用 `bridge_vocoder.VocoderBridge.mel_to_wav()` 就不会搞混。
+    """
+    spectrogram, mel_scale = _hifigan_transforms()
+    spectrum = spectrogram(wav)
+    mel = mel_scale(spectrum)
+    preset = config.MEL_PRESETS["hifigan16k"]
+    return torch.log(torch.clamp(mel, min=preset["clip_val"]))
+
+
+def hifigan_mel(wav: np.ndarray) -> np.ndarray:
+    """HiFi-GAN 约定的**原始** mel，形状 **(T, 80)**（与本项目其它 mel 函数同向）。
+
+    ★ 这是**声码器要的量纲** —— 直接喂 `bridge_vocoder` 的 HiFi-GAN。
+      网络侧（Ec/D 与损失）用的是**归一化**后的版本，见 `hifigan_mel_norm()`。
+
+    与 `hifigan_mel_torch()` 数值一致（同一套 torchaudio 变换）。
+
+    【实测验证】`scripts/verify_hifigan.py`：
+      重建音与原音的说话人嵌入余弦 = **0.9746**，RMS 0.0539 -> 0.0585。
+    """
+    tensor = torch.from_numpy(np.ascontiguousarray(np.asarray(wav, dtype=np.float32)))
+    mel = hifigan_mel_torch(tensor)
+    return np.ascontiguousarray(mel.numpy().T, dtype=np.float32)   # (80, T) -> (T, 80)
+
+
+def hifigan_mel_norm(wav: np.ndarray) -> np.ndarray:
+    """**网络侧**的 HiFi-GAN mel：原始 mel 做一次固定仿射变换，形状 **(T, 80)**。
+
+        a = scale * s + offset      （s = 原始 mel，a ≈ [-0.11, 0.92]）
+
+    ★ **为什么要这一步**：论文的 `λ_cd = 1.0`、`λ_dis = 0.01` 是在
+      **AutoVC 的 mel 量纲**（值域 ~[0,1]，宽约 1.0）下网格搜索出来的。
+      原始的 HiFi-GAN mel 是 `ln(m)`，值域约 **[-11.5, 0]**，
+      直接用会让 `L_rec` 比论文大 ~**100 倍**，
+      `λ_cd` 的相对权重被稀释 ~40 倍 ⇒ **论文的超参就失效了**。
+
+    ★ 仿射**可逆**，所以送进声码器前用 `hifigan_mel_unnorm()` 反变换回去即可，
+      **零损失**（不需要 clip，clip 会让变换不可逆）。
+    """
+    preset = config.MEL_PRESETS["hifigan16k"]
+    raw = hifigan_mel(wav)
+    return np.ascontiguousarray(
+        raw * preset["norm_scale"] + preset["norm_offset"], dtype=np.float32)
+
+
+def hifigan_mel_unnorm(mel: np.ndarray) -> np.ndarray:
+    """`hifigan_mel_norm()` 的**逆变换**：网络侧 mel -> 声码器要的原始 mel。"""
+    preset = config.MEL_PRESETS["hifigan16k"]
+    mel = np.asarray(mel, dtype=np.float32)
+    return np.ascontiguousarray(
+        (mel - preset["norm_offset"]) / preset["norm_scale"], dtype=np.float32)
+
+
 def model_mel(wav: np.ndarray, preset_name: str | None = None) -> np.ndarray:
-    """**模型侧 mel 的统一入口**（Ec / D 的输入）。
+    """**模型侧 mel 的统一入口**（Ec / D 的输入 + 损失的计算基准）。
 
     preset_name 省略时用 `config.STAGE1["mel_preset"]`（契约字段，两人共同区）。
 
-    ★ 别再直接调 autovc_mel / rtc_mel —— 统一从这里走，
+    ★ 别再直接调 autovc_mel / rtc_mel / hifigan_mel —— 统一从这里走，
       否则"训练用一套 mel、评测用另一套"这种坑会以"指标莫名不对"的形式出现。
+
+    ⚠️ 对 `hifigan16k`：这里返回的是**归一化**后的 mel（网络侧量纲）。
+      送进声码器前要用 `hifigan_mel_unnorm()` 反变换 ——
+      `bridge_vocoder.VocoderBridge.mel_to_wav()` 已经帮你做了。
     """
     name = preset_name or config.STAGE1.get("mel_preset", config.DEFAULT_PRESET)
     if name == "model16k":
         return autovc_mel(wav)
     if name == "rtc16k":
         return rtc_mel(wav)
+    if name == "hifigan16k":
+        return hifigan_mel_norm(wav)
     raise ValueError(
         f"未知的模型侧 mel 预设：{name!r}。"
         f"可选：{sorted(config.MEL_PRESETS)}"
@@ -394,8 +501,7 @@ def model_mel(wav: np.ndarray, preset_name: str | None = None) -> np.ndarray:
 
 
 class MelSpec:
-    """模型侧 mel 的可复用计算器（AutoVC 链）。
-    用法：
+    """模型侧 mel 的可复用计算器（AutoVC 链）。    用法：
         spec = MelSpec()
         mel = spec.mel(wav)              # (samples,) -> (T, 80)，取值 [0,1]
     """

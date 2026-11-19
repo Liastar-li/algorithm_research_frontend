@@ -127,6 +127,46 @@ MEL_PRESETS = {
         "max_abs_value": 4.0,     # 对称归一化的半幅；WaveRNN 训练时除以它 -> [-1,1]
         "chain": "rtc",           # preemph + librosa STFT + 幅度 + dB + 对称归一化
     },
+    # ★ 第三套模型侧 mel：**HiFi-GAN 声码器**那套约定（★ 当前默认）
+    #   来源：HuggingFace `speechbrain/tts-hifigan-libritts-16kHz` 的 README
+    #   给出的确切参数 + speechbrain `lobes/models/FastSpeech2.py::mel_spectrogram`
+    #   的实现：
+    #     torchaudio Spectrogram(hop=256, win=1024, n_fft=1024, power=1,
+    #                             normalized=False, center=True, pad_mode='reflect')
+    #     -> MelScale(sr=16000, n_mels=80, f_min=0, f_max=8000,
+    #                 norm='slaney', mel_scale='slaney')
+    #     -> log(clamp(mel, min=1e-5))            ← **自然对数**，不是 log10
+    #
+    #   ★ **实测验证过**（`scripts/verify_hifigan.py`）：
+    #     重建音与原音的说话人嵌入余弦 = **0.9746**（约定错的话 ≈ 0）
+    #     原音 RMS 0.0539 -> 重建 RMS 0.0585，长度只差 1 帧
+    #   （NVIDIA 那条 log10 链喂进去是 2512% 的相对误差，完全是噪音。）
+    "hifigan16k": {
+        "sample_rate": 16000,
+        "n_fft": 1024,
+        "hop_length": 256,
+        "win_length": 1024,
+        "n_mels": 80,
+        "fmin": 0,
+        "fmax": 8000,
+        "power": 1.0,            # 幅度（不是功率）
+        "normalized": False,     # 不做逐句能量归一化
+        "clip_val": 1e-5,        # log 之前的下限
+        "norm": "slaney",        # librosa 兼容的 mel 滤波器组
+        "mel_scale": "slaney",
+        "chain": "hifigan",     # STFT 幅度 -> slaney mel -> log(clamp(1e-5))
+        # ★ 归一化：把上面的原始 mel 做一次**固定仿射变换**，让网络侧的 mel
+        #   与 AutoVC 的 mel **同量纲**（都是 ~[0,1] 宽）。
+        #   a = scale * s + offset
+        #   （s = ln(m)；AutoVC 那边是 a = 0.2*log10(m) + 0.84 = 0.08686*s + 0.84）
+        #   为什么要这一步：论文的 λ_cd=1.0、λ_dis=0.01 是在 AutoVC 量纲下
+        #   网格搜索出来的。若直接用原始的 s（值域约 [-11.5, 0]），
+        #   L_rec 会比论文大 ~100 倍，λ_cd 的相对权重会被稀释 40 倍
+        #   ⇒ 论文的超参就失效了。
+        #   ★ 仿射**可逆**，所以送进声码器前反变换回去即可，**零损失**。
+        "norm_scale": 0.0868577,   # = 0.2 / ln(10)
+        "norm_offset": 0.84,
+    },
 }
 
 DEFAULT_PRESET = "model16k"
@@ -219,25 +259,28 @@ STAGE1 = {
     "amp": True,               # 混合精度（fp16）：省显存 + 快 1.5~2 倍
     "lr": 1e-4,
     # ★ 模型侧用哪套 mel 约定（Ec/D 的输入）。
-    #   "rtc16k"   = **上游 WaveRNN 声码器那套**（n_fft 800 / hop 200 / fmin 55 /
-    #                fmax 7600 / preemphasis / 取值 [-1,1]）—— ★ 当前默认
-    #   "model16k" = AutoVC 官方链（n_fft 1024 / hop 256 / fmin 90 / 取值 [0,1]）
+    #   "hifigan16k" = **HiFi-GAN 声码器那套**（n_fft 1024 / hop 256 / fmin 0 /
+    #                fmax 8000 / log(clamp(1e-5))）—— ★ 当前默认
+    #   "model16k"   = AutoVC 官方链（n_fft 1024 / hop 256 / fmin 90 / 取值 [0,1]）
+    #   "rtc16k"     = 上游 WaveRNN 声码器那套（preemph / 对称归一化 / 取值 [-1,1]）
     #
-    #   【为什么默认是 rtc16k】
-    #   论文 §2.3：x_adv = D(c, h_adv) 之后要"用 HiFi-GAN 声码器 V(·) 转成波形"。
-    #   但 **NVIDIA 的 torch.hifi_gan 仓库已下架**（2026-11 实测 GitHub API 404），
-    #   16 kHz 的 HiFi-GAN 权重取不到；我们唯一能用的声码器是上游 WaveRNN，
-    #   而它**只吃 rtc16k 那套 mel**（喂 model16k 的 mel 出来是噪音，且不报错）。
-    #   ⇒ 端到端能跑通比"mel 与 AutoVC 官方逐位相同"更重要。
+    #   【为什么默认是 hifigan16k —— 2026-11-18/19 定】
+    #   论文 §2.3 原文：
+    #       "The protected mel-spectrogram is reconstructed as x_adv = D(c, h_adv),
+    #        and converted to waveform using **HiFi-GAN vocoder V(·)**."
+    #   ⇒ **Stage 1 的 mel 必须就是 HiFi-GAN 的约定**，否则论文自己也要过一个
+    #     "近似换算"，而那个换算在滤波器组层面不严格成立。
     #
-    #   【AutoVC 的架构没变】论文 §3.1 要求的是"Stage 1 采用 AutoVC 的**架构**"
-    #   （3 层卷积 + 双向 LSTM 瓶颈 32 + 解码器 + 5 层 postnet）—— 我们照搬了。
-    #   mel 是**预处理约定**、不是架构，论文没有规定。
-    #   autovc_mel() 仍然保留并通过官方对照（最大差 0.000e+00），
-    #   等将来有 HiFi-GAN / AutoVC 官方权重时可直接切回。
+    #   ★ 而且 HiFi-GAN 与 AutoVC 链**结构完全一样**
+    #     （n_fft 1024 / hop 256 / 80 mels / 16 kHz），只差滤波器组与归一化
+    #     ⇒ **AutoVC 的网络架构一字不改**（论文 §3.1 要求的是架构）。
+    #
+    #   ★ HiFi-GAN 是纯卷积网络、**可求导** —— Stage 2 的梯度必须穿过 V(·)
+    #     （G → h_adv → D(c,h_adv) → V(·) → E_spk(·) → L_de）。
+    #     上游 WaveRNN 是自回归生成器（采样 9 bit 离散码），**不可求导** ❌。
     #
     #   ★ 这是**两人共同区**（config.py），改动需双方同意，见 docs/interface-contract.md。
-    "mel_preset": "rtc16k",
+    "mel_preset": "hifigan16k",
 }
 
 # ---------------------------------------------------------------------------

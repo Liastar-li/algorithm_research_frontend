@@ -345,6 +345,97 @@ batch= 32: 0.143 s/step -> 223.2 条/秒   显存 1.34 GB
 > `num_workers` **最多 2**，开 4 个会被系统直接杀掉（报 "worker exited unexpectedly"）。
 > 云机上内存多，可以开到 8。
 
+### 0.10.4c ★★ 找到了 16 kHz 的 HiFi-GAN 权重（成员 A · 2026-11-19）—— **解掉了 B 的 Stage 2 阻塞点**
+
+**背景**：B 在远端提交了 Stage 2 全套代码（5053 行），但 `docs/notes/stage2_blockers.md`
+把第一件事列为**公开阻塞点**：
+
+> ### 一、★ 最要紧的一条：Stage 2 需要一个**可求导**的声码器
+> | 候选 | 建议 |
+> |---|---|
+> | A. AutoVC 配套 wavenet_vocoder | 暂时搁置（权重 404） |
+> | B. HiFi-GAN（论文同款） | ★ **推荐，但需要另找权重** |
+> | C. 上游 RTC 的 WaveRNN | 不推荐 |
+>
+> 「还差的部分（需要能连 GitHub 的人补）」：
+> ```
+> curl -L -o hifigan_melbins_16k.pt https://github.com/NVIDIA/torch.hifi_gan/releases/download/v0.1/hifigan_melbins_16k.pt
+> ```
+
+**A 的实测结论**：那个 release 附件**也是 404** —— NVIDIA 把仓库连同 release 一起删了。
+（`api.github.com/repos/pytorch/pytorch` 返回 200，所以不是墙。）
+
+#### ★ 找到的替代品
+
+HuggingFace **`speechbrain/tts-hifigan-libritts-16kHz`** 的 `generator.ckpt`：
+
+| | NVIDIA `hifigan_melbins_16k` | speechbrain 这个 | |
+|---|---|---|---|
+| 采样率 / hop / n_fft | 16000 / 256 / 1024 | **同** | ✅ |
+| n_mels | 80 | **同** | ✅ |
+| 架构 | HiFi-GAN v1（4 upsample + 12 resblock） | **同** | ✅ |
+| 参数量 | 13,936,130 | **13,936,130** | ✅ |
+| mel 约定 | slaney mel → `log(clamp(1e-5))` | **同** | ✅ |
+| 权重格式 | `weight_g`/`weight_v` | **同**（原生） | ✅ |
+| 加载 | — | **strict=True，234/234 键全匹配** | ✅ |
+| 可求导 | ✅ | ✅ | ✅ |
+
+只差训练数据（LibriTTS 16 kHz vs NVIDIA 的 16 kHz 模型）—— **架构与约定逐项相同**。
+
+已下载：`data/models/default/hifigan_16k.ckpt`（55,828,077 字节，sha256 `2d92a974...`）
+下载脚本：`scripts/download_hifigan_weights.py`
+生成器**内置**在 `algorithms/voiceprint_protection/hifigan.py`（bshall/hifigan，MIT，署名在文件头）
+→ **两台机器、云机都零配置可用，不用再 clone third_party**。
+
+#### ★ 由此确定的 mel 约定（实测，不是猜的）
+
+```
+torchaudio Spectrogram(hop=256, win=1024, n_fft=1024, power=1, normalized=False)
+  -> MelScale(sr=16000, n_mels=80, f_min=0, f_max=8000, norm='slaney', mel_scale='slaney')
+  -> log(clamp(mel, min=1e-5))          ← 自然对数，不是 log10
+```
+
+来源：该模型的 README 给的确切参数 + speechbrain `lobes/models/FastSpeech2.py::mel_spectrogram`。
+
+**实测判据（三层）**：
+
+| 判据 | 我们的实现 | NVIDIA 那条 log10 链 |
+|---|---|---|
+| 重建音 vs 原音的**说话人余弦** | **0.9746** ✅ | 0.70（近似换算） |
+| 通用 mel 相对误差 | 39.9% | **2512%**（纯噪音） |
+| RMS | 0.0539 → 0.0585 | 0.7662 |
+
+#### ★★ 一个关键的量化结论：**仿射换算不可接受**
+
+B 的 `stage2/pipeline.py::autovc_mel_to_hifigan()` 想在 AutoVC mel 与 HiFi-GAN mel 之间换算。
+A 实测了这个想法：
+
+| 方案 | 说话人余弦 |
+|---|---|
+| **精确的 HiFi-GAN mel** | **0.9746** ✅ |
+| AutoVC mel → 仿射换算 | 0.6983 ❌ |
+| 再夹到实际取值范围 | 0.6967 ❌ |
+| 再做逐帧 min-max | 0.3640 ❌ |
+
+**原因**：两套 mel 的**滤波器组不同**（AutoVC: fmin 90 / fmax 7600 / 带 30 Hz 高通；
+HiFi-GAN: fmin 0 / fmax 8000 / slaney），底层能量分布不同，**仿射补不回来**。
+
+⇒ **结论：Stage 1 的模型侧 mel 必须直接用 HiFi-GAN 的约定**（`config.STAGE1["mel_preset"] = "hifigan16k"`），
+⇒ **B 的 `autovc_mel_to_hifigan()` 可以删掉**。
+
+#### ★★ 顺带解决的一个隐患：论文的 λ 会被稀释
+
+HiFi-GAN 的原始 mel 值域是 **[-11.5, 0]**，而 AutoVC 的是 **[0, 1]**。
+直接用会让 `L_rec` 比论文大 **~100 倍**（实测 165 vs 0.86），
+`λ_cd = 1.0` 的相对权重被稀释 **~40 倍** ⇒ **论文的超参失效**。
+
+**解法**：给网络侧的 mel 加一个**固定仿射变换**（可逆、零损失）：
+```
+网络侧 mel  a = 0.08686 · s + 0.84      （值域 [-0.11, 0.92]，与 AutoVC 同量纲）
+送声码器前  s = (a - 0.84) / 0.08686    （反变换，误差 4.8e-07）
+```
+实测 `L_rec` 从 165 回到 **0.66**，与论文同一量级 ⇒ **λ_cd=1.0、λ_dis=0.01 直接可用**。
+
 ### 0.10.5 开训前还缺什么（只剩数据）
 
 | # | 缺什么 | 谁 | 怎么办 |

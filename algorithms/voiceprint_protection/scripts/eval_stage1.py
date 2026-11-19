@@ -135,7 +135,7 @@ def main() -> int:
             from bridge_vocoder import VocoderBridge
 
             vocoder = VocoderBridge()
-            print("  声码器     : 上游 WaveRNN（论文里是 HiFi-GAN，理由见 bridge_vocoder.py）")
+            print("  声码器     : HiFi-GAN 16k（论文 §2.3 的 V(·)，可求导）")
         except Exception as error:  # noqa: BLE001
             print(f"  [警告] 声码器加载失败（{error}），只算 mel 域指标。")
 

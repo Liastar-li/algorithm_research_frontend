@@ -151,9 +151,11 @@ def test_numeric_match(wav: np.ndarray) -> None:
 def test_round_trip(wav: np.ndarray) -> None:
     print("\n【第 2 层】端到端对照：原波形 -> rtc_mel -> WaveRNN -> 重建波形 -> 再转回 mel")
     print("  （判断依据是 **mel 域往返距离**：声码器不做相位重建，但必须保证音色）")
-    from bridge_vocoder import VocoderBridge
+    print("  ★ 注意这里用的是 **WaveRNN**（`rtc16k` 那套 mel 的配套声码器），")
+    print("    不是 HiFi-GAN —— 两套 mel 约定互不相通。")
+    from bridge_vocoder import WaveRNNBridge
 
-    vocoder = VocoderBridge()
+    vocoder = WaveRNNBridge()
     mel = audio_utils.rtc_mel(wav)
 
     print(f"  mel 形状 {mel.shape}，取值范围 [{mel.min():+.4f}, {mel.max():+.4f}]")

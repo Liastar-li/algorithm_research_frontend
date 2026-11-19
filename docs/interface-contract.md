@@ -108,62 +108,78 @@ x_rec = bridge.reconstruct(mel, embedding)              # 不加扰动的重建�
 - **重建（reconstruct）是自检的关键一步**：重建输出是噪音 → 问题在 mel 或权重；
   重建正常但保护后是噪音 → 问题在扰动或解码路径。分两步测能立刻定位坏在哪一环。
 
-### 3.3 `bridge_vocoder.py`（成员 A，**2026-11-18 重写**）
+### 3.3 `bridge_vocoder.py`（成员 A，**v0.4 重写 / v0.5 换成 HiFi-GAN**）
 
 ```python
-from bridge_vocoder import VocoderBridge
+from bridge_vocoder import VocoderBridge, WaveRNNBridge
 
-bridge = VocoderBridge(rtc_dir=None, device=None, models_dir=None)
+bridge = VocoderBridge(weights_path=None, device=None)
 
-wav = bridge.mel_to_wav(mel)              # (T, 80) 的 rtc16k mel -> 一维波形 (N,)
-mel_back = bridge.wav_to_mel(wav)         # 波形 -> 同一套 mel（往返对照用）
+wav = bridge.mel_to_wav(mel)                    # 网络侧 mel (80,T)/(T,80) -> 波形 (N,)
+wav = bridge.mel_to_wav(mel, normalized=False)  # 原始 mel（不反归一化）
+mel_back = bridge.wav_to_mel(wav)               # 波形 -> 原始 mel (T, 80)
 ```
 
-- 输入是 **(T, 80)** 的 **`rtc16k` 侧 mel**（由 `audio_utils.rtc_mel()` 产出，取值 **[-1, 1]**）。
-- 内部走 **上游 Real-Time-Voice-Cloning 的 WaveRNN**（`vocoder.pt`，51 MB，已下载校验）。
+- 输入是 **(80, T)** 的 **HiFi-GAN 约定 mel**。
+- 内部是 **HiFi-GAN v1 生成器**（torch 原生、**可求导**）—— 论文 §2.3 指定的 V(·)。
 - 输出是一维波形，采样率 **16 kHz**。
+- `normalized=True`（默认）：输入是**网络侧**（归一化过的）mel，内部反变换成原始量纲。
 
-> ★ **为什么不是 HiFi-GAN**（论文 §2.3 指定的是 HiFi-GAN）：
-> **NVIDIA 官方的 `NVIDIA/torch.hifi_gan` 仓库已下架**（2026-11-18 实测：
-> GitHub API / codeload / raw.githubusercontent 全部 404，NGC 上的 16 kHz 权重也取不到）。
-> 我们唯一能用的声码器是上游 WaveRNN，而它**只吃 `rtc16k` 那套 mel 约定**
-> （喂 `model16k` 的 mel 进去出来是噪音，且**不报错**）。
-> ⇒ **Stage 1 的模型侧 mel 必须用 `rtc16k`**，见 §7.1。
-> 这是一处**如实记录的偏离**，要写进 `docs/experiments.md`。
+> ★ **为什么必须可求导**：Stage 2 的梯度要穿过声码器
+> ```
+> G → h_adv → D(c, h_adv) → V(·) → E_spk(·) → L_de
+> ```
+> 上游 WaveRNN 是**自回归生成器**（采样 9 bit 离散码），梯度断在那里，
+> G 收不到梯度而且**不报错**。所以 WaveRNN 只保留为 `WaveRNNBridge`（对照用）。
 
-### 3.4 `audio_utils.py` 的 mel 约定（⚠️ 已变更）
+> ★ **权重从哪来**：NVIDIA 官方的 `NVIDIA/torch.hifi_gan` 仓库**已整体下架**
+> （2026-11-18 实测：GitHub API / codeload / raw / release 附件全部 404）。
+> 我们用 HuggingFace `speechbrain/tts-hifigan-libritts-16kHz` 的 `generator.ckpt`：
+> **同一套 HiFi-GAN v1 架构、同一套 mel 约定、同样 13,936,130 参数**，
+> 加载时 `strict=True`（实测 234/234 键全匹配）。
+> 下载：`scripts/download_hifigan_weights.py`
+
+### 3.4 `audio_utils.py` 的 mel 约定（⚠️ v0.5 已变更）
 
 | 用途 | 函数 | 约定 |
 |---|---|---|
-| **模型侧（Ec/D）★** | `audio_utils.model_mel(wav)` | 走 `config.STAGE1["mel_preset"]`，当前 = `rtc16k` |
-| 模型侧 · AutoVC 链 | `audio_utils.autovc_mel(wav)` | 自定义链：30 Hz 高通 → reflect 幅度 STFT → mel(fmin=90) → dB → clip[0,1]，取值 **[0,1]** |
-| 模型侧 · WaveRNN 链 | `audio_utils.rtc_mel(wav)` | preemph(0.97) → librosa STFT(800/200) → 幅度 → mel(fmin=55,fmax=7600) → dB → 对称归一化 → **/4**，取值 **[-1,1]** |
-| WaveRNN 原始量纲 | `audio_utils.rtc_mel_raw(wav)` | 同上但**不除 4**，取值 **[-4,4]**（上游合成器输出的量纲） |
+| **模型侧（Ec/D）★** | `audio_utils.model_mel(wav)` | 走 `config.STAGE1["mel_preset"]`，当前 = `hifigan16k`（**归一化量纲**） |
+| HiFi-GAN 原始 | `audio_utils.hifigan_mel(wav)` | preemph 无 / STFT 幅度 / slaney mel(fmin 0, fmax 8000) / **log(clamp(1e-5))**，值域 **[-11.5, 0]**，形状 (T, 80) |
+| ★ 网络侧归一化 | `audio_utils.hifigan_mel_norm(wav)` | `0.08686·原始 + 0.84`，值域 **[-0.11, 0.92]**（与 AutoVC 同量纲） |
+| ★ 反归一化 | `audio_utils.hifigan_mel_unnorm(mel)` | 上面的逆变换（**可逆，零损失**） |
+| 模型侧 · AutoVC 链 | `audio_utils.autovc_mel(wav)` | 30 Hz 高通 → reflect 幅度 STFT → mel(fmin=90) → dB → clip[0,1] |
+| 模型侧 · WaveRNN 链 | `audio_utils.rtc_mel(wav)` | preemph → librosa STFT(800/200) → 幅度 → mel(fmin=55,fmax=7600) → 对称归一化 → /4，值域 **[-1, 1]** |
 | GE2E 侧 | `audio_utils.ge2e_mel(wav)` | 40 维**线性** mel（上游 `encoder/params_data.py` 约定），喂说话人编码器 |
 | 通用 librosa 版（对照用） | `audio_utils.librosa_mel(wav)` | librosa 原生 mel，用于数值对照 |
-| 声码器侧（HiFi-GAN 约定） | `audio_utils.vocoder_mel(wav)` | mel 基 sr=8000 + `(x+4.5)/5` 归一化（**目前无对应权重，保留备用**） |
+| 声码器侧（NVIDIA 旧约定） | `audio_utils.vocoder_mel(wav)` | mel 基 sr=8000 + `(x+4.5)/5`（**目前无对应权重，保留备用**） |
 | 通用预设 | `audio_utils.MelSpec(name).mel(wav)` | 走 `config.MEL_PRESETS[name]` |
 
 > ★ **代码里请一律用 `audio_utils.model_mel(wav)` 取模型侧 mel，别直接调
-> `autovc_mel` / `rtc_mel`** —— 否则会出现"训练用一套、评测用另一套"，
+> `autovc_mel` / `rtc_mel` / `hifigan_mel`** —— 否则会出现"训练用一套、评测用另一套"，
 > 这种坑会以"指标莫名不对"的形式出现，而且**不报错**。
 >
-> ★ **两套模型侧 mel 的取舍**：
-> | 预设 | n_fft/hop | fmin/fmax | 取值 | 有配套声码器？ |
-> |---|---|---|---|---|
-> | `model16k`（AutoVC 官方） | 1024 / 256 | 90 / 7600 | [0, 1] | ❌（AutoVC 的 WaveNet 权重 404，HiFi-GAN 也下架了） |
-> | **`rtc16k`（WaveRNN）★当前默认** | 800 / 200 | 55 / 7600 | [-1, 1] | ✅ 上游 WaveRNN |
+> ★ **三套模型侧 mel 的取舍**：
+> | 预设 | n_fft/hop | 取值 | 配套声码器 | 可求导 | 状态 |
+> |---|---|---|---|---|---|
+> | `model16k`（AutoVC 官方） | 1024 / 256 | [0, 1] | ❌ 权重全 404 | — | 保留（已通过官方对照 0.000e+00） |
+> | `rtc16k`（WaveRNN） | 800 / 200 | [-1, 1] | ✅ 上游 WaveRNN | ❌ | 保留（对照用） |
+> | **`hifigan16k`（HiFi-GAN）★默认** | 1024 / 256 | [-0.11, 0.92]（归一化后） | ✅ **HiFi-GAN 16k** | ✅ | **当前默认** |
 >
-> 论文 §3.1 要求的是"Stage 1 采用 AutoVC 的**架构**"（3 层卷积 + 双向 LSTM 瓶颈 32
-> + 解码器 + 5 层 postnet）—— 我们**照搬了架构**。mel 是**预处理约定**、不是架构，
-> 论文没有规定。**端到端能跑通 > mel 与 AutoVC 官方逐位相同。**
-> `autovc_mel()` 仍然保留并通过官方对照（最大差 0.000e+00），
-> 将来若有 HiFi-GAN / AutoVC 官方权重，切回 `config.STAGE1["mel_preset"]` 即可。
+> **为什么是 hifigan16k**：论文 §2.3 原文
+> `"x_adv = D(c, h_adv), and converted to waveform using HiFi-GAN vocoder V(·)"`
+> ⇒ **Stage 1 的 mel 必须就是 HiFi-GAN 的约定**。
+> ★ 而且我们**实测过**仿射换算不可接受：
+> AutoVC mel → HiFi-GAN mel 的仿射换算后，重建音的说话人余弦从 **0.9746 掉到 0.6983**
+> （滤波器组不同，仿射补不了）—— 所以必须直接用 HiFi-GAN 的 mel。
 >
-> ★ **原有预设名 `paper16k` / `autovc22k` 已删除**；
-> **AutoVC 官方权重本身就是 16 kHz 的**，不需要 22.05 kHz 预设。
-> 代码里请一律用符号引用（`config.DEFAULT_PRESET` / `config.STAGE1["mel_preset"]`），
-> 别写死字符串。
+> ★ **AutoVC 的网络架构一字未改**（3 层卷积 + 双向 LSTM 瓶颈 32 + 解码器 + 5 层 postnet），
+> 论文 §3.1 要求的是**架构**。mel 是预处理约定，论文没有规定。
+>
+> ★ **为什么要归一化**：论文的 `λ_cd=1.0`、`λ_dis=0.01` 是在 AutoVC 量纲下
+> 网格搜索出来的。原始 HiFi-GAN mel 值域是 [-11.5, 0]，
+> 直接用会让 `L_rec` 比论文大 ~**100 倍**（实测 165 vs 0.86），
+> `λ_cd` 的相对权重被稀释 ~40 倍 ⇒ **论文的超参失效**。
+> 归一化是**固定仿射变换且可逆**，送进声码器前反变换回去，**零损失**。
 
 
 ## 4. 推理主流程 `infer.py`（成员 A 主责，B 写冒烟测试要用）
@@ -240,15 +256,16 @@ data/spk2id.txt  每行：<说话人名> <整数 ID>，只含训练集说话人�
 
 | 用途 | 函数 | 形状 | 取值 | 喂给谁 |
 |---|---|---|---|---|
-| **模型侧 mel** | `audio_utils.model_mel(wav)` | `(T, 80)` | 当前 `rtc16k` → **[-1, 1]** | `Ec` / `D` |
+| **模型侧 mel** | `audio_utils.model_mel(wav)` | `(T, 80)` | 当前 `hifigan16k` → **[-0.11, 0.92]**（归一化后） | `Ec` / `D` / 三个损失 |
+| HiFi-GAN 原始 mel | `audio_utils.hifigan_mel(wav)` | `(T, 80)` | [-11.5, 0] | 声码器 V(·) |
 | GE2E 侧 mel | `audio_utils.ge2e_mel(wav)` | `(T', 40)` | 线性幅度（不取 log） | GE2E 说话人编码器 |
 
 > ⚠️ GE2E 侧是**第三套 mel 约定**（线性幅度、不取 log），
 > 与上游 `encoder/params_data.py` 完全一致，属于"上游自己的约定，我们不碰"。
 >
-> ⚠️ 模型侧当前用 **`rtc16k`**（WaveRNN 那套），**不是** `autovc_mel`。
-> 原因与依据见 §3.3 / §3.4（HiFi-GAN 已下架，WaveRNN 只吃 `rtc16k`）。
-> 切换方式：`config.STAGE1["mel_preset"] = "model16k"`（**共同区，改动需双方同意**）。
+> ⚠️ 模型侧当前用 **`hifigan16k`**。切换方式：
+> `config.STAGE1["mel_preset"] = "..."`（**共同区，改动需双方同意**）。
+> 详见 §3.4 的三套 mel 对比表与选择理由。
 
 ### 7.1b ★ 帧数必须是 `freq` 的整数倍（训练时最容易踩的坑）
 
@@ -343,6 +360,7 @@ python algorithms/voiceprint_protection/stage1/train.py --stage model --iteratio
 | 2026-11-18 | **v0.3** | **成员 A 签字并更正三处实测错误**：① §2 `c` 的形状改为 `(T//32, 64)`（官方代码实测，非论文的 `(T',32)`），`c̃` = 沿时间维拼接 4 个 content code = R^256；② §4 `infer.py` 返回键名按路线 B 的实际实现更新；③ 路线取舍落定（路线 B）。**新增 §9 Stage 1 的约定** | 成员 A | ✅ 成员 B 待确认 |
 | 2026-11-17 | **v0.2** | **按实际代码重写 §1/§3/§4**：预设改为 `model16k`（取消 22.05k）、AutoVC mel 改为自定义链、`AutoVCBridge` 的方法改为 `protect`/`reconstruct`、`VocoderBridge` 改为 `synthesize`、`infer` 改为 `Protector.protect(wav, ...)`；`bridge_speaker.py` 增补路线 B 的 `SpeakerBridge` | 成员 B（合并时核对） | ⬜ 待成员 A 确认 |
 | 2026-11-18 | **v0.4** | **成员 A 第二次签字（训练链路审计后）**：① §3.3 `bridge_vocoder.py` 重写为 `mel_to_wav/wav_to_mel`，内部改用**上游 WaveRNN**（HiFi-GAN 官方仓库已下架，实测 404）；② §3.4 新增**第二套模型侧 mel** `rtc16k`，`config.STAGE1["mel_preset"]` 默认改为 `rtc16k`，并新增 `audio_utils.model_mel()` 作为模型侧统一入口；③ §7.1 更新，新增 §7.1b **帧数必须是 `freq` 整数倍**的硬约定；④ §7.4 补上可执行的训练命令与 `--resume` | 成员 A | ✅ 成员 B 待确认 |
+| 2026-11-19 | **v0.5** | **成员 A 第三次签字（★ 找到了 16 kHz 的 HiFi-GAN 权重，v0.4 的方案作废）**：<br>① §3.3 `bridge_vocoder.py` **改用 HiFi-GAN**（论文 §2.3 的 V(·)，**可求导**），WaveRNN 降级为 `WaveRNNBridge`（对照用）；<br>② §3.4 新增**第三套模型侧 mel** `hifigan16k`，`config.STAGE1["mel_preset"]` 默认改为它；新增 `hifigan_mel_norm` / `hifigan_mel_unnorm`（可逆仿射归一化，**目的是让论文的 λ_cd/λ_dis 仍然有效**）；<br>③ §7.1 同步更新 | 成员 A | ✅ 成员 B 待确认 |
 
 ---
 
@@ -351,15 +369,17 @@ python algorithms/voiceprint_protection/stage1/train.py --stage model --iteratio
 | 角色 | 姓名 | 确认日期 | 备注 |
 |---|---|---|---|
 | 成员 A | 2026-11-18 | ✅ **已签字（v0.3）**。核对结果：<br>· §3.2 `bridge_autovc.py` 的 `protect`/`reconstruct` 签名一致（但 AutoVC 权重链 404，该路线降级为 Stage 1 架构参考）<br>· §3.3 `bridge_vocoder.py` 的 `synthesize` 签名一致（同上，WaveNet 权重不可得）<br>· §4 `infer.py` 已改为**模块级 `protect(wav_path, alpha, output_path)`**（B 的 `make_sample.py` 约定一），并保留 `Protector.protect(wav, ...)`<br>· §2 `c` 的形状**已更正**为 `(T//32, 64)`，`T' = T//2` 与官方代码不符<br>· 同意"只有 GE2E 内部的 40 维 mel 是例外" |
+| 成员 A | 2026-11-19 | ✅ **已签字（v0.5）★ 这条最重要，请 B 重点核对**：<br>· §3.3 `bridge_vocoder.py` **换成 HiFi-GAN**（论文 §2.3 的 V(·)）。**B 的 `stage2/models.py::TorchHiFiGANVocoder` 用的是 `torch.hub.load("NVIDIA/torch.hifi_gan", ...)`，那个仓库已下架 → 改成加载 `algorithms/voiceprint_protection/hifigan.py`（内置的生成器）+ `data/models/default/hifigan_16k.ckpt`（HF `speechbrain/tts-hifigan-libritts-16kHz`，**234/234 键 strict 加载通过**）<br>· §3.4 **模型侧 mel 改成 `hifigan16k`**。⇒ **B 的 `stage2/pipeline.py::autovc_mel_to_hifigan()` 可以删掉了** —— 实测那个近似换算会把重建音的说话人余弦从 **0.9746 掉到 0.6983**，不可接受<br>· ★ B 的 `stage2/dataset.py` 若直接调 `audio_utils.autovc_mel()`，请改成 `audio_utils.model_mel()`<br>· §7.1b 的帧数约定对 B 也有影响：**裁片段时必须用 `N = (crop_frames-1)*hop`** |
 | 成员 A | 2026-11-18 | ✅ **已签字（v0.4）**。训练链路审计后的第二次签字：<br>· §3.3 `bridge_vocoder.py` **签名变了**：`synthesize` → `mel_to_wav(mel)` / `wav_to_mel(wav)`，输入是 `rtc16k` 侧 mel（`[-1,1]`），内部是上游 WaveRNN<br>· §3.4 **模型侧 mel 改为 `rtc16k`**，理由：HiFi-GAN 官方仓库下架（实测 404），WaveRNN 只吃这套约定；**AutoVC 架构本身没变**<br>· 新增 `audio_utils.model_mel(wav)` 统一入口，请所有人**不要**再直接调 `autovc_mel`/`rtc_mel`<br>· §7.1b 的帧数约定对 B 也有影响：**如果 B 要写自己的评测脚本，裁片段时必须用 `N = (crop_frames-1)*hop`** |
 | 成员 B | | | |
 
 > **签字前请重点核对：**
 > - [ ] A 的 `bridge_autovc.py` 签名与 §3.2 一致（`protect` / `reconstruct`）
-> - [ ] A 的 `bridge_vocoder.py` 签名与 §3.3 一致（`mel_to_wav` / `wav_to_mel`，**v0.4 已改**）
+> - [ ] A 的 `bridge_vocoder.py` 签名与 §3.3 一致（`mel_to_wav` / `wav_to_mel`，**v0.5 换成 HiFi-GAN**）
 > - [ ] A 的 `infer.py` 签名与 §4 一致（`scripts/smoke_test.py` 与 `scripts/make_sample.py` 依赖它）
 > - [ ] `c` 的帧数确实是 `T // 32`（**不是** `T // 2`）
 > - [ ] 双方都同意"只有 GE2E 内部的 40 维 mel 是例外"这一条
 > - [ ] ~~**路线取舍**~~ → 已定：路线 B（论文的 GE2E），见 TASKS.md §0.8
-> - [ ] **（v0.4 新增）** 同意模型侧 mel 默认用 `rtc16k`（WaveRNN 那套）
-> - [ ] **（v0.4 新增）** 已知悉 HiFi-GAN 官方仓库已下架，声码器改用上游 WaveRNN（**偏离论文**，会写进 experiments.md）
+> - [ ] **（v0.5）** 同意模型侧 mel 默认用 `hifigan16k`（HiFi-GAN 那套）
+> - [ ] **（v0.5）** 同意删掉 `stage2/pipeline.py::autovc_mel_to_hifigan()` 那个近似换算
+> - [ ] **（v0.5）** `stage2/models.py::TorchHiFiGANVocoder` 改成加载内置生成器 + 本地 ckpt
