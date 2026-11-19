@@ -113,12 +113,12 @@ class VocoderBridge:
 
         参数
         ----
-        mel       : **(80, T)** 的 mel。
-                    也接受 (T, 80)，会自动转置（但那有歧义，别依赖）。
+        mel       : 2 维 **(T, 80)**（项目约定：时间在前）或 (80, T)，会自动转置。
+                    3 维（批量）时用 **(B, T, 80)**（时间在前）。
         normalized : True（默认）= 输入是**网络侧**的 mel（归一化过的），
                      内部会反变换成声码器要的原始量纲；
                      False = 输入已经是原始 mel，直接喂。
-        batch     : True 时按批量处理，输入必须是 (B, 80, T)，返回 (B, N) tensor。
+        batch     : True 时按批量处理，输入必须是 (B, T, 80)，返回 (B, N) tensor。
 
         返回 : 波形。numpy 输入 -> numpy 输出；批量模式 -> torch tensor。
         """
@@ -128,14 +128,24 @@ class VocoderBridge:
             tensor = torch.from_numpy(
                 np.ascontiguousarray(np.asarray(mel, dtype=np.float32)))
 
+        n_mels = config.MEL_PRESETS["hifigan16k"]["n_mels"]
+
         if tensor.dim() == 2:
-            if tensor.shape[0] == config.MEL_PRESETS["hifigan16k"]["n_mels"]:
-                pass                        # 已经是 (80, T) ✅
-            elif tensor.shape[1] == config.MEL_PRESETS["hifigan16k"]["n_mels"]:
-                tensor = tensor.transpose(0, 1).contiguous()   # (T, 80) -> (80, T)
-            else:
+            # 单条：(T, 80) 或 (80, T) -> 一律转成 (80, T)
+            if tensor.shape[1] == n_mels:
+                tensor = tensor.transpose(0, 1).contiguous()      # (T,80) -> (80,T)
+            elif tensor.shape[0] != n_mels:
                 raise ValueError(
-                    f"mel 形状应为 (80, T) 或 (T, 80)，实际 {tuple(tensor.shape)}")
+                    f"mel 形状应为 (T, 80) 或 (80, 80)，实际 {tuple(tensor.shape)}")
+        elif tensor.dim() == 3:
+            # 批量：(B, T, 80) -> (B, 80, T)（HiFi-GAN 吃通道在前）
+            if tensor.shape[2] == n_mels:
+                tensor = tensor.transpose(1, 2).contiguous()
+            elif tensor.shape[1] != n_mels:
+                raise ValueError(
+                    f"批量 mel 形状应为 (B, T, 80)，实际 {tuple(tensor.shape)}")
+        else:
+            raise ValueError(f"mel 维度应为 2 或 3，实际 {tensor.dim()}")
 
         if normalized:
             preset = config.MEL_PRESETS["hifigan16k"]

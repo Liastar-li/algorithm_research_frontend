@@ -14,11 +14,15 @@
 | # | 约定 | 值 | 真源 |
 |---|---|---|---|
 | 1 | 采样率 | **16000 Hz**，单声道，16-bit PCM | `config.MEL_PRESETS` |
-| 2 | AutoVC 侧 mel | **不是 librosa 默认链**：30 Hz 高通 → reflect 幅度 STFT → `mel(fmin=90, fmax=7600, n_mels=80, n_fft=1024, hop=256)` → `20·log10(max(1e-5,·)) - 16` → `clip((x+100)/100, 0, 1)` | `audio_utils.autovc_mel()` |
-| 3 | 预设 | **`model16k`**（唯一预设，16 kHz）。⚠️ 原 `paper16k` / `autovc22k` 已取消 | `config.MEL_PRESETS` |
+| 2 | **模型侧 mel（Ec/D 用）★** | 由 `config.STAGE1["mel_preset"]` 决定，当前 = **`hifigan16k`**（见 §3.4）。**统一入口：`audio_utils.model_mel(wav)`** | `audio_utils.model_mel()` |
+| 3 | AutoVC 侧 mel（**保留**，非默认） | **不是 librosa 默认链**：30 Hz 高通 → reflect 幅度 STFT → `mel(fmin=90, fmax=7600, n_mels=80, n_fft=1024, hop=256)` → `20·log10(max(1e-5,·)) - 16` → `clip((x+100)/100, 0, 1)` | `audio_utils.autovc_mel()` |
+| 4 | 预设 | **三个**：`hifigan16k`（★默认）/ `model16k`（AutoVC 官方链）/ `rtc16k`（上游 WaveRNN）。⚠️ 原 `paper16k` / `autovc22k` 已取消 | `config.MEL_PRESETS` |
 
 > **规则**：**任何地方都不许再手写 mel 参数**，一律调 `audio_utils` 里对应的函数。
-> 代码里**一律用 `config.DEFAULT_PRESET` 符号引用**，别写死预设名字。
+> ★ **模型侧 mel 一律用 `audio_utils.model_mel(wav)` 取**，别直接调
+> `autovc_mel` / `rtc_mel` / `hifigan_mel` ——
+> 否则会出现"训练用一套、评测用另一套"，这种坑会以**"指标莫名不对"**的形式出现，
+> 而且**不报错**。
 >
 > **为什么没有 22.05 kHz 预设**：AutoVC 官方权重本身就是 **16 kHz** 的（成员 A 实测），
 > 与论文一致 → 全程 16 kHz。
@@ -215,6 +219,85 @@ result = protector.protect(wav, alpha=0.10, seed=42, verbose=True)
 >     """文件进、保护后 wav 落盘、返回带 shapes 的报告。"""
 > ```
 > 加了之后 `make_sample.py` 会自动走这条更简洁的路径。
+
+---
+
+### 4.5 ★ Stage 2 的接口与形状（2026-11-18 新增，成员 B；v0.5 由成员 A 同步）
+
+> Stage 2 的代码在 `algorithms/voiceprint_protection/stage2/`。
+> 这一节只记**两人都会碰到的**部分：形状、接口、冻结约定。
+
+#### 4.5.1 张量形状（续 §2）
+
+| 符号 | 名称 | 形状 | 说明 |
+|---|---|---|---|
+| `δ` | 扰动 | `(B, 256)` | **单位长度**（‖δ‖=1）→ α 是唯一的强度旋钮 |
+| `h_adv` | 被污染的嵌入 | `(B, 256)` | `h_adv = normalize(h + α·δ)`，**重新 L2 归一化** |
+| `c` | 内容码 | `(B, T', 64)` | `T' = T // 32`（AutoVC 抽样式降采样） |
+| `c_arb` | 打乱配对的内容码 | `(B, T', 64)` | 论文的 "arbitrary content"，batch 内随机置换 |
+| `x_adv` | 保护后 mel | `(B, T, 80)` | **与 `x` 帧数必须完全相等** |
+| `wav_adv` | 保护后波形 | `(B, N)` | `N = T · 256`（HiFi-GAN 的上采样倍率就是 256） |
+| `δ_wav` | 波形扰动 | `(B, N)` | `δ_wav = V(x_adv) − V(x)`，**两条波形要先对齐到等长** |
+| `h_stolen` | 攻击者重新提的卡 | `(B, 256)` | `h_stolen = E_spk(wav_adv)` |
+
+#### 4.5.2 ★ 冻结 ≠ 断梯度（最容易踩的一条）
+
+Stage 1 的解码器、声码器、`E_spk` 都**冻结**（不更新参数），
+但**梯度必须能穿过它们流回 G**：
+
+```
+G → h_adv → D(c, h_adv) → V(·) → E_spk(·) → L_de
+```
+
+- **冻结** = `requires_grad_(False)` + `eval()`
+- **切断梯度** = `torch.no_grad()` 或 `.detach()` ← 这两个**不要**在前向里用
+
+> 指南第 6 步的伪代码把整段前向包进了 `torch.no_grad()`。
+> **照抄会让训练静默失效**（loss 一步不动、不报错）。
+> 已由 `stage2/verify_gradients.py` 变成会失败的断言。
+
+#### 4.5.3 可求导组件放哪（v0.5 更新：声码器可以直接用 A 的桥接层）
+
+| 需求 | 用哪个 | 为什么不用现成的 |
+|---|---|---|
+| `E_spk`（可导） | `stage2/models.py::TorchSpeakerEncoder` | `bridge_speaker.SpeakerBridge` 是 numpy 封装 |
+| Stage 1 解码器（可导） | `stage2/models.py::TorchAutoVCStage1` | `bridge_autovc.AutoVCBridge` 内部 `no_grad()` |
+| 声码器（可导） | ★ **`bridge_vocoder.VocoderBridge`（v0.5 起本身就是 torch 版、可求导）** | v0.4 时它是 numpy 封装，要另写 `stage2/pipeline.py::HiFiGANVocoder`；**v0.5 之后不需要了** |
+
+> **v0.5 的变化**：`bridge_vocoder.VocoderBridge` 内部换成了 **HiFi-GAN（torch 原生）**，
+> 它的 `forward` **梯度可以穿过**（实测 `scripts/verify_hifigan.py` 第 4 层：
+> 梯度能回传到 mel，absmax ≈ 0.38）。
+> ⇒ `stage2/pipeline.py::HiFiGANVocoder` **可以删掉**，直接用
+> `bridge_vocoder.VocoderBridge`（它会自己反归一化网络侧 mel）。
+>
+> **两套实现并存是刻意的**：`bridge_*` 供推理链（L1/平台）用，
+> `stage2/models.py` 供训练用。两者加载**同一个** checkpoint，结构一致。
+> `stage2/verify_mel.py` 保证 torch 版 GE2E 与上游 numpy 版**逐值一致**
+> （mel 误差 2.3e-05，嵌入余弦 0.99999481）。
+
+#### 4.5.4 损失函数签名（论文式 7–13）
+
+```python
+from stage2.losses import (
+    mel_loss, mask_loss, perceptual_loss,          # 式 7/8/9
+    discriminator_gan_loss, generator_gan_loss,     # 式 10/11（LSGAN，无 sigmoid）
+    defense_loss,                                  # 式 12（★ 要最小化）
+    generator_loss,                                # 式 13
+)
+```
+
+超参全部读 `config.STAGE2`（唯一真源）：`α=0.10, λ_per=15.0, λ_de=5.0, λ_mask=0.1, λ_GAN=1.0`。
+
+> ⚠️ `defense_loss` 是**最小化**余弦相似度（论文的 "Minimizing L_de"）。
+> 方向反了训练会把音频毁掉。`stage2/train.py` 每步都打印 `L_de`，**它应该下降**。
+
+#### 4.5.5 评测指标的口径
+
+| 指标 | 定义 | 备注 |
+|---|---|---|
+| `Sim_prot` ↑ | `cos(h_stolen, h)` | 保护后语音 vs 原始语音 |
+| `Sim_clone` ↓ | `cos(E_spk(clone), h)` | **论文口径**：克隆音 vs 原始说话人 |
+| `DSR` ↑ | `mean(Sim_clone < τ)`，τ ∈ {0.3, 0.4, 0.5} | 论文 79.8 / 83.5 / 87.2 |
 
 ---
 

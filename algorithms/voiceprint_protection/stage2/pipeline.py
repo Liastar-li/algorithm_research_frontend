@@ -46,36 +46,35 @@ import config  # noqa: E402
 # ---------------------------------------------------------------------------
 # mel 换算
 # ---------------------------------------------------------------------------
-def autovc_mel_to_hifigan(mel: torch.Tensor) -> torch.Tensor:
-    """AutoVC 口径的 mel → HiFi-GAN 口径的 mel（**近似**）。
+# ★★ 2026-11-19（成员 A）：**`autovc_mel_to_hifigan()` 已删除**
+#
+# 原因（实测数据，见 docs/interface-contract.md §3.4 与 TASKS.md §0.10.4c）：
+#   那个近似换算会把重建音的说话人余弦从 **0.9746 掉到 0.6983** ——
+#   两套 mel 的**滤波器组不同**（AutoVC: fmin 90 / fmax 7600 / 带 30 Hz 高通；
+#   HiFi-GAN: fmin 0 / fmax 8000 / slaney），底层能量分布不同，**仿射补不回来**。
+#
+# ⇒ 现在 Stage 1 的模型侧 mel **直接就是 HiFi-GAN 的约定**
+#   （`config.STAGE1["mel_preset"] = "hifigan16k"`），
+#   所以这里**不需要任何换算**。
+# ⇒ 顺带解决了另一个隐患：HiFi-GAN 原始 mel 值域是 [-11.5, 0]，
+#   直接用会让 L_rec 比论文大 ~100 倍、λ_cd 被稀释 40 倍；
+#   `audio_utils.model_mel()` 返回的是**归一化后**的 mel（值域 [-0.11, 0.92]，
+#   与 AutoVC 同量纲），论文的 λ_cd=1.0 / λ_dis=0.01 直接可用。
+#
+# 送进声码器前的反归一化由 `bridge_vocoder.VocoderBridge.mel_to_wav()` 负责。
 
-    AutoVC：`a = clip((20·log10(m) − 16 + 100)/100, 0, 1)`
-        → 反解：`log10(m) = (a·100 − 84)/20`
-    HiFi-GAN：`h = (log10(m') + 4.5)/5`
-        → 反解：`log10(m') = 5h − 4.5`
 
-    ★ **近似在哪**：两者的 mel 滤波器组不同
-      （AutoVC: sr=16000, fmin=90, fmax=7600, 带 30 Hz 高通；
-        HiFi-GAN: mel 基 sr=8000, fmin=0, fmax=8000），
-      所以 `m' ≠ m`。这里是"假定底层能量相同"的近似换算。
-      正式训练建议用 wavenet_vocoder（约定天然一致），别用这个。
-    """
-    log10_m = (mel * 100.0 - 84.0) / 20.0
-    hifigan_normalized = (log10_m + 4.5) / 5.0
-    return hifigan_normalized
+def batched_model_mel(waveforms: torch.Tensor) -> torch.Tensor:
+    """一批波形 → **模型侧** mel (B, T, 80)。
 
-
-def batched_autovc_mel(waveforms: torch.Tensor) -> torch.Tensor:
-    """一批波形 → AutoVC 口径的 mel (B, T, 80)。
-
-    逐条调 `audio_utils.autovc_mel`（numpy）再拼起来。
+    逐条调 `audio_utils.model_mel()`（numpy）再拼起来。
     慢，但**保证与项目里其他地方算出来的 mel 完全一致**（唯一真源原则）。
     这里只用于**原始语音**（不需要梯度），所以慢一点没关系。
     """
     frames = []
     for index in range(waveforms.shape[0]):
         single = waveforms[index].detach().cpu().numpy()
-        frames.append(audio_utils.autovc_mel(single))
+        frames.append(audio_utils.model_mel(single))
     length = min(frame.shape[0] for frame in frames)
     stacked = np.stack([frame[:length] for frame in frames], axis=0)
     return torch.from_numpy(stacked.astype(np.float32))
@@ -88,7 +87,7 @@ class Stage2Pipeline:
     """把冻结组件和辅助算子装在一起，给训练循环用。"""
 
     def __init__(self, speaker_encoder, stage1, vocoder=None,
-                 vocoder_convention: str = "autovc",
+                 vocoder_convention: str = "hifigan",
                  device: torch.device | str = "cpu",
                  n_fft: int = 1024,
                  hop_length: int = 256,
@@ -104,22 +103,30 @@ class Stage2Pipeline:
 
     # -- 1. mel ----------------------------------------------------------
     def mel(self, waveforms: torch.Tensor) -> torch.Tensor:
-        """原始波形 (B, N) → AutoVC mel (B, T, 80)。不需要梯度。"""
-        return batched_autovc_mel(waveforms).to(self.device)
+        """原始波形 (B, N) → **模型侧** mel (B, T, 80)。不需要梯度。"""
+        return batched_model_mel(waveforms).to(self.device)
 
     # -- 2. 声码器 --------------------------------------------------------
     def vocode(self, mel: torch.Tensor) -> torch.Tensor:
         """mel → 波形。★ 必须可导（梯度要穿过它回到 G）。
 
-        `vocoder_convention` 决定喂给声码器之前要不要换算 mel 口径。
+        ★ 2026-11-19（成员 A）：**不再需要 mel 口径换算**。
+        Stage 1 的模型侧 mel 已经是 HiFi-GAN 的约定
+        （`config.STAGE1["mel_preset"] = "hifigan16k"`），
+        这里只做一次**可逆的反归一化**（把它变回声码器要的原始量纲）。
+
+        `vocoder_convention` 现在只有两种取值：
+          * `"hifigan"`（默认）：输入是**网络侧** mel，这里反归一化后喂
+          * `"raw"`：输入已经是**原始** mel，直接喂，不做任何处理
         """
         if self.vocoder is None:
             raise RuntimeError("没有装载声码器 —— 见文件头的说明。")
-        if self.vocoder_convention == "hifigan":
-            mel = autovc_mel_to_hifigan(mel)
-            # HiFi-GAN 要 (B, n_mels, T)
-            return self.vocoder(mel.transpose(1, 2))
-        return self.vocoder(mel)
+        if self.vocoder_convention == "raw":
+            return self.vocoder(mel)
+        # 网络侧 mel (B, T, 80) -> 原始 HiFi-GAN mel (B, T, 80)
+        preset = config.MEL_PRESETS["hifigan16k"]
+        raw = (mel - preset["norm_offset"]) / preset["norm_scale"]
+        return self.vocoder(raw)
 
     # -- 3. 波形对齐 -------------------------------------------------------
     @staticmethod
@@ -177,27 +184,49 @@ class Stage2Pipeline:
 class HiFiGANVocoder(nn.Module):
     """HiFi-GAN（论文同款），torch 版，可导。
 
-    需要联网（torch.hub 从 GitHub 下载）。
+    ★ 2026-11-19（成员 A）改了两处：
+      1. **不再用 `torch.hub.load("NVIDIA/torch.hifi_gan", ...)`** ——
+         那个仓库**已整体下架**（2026-11-18 实测：GitHub API / codeload / raw /
+         release 附件全部 404），所以旧写法**必然失败**。
+         现在用 `algorithms/voiceprint_protection/hifigan.py` 里**内置**的生成器
+         （bshall/hifigan 的 HiFi-GAN v1，MIT）+ 本地权重：
+             `data/models/default/hifigan_16k.ckpt`
+         权重来源：HuggingFace `speechbrain/tts-hifigan-libritts-16kHz`
+         （与 NVIDIA 的 `hifigan_melbins_16k` **架构与 mel 约定逐项相同**，
+           同样 13,936,130 参数，`strict=True` 加载 234/234 键全匹配）。
+      2. mel 口径：Stage 1 现在直接产出 HiFi-GAN 约定的 mel，
+         **不需要 `autovc_mel_to_hifigan()` 那个近似换算了**。
     """
 
-    def __init__(self, device: str | None = None, model_name: str = "hifigan_melbins_16k"):
+    def __init__(self, device: str | None = None, model_name: str = "hifigan_melbins_16k",
+                 weights_path=None):
         super().__init__()
+        import hifigan
+
         self.device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
-        try:
-            self.model = torch.hub.load("NVIDIA/torch.hifi_gan", model_name)
-        except Exception as error:  # noqa: BLE001
+        if weights_path is None:
+            from bridge_vocoder import VocoderBridge
+
+            weights_path = VocoderBridge._default_weights_path()
+        if not Path(weights_path).exists():
             raise RuntimeError(
-                f"加载 HiFi-GAN 失败（{error}）。\n"
-                "它需要联网从 GitHub 下载（torch.hub）。\n"
-                "离线环境请用 --vocoder stub，或先在有网的环境里把 torch.hub 缓存好。"
-            ) from error
+                f"找不到 HiFi-GAN 权重：{weights_path}\n"
+                "先下载：python algorithms/voiceprint_protection/scripts/download_hifigan_weights.py")
+
+        # ★ strict=True：架构对不上立刻报错（实测 234/234 键全匹配）
+        self.model = hifigan.load_hifigan_weights(weights_path, device=self.device, strict=True)
         self.model.eval().to(self.device)
         for parameter in self.model.parameters():
             parameter.requires_grad_(False)
 
     def forward(self, mel: torch.Tensor) -> torch.Tensor:
-        """HiFi-GAN 口径的 mel (B, 80, T) → 波形 (B, N)。"""
-        return self.model(mel).squeeze(1)
+        """HiFi-GAN 口径的 mel **(B, T, 80)**（时间在前，项目约定）→ 波形 (B, N)。
+
+        ⚠️ 输入要是**原始** HiFi-GAN mel（不是归一化后的网络侧 mel）。
+        若拿的是网络侧 mel，请先 `audio_utils.hifigan_mel_unnorm()`。
+        """
+        # (B, T, 80) -> (B, 80, T)：HiFi-GAN 吃通道在前
+        return self.model(mel.transpose(1, 2).contiguous()).squeeze(1)
 
 
 class WaveNetVocoder(nn.Module):

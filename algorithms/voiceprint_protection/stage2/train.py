@@ -101,19 +101,20 @@ def build_pipeline(args, device) -> Stage2Pipeline:
 
     # -- 声码器 V --------------------------------------------------------
     vocoder = None
-    convention = "autovc"
+    convention = "hifigan"
     if args.stub:
         vocoder = stage1.vocoder          # StubStage1 自带一个可导的替身
-        convention = "autovc"
+        convention = "hifigan"
         print("声码器 V：StubVocoder（随机权重，指标无意义）")
     elif args.vocoder == "hifigan":
         vocoder = HiFiGANVocoder(device=str(device))
         convention = "hifigan"
-        print("声码器 V：HiFi-GAN（论文同款；mel 口径做近似换算）")
+        print("声码器 V：HiFi-GAN（论文同款；★ 不再做 mel 口径近似换算）")
     else:
         raise SystemExit(
             "正式训练需要一个**可求导**的声码器。\n"
-            "  --vocoder hifigan  论文同款，但 mel 口径要做近似换算\n"
+            "  --vocoder hifigan  论文同款（★ NVIDIA 官方仓库已下架，用 HF 上等价的\n"
+            "                     speechbrain/tts-hifigan-libritts-16kHz）\n"
             "  --vocoder stub     随机权重，只用来验证训练机制\n"
             "详见 docs/notes/stage2_blockers.md"
         )

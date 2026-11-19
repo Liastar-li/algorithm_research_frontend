@@ -79,6 +79,43 @@
 | D1-6 | `third_party/README.md`（四个组件的 URL/commit/许可登记表） | ✅ 已合并双方信息 |
 | W3-P1 | `public/methods/group_n005_voiceprint_protection.json` + `npm run check:method` 校验器 | ⬜ 待 A review |
 
+### 0.4b ★ 本轮进展（成员 B · 2026-11-18：平台服务化）
+
+**背景**：任务板 §3 的 P3（`service.py`）原派给成员 A，但 A 还没写，
+而它是 M2 平台打通的**唯一卡点**（平台 POST 不过去）。
+B 先补上这块，两边都不耽误。
+
+| 任务 | 产出 | 状态 |
+|---|---|---|
+| W3-P3 | **`algorithms/voiceprint_protection/service.py`**（FastAPI + CORS + 统一错误格式 + 临时文件清理 + 模型单例缓存） | ✅ **40 项契约自测全通过** |
+| W3-P3 验收 | `algorithms/voiceprint_protection/scripts/test_service.py`（`--mock` 模式不用权重也能验协议） | ✅ |
+| W3-P2 | `public/methods/index.json` 追加本方法 | ✅ |
+| W3-P6 | `npm test`（6/6）+ `npm run build` | ✅ **全绿** |
+| W3-P4 | 样例**输出** `output.wav` | ✅ 已产出（B 的 pipeline 跑出来的真实样例） |
+
+#### 服务层踩到的三个坑（写下来免得 A 再踩一遍）
+
+| # | 坑 | 后果 | 怎么解 |
+|---|---|---|---|
+| 1 | **FastAPI 默认返回 `{"detail": ...}`** | 前端读的是 `detail.error`（`src/services/algorithms.js:104`），读不到就只显示"算法服务返回 HTTP 422。"，中文说明全丢 | 覆盖全局异常处理器，**所有**错误一律 `{"error": "..."}` |
+| 2 | **`infer.protect()` 每次调用都新建 `Protector()`** | 每次请求重载 400 MB 权重（encoder+synthesizer+vocoder），平台同步等待必然超时 | 服务层缓存**一个** `Protector` 实例，懒加载只建一次 |
+| 3 | 用户上传的**文件名不能拼进路径** | 可能含 `..`、中文、斜杠 | 临时文件一律 uuid 命名，结果文件也用 uuid 前缀 |
+
+#### 服务怎么起
+
+```bash
+conda activate vpp
+uvicorn algorithms.voiceprint_protection.service:app --host 127.0.0.1 --port 8000
+# 或者：python algorithms/voiceprint_protection/service.py
+```
+
+自测（不用下权重）：
+
+```bash
+python algorithms/voiceprint_protection/scripts/test_service.py --mock    # 40 项
+python algorithms/voiceprint_protection/scripts/test_service.py           # 真权重
+```
+
 ### 0.5 ★ 上游 RTC 在 2026-03 做过重构（成员 B 核实，三处影响）
 
 | 项 | 变化 | 我们的处理 |
@@ -617,6 +654,38 @@ cut -d' ' -f2 data/train.txt | sort -u | wc -l
 | `stage2/train.py` 主循环 | B | **A** review 防御损失 `L_de` 的方向是否正确 |
 | `evaluate.py`（指标脚本） | **共同写** | **共同写** |
 | `docs/experiments.md` | **共同维护** | **共同维护** |
+
+### 4b. ★ W4–W5 Stage 2 的产出清单（成员 B 主责，2026-11-18 起）
+
+| 文件 | 内容 | 状态 |
+|---|---|---|
+| `stage2/generator.py` | 生成器 G：h (256) → δ (256)，**单位长度** | ✅ |
+| `stage2/discriminator.py` | 判别器 D_adv：mel → 真假分数（**LSGAN，无 sigmoid**） | ✅ |
+| `stage2/losses.py` | L_mel / L_mask / L_per / L_GAN / L_D / L_de / L_G（论文式 7–13） | ✅ |
+| `stage2/psychoacoustics.py` | 心理声学掩蔽阈值 θ_x（MPEG-1 模型） | ✅ |
+| `stage2/models.py` | **可求导**的冻结组件（torch 版 GE2E / AutoVC Stage 1 / 替身） | ✅ |
+| `stage2/pipeline.py` | mel ↔ 波形、阈值、对齐、声码器适配 | ✅ |
+| `stage2/dataset.py` | VCTK 数据集（按清单读、随机裁） | ✅ |
+| `stage2/train.py` | 训练主循环 | ✅ |
+| `stage2/verify_gradients.py` | **梯度通路自检**（12 项，全通过） | ✅ |
+| `stage2/verify_mel.py` | torch GE2E ↔ 上游 numpy 数值对照（4 项，全通过） | ✅ |
+| `stage2/verify_psychoacoustics.py` | 心理声学掩蔽自检（20 项，全通过） | ✅ |
+| `algorithms/voiceprint_protection/evaluate.py` | Sim_prot / Sim_clone / DSR / WER + 高斯噪声基线 + 消融入口 | ✅ |
+| `docs/notes/stage2_blockers.md` | **阻塞项清单**（可求导声码器 / Stage 1 checkpoint 等） | ✅ |
+
+> **正式训练还差两样**（都不是代码问题）：
+> ① 一个**可求导**的声码器；② 成员 A 的 Stage 1 checkpoint。
+> 详见 [`docs/notes/stage2_blockers.md`](../../docs/notes/stage2_blockers.md)。
+
+> ⚠️ **A 需要 review 的一点**：`stage2/losses.py::defense_loss` 是**最小化**余弦相似度
+> （论文式 12 的 "Minimizing L_de"）。方向反了训练会把音频毁掉 ——
+> `stage2/verify_gradients.py` 会打印 `L_de`，**它应该下降**。
+
+> ★ **2026-11-19 更新（成员 A）**：阻塞点 ① **已解掉** ——
+> 找到了 16 kHz 的 HiFi-GAN 权重（`speechbrain/tts-hifigan-libritts-16kHz`），
+> `bridge_vocoder.VocoderBridge` 换成 torch 版 HiFi-GAN 后**本身就可求导**，
+> `stage2/pipeline.py::HiFiGANVocoder` 可以删掉。
+> 详见 §0.10.4c。阻塞点 ②（Stage 1 checkpoint）**仍差数据**，见 §0.10.5。
 
 ---
 
