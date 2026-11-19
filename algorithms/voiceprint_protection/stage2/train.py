@@ -153,8 +153,16 @@ def train_step(batch, pipeline: Stage2Pipeline, generator, discriminator,
     delta = generator(original_embedding)                   # (B, 256)
     advanced_embedding = perturb_embedding(original_embedding, delta, alpha)
 
+    # -- 2b. 内容码 c = E_c(x, h)（**用原说话人的嵌入编码原句**）------------
+    #   ★ 2026-11-19（成员 A）修：内容码必须**先算出来**再重建 ——
+    #     否则 `decode()` 会拿 h_adv 去编码原句，内容里就混进了扰动，
+    #     论文的 "x_adv = D(c, h_adv)" 就不成立了。
+    content_codes = pipeline.content(original_mel, original_embedding)   # (B, T', 64)
+
     # -- 3. 用被污染的嵌入重建保护后的 mel（梯度穿过冻结的 Stage 1）------
-    protected_mel = pipeline.stage1.decode(original_mel, advanced_embedding)
+    #     x_adv = D(c, h_adv)：c 来自原句，h_adv 是目标音色
+    protected_mel = pipeline.stage1.decode(original_mel, advanced_embedding,
+                                           content=content_codes)
     if protected_mel.shape[1] != original_mel.shape[1]:
         raise RuntimeError(
             f"x 与 x_adv 的帧数必须相等（契约 §2 的形状不变量），"
@@ -172,7 +180,6 @@ def train_step(batch, pipeline: Stage2Pipeline, generator, discriminator,
     # -- 5. 模拟攻击：攻击者从保护后语音重新提卡，再拿去克隆 ----------------
     stolen_embedding = pipeline.speaker(protected_waveform, lengths)  # ★ 梯度穿过声码器
     permutation = torch.randperm(batch_size, device=device)
-    content_codes = pipeline.content(original_mel, original_embedding)
     arbitrary_content = content_codes[permutation]                    # 论文的 "arbitrary content"
     cloned_mel = pipeline.stage1.decode(original_mel, stolen_embedding,
                                         content=arbitrary_content)

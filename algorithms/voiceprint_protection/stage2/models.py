@@ -295,14 +295,25 @@ class TorchAutoVCStage1(nn.Module):
             )
         data = torch.load(self.checkpoint_path, map_location="cpu")
         state = data["model"] if "model" in data else data
-        self.model.load_state_dict(state)
+        # ★ 兼容早期 checkpoint 的键名（`conv_layer` -> `conv`）。
+        #   现在的键名与**官方 AutoVC 的 Generator 完全一致**，
+        #   所以这里能直接用官方 `Generator` 加载成员 A 训出来的权重。
+        from stage1.model import remap_to_official_keys
+
+        self.model.load_state_dict(remap_to_official_keys(state))
         self.model.to(self.device)
 
     def _guess_checkpoint(self) -> Path:
+        # ★ 2026-11-19（成员 A）：成员 A 的 Stage 1 训练脚本产出的文件名是
+        #   `stage1_model.pt`（另有断点 `stage1_last_ckpt.pt`），
+        #   与这里的 `stage1.pt` 不同 —— 把 A 的实际文件名加进候选。
         candidates = [
+            paths.WEIGHTS_DIR / "stage1_model.pt",
+            paths.WEIGHTS_DIR / "stage1_last_ckpt.pt",
             paths.WEIGHTS_DIR / "stage1.pt",
             paths.WEIGHTS_DIR / "autovc.ckpt",
             paths.models_dir() / "default" / "stage1.pt",
+            paths.models_dir() / "default" / "stage1_model.pt",
         ]
         for candidate in candidates:
             if candidate.exists():
@@ -320,25 +331,72 @@ class TorchAutoVCStage1(nn.Module):
 
     # -- 对外 -------------------------------------------------------------
     def content_code(self, mel: torch.Tensor, embedding: torch.Tensor) -> torch.Tensor:
-        """(B, T, 80) + (B, 256) -> 内容码 (B, T', 64)。"""
+        """(B, T, 80) + (B, 256) -> 内容码 **(B, T', 64)**。
+
+        ★ 2026-11-19（成员 A）修：**返回张量，不是 list**。
+          官方 AutoVC 的 `Encoder.forward` 返回 **list**（T' 个 (B,64)），
+          但契约 §4.5.1 规定 `c` 是 `(B, T', 64)` 的**张量**，
+          而且 `stage2/train.py` 要写 `content_codes[permutation]`
+          （batch 内随机置换 = 论文的 "arbitrary content"）——
+          对 list 做这种索引是错的。
+        """
         mel = self._pad(mel)
         with torch.no_grad():
-            codes = self.model.encoder(mel, embedding)
+            codes = self.model.encoder(mel, embedding)      # list，len = T'
+        if isinstance(codes, (list, tuple)):
+            codes = torch.stack(codes, dim=1)              # (B, T', 64)
         return codes
 
     def decode(self, mel: torch.Tensor, embedding: torch.Tensor,
-               content: torch.Tensor | None = None) -> torch.Tensor:
-        """x_adv = D(c, h_adv) → (B, T, 80)。**对 embedding 可导** ✓"""
+               content: torch.Tensor | None = None,
+               source_embedding: torch.Tensor | None = None) -> torch.Tensor:
+        """**x_adv = D(c, h_adv)** → (B, T, 80)。**对 embedding 可导** ✓
+
+        参数
+        ----
+        mel              : 原始 mel (B, T, 80)（**内容从它来**）
+        embedding        : **目标**说话人嵌入（h_adv / h_stolen）(B, 256) —— 解码用
+        content          : 内容码 c (B, T', 64)。不给就从 mel 现场算
+        source_embedding : 编码侧条件 c_org。默认用 `embedding`
+
+        ★ 2026-11-19（成员 A）修的两个**致命 bug**：
+          ① 原来写的是 `self.model(mel, embedding, embedding)` ——
+             官方 `Generator.forward(x, c_org, c_trg)` 的**第三个参数才是目标嵌入**，
+             两个都传 embedding 等于**h_adv 根本没进解码器**，
+             整个防御机制（扰动嵌入 → 重建变样）就失效了，而且**不报错**。
+          ② 原来的 `content` 参数**被完全忽略** ——
+             论文的 "arbitrary content"（`c_arb`）没起作用，
+             攻击者克隆的其实是原句内容。
+        """
         mel = self._pad(mel)
-        _, postnet, _ = self.model(mel, embedding, embedding)
-        return postnet[:, 0]
+
+        if content is None:
+            content = self.content_code(mel, source_embedding
+                                        if source_embedding is not None else embedding)
+        codes = list(content.unbind(1))               # (B,T',64) -> T' 个 (B,64)
+
+        # 官方 Generator.forward 的"摊开"逻辑：每个 code 摊回 freq 帧
+        expanded = []
+        for code in codes:
+            expanded.append(code.unsqueeze(1).expand(
+                -1, int(mel.size(1) / len(codes)), -1))
+        code_expanded = torch.cat(expanded, dim=1)    # (B, T, 64)
+
+        # ★ c_trg = 目标嵌入（这一位原来传错了）
+        decoder_input = torch.cat(
+            (code_expanded, embedding.unsqueeze(1).expand(-1, mel.size(1), -1)),
+            dim=-1)                                     # (B, T, 64+256)
+
+        mel_outputs = self.model.decoder(decoder_input)                 # (B, T, 80)
+        mel_postnet = self.model.postnet(mel_outputs.transpose(2, 1))   # (B, 80, T)
+        mel_postnet = mel_outputs + mel_postnet.transpose(2, 1)         # (B, T, 80)
+        return mel_postnet
 
     def reconstruct(self, mel: torch.Tensor, embedding: torch.Tensor) -> torch.Tensor:
         """不加扰动的重建 x̂ = D(c, h) → (B, T, 80)。"""
         mel = self._pad(mel)
         with torch.no_grad():
-            _, postnet, _ = self.model(mel, embedding, embedding)
-        return postnet[:, 0]
+            return self.decode(mel, embedding, source_embedding=embedding)
 
 
 # ---------------------------------------------------------------------------

@@ -76,7 +76,10 @@ def forward_pass(pipeline, generator, waveforms, lengths):
 
     delta = generator(original_embedding)
     advanced = perturb_embedding(original_embedding, delta, 0.1)
-    protected_mel = pipeline.stage1.decode(original_mel, advanced)
+    # ★ 2026-11-19（成员 A）：内容码要先算（用原说话人的嵌入编码原句），
+    #   再拿它去重建 —— 否则 c_adv 里会混进扰动。
+    content = pipeline.content(original_mel, original_embedding)
+    protected_mel = pipeline.stage1.decode(original_mel, advanced, content=content)
     protected_waveform = pipeline.vocode(protected_mel)
     with torch.no_grad():
         original_waveform = pipeline.vocode(original_mel)
@@ -84,7 +87,6 @@ def forward_pass(pipeline, generator, waveforms, lengths):
     delta_waveform = protected_waveform - original_waveform
 
     stolen = pipeline.speaker(protected_waveform, lengths)
-    content = pipeline.content(original_mel, original_embedding)
     permutation = torch.randperm(waveforms.shape[0])
     cloned_mel = pipeline.stage1.decode(original_mel, stolen, content=content[permutation])
     cloned_waveform = pipeline.vocode(cloned_mel)

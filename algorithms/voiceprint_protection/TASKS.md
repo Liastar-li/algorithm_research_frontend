@@ -473,6 +473,33 @@ HiFi-GAN 的原始 mel 值域是 **[-11.5, 0]**，而 AutoVC 的是 **[0, 1]**�
 ```
 实测 `L_rec` 从 165 回到 **0.66**，与论文同一量级 ⇒ **λ_cd=1.0、λ_dis=0.01 直接可用**。
 
+### 0.10.4d ★★ 顺手修了 B 的 Stage 2 两个**致命 bug**（成员 A · 2026-11-19，合并后 review 出来的）
+
+在合并 B 的 Stage 2 代码后，A 做了交叉 review，发现 `stage2/models.py::TorchAutoVCStage1`
+有两个 bug —— **症状是"训练能跑、loss 在降、但防御机制根本没生效"**，最坏的一类：
+
+| # | bug | 后果 | 修法 |
+|---|---|---|---|
+| 1 | `self.model(mel, embedding, embedding)` —— 官方 `Generator.forward(x, c_org, c_trg)` 的**第三个参数才是目标嵌入** | **`h_adv` 根本没进解码器** ⇒ 扰动嵌入对 `x_adv` 毫无影响 ⇒ **整个防御机制失效**，且**不报错** | `decode()` 自己实现摊开 + 解码，c_trg = 给定的目标嵌入 |
+| 2 | `decode()` 的 `content` 参数**被完全忽略** | 论文的 **"arbitrary content"**（`c_arb`）没起作用，`x_clone` 用的还是原句内容 ⇒ `L_de` 测的不是论文那个场景 | `decode(..., content=c)` 支持注入内容码 |
+
+**修复后实测**（A 的 Stage 1 checkpoint + B 的封装）：
+
+```
+content_code -> (2, 7, 64)                  ✅ 与契约 §4.5.1 一致（原来是 list）
+D(c,h) 与 D(c,h_adv) 的平均差 = 0.525248    ✅ 修 bug 前是 0
+梯度能回到 h_adv: ✅ (absmax = 2165)        ✅ 修 bug 前是 0
+content 被真正使用: ✅                       ✅ 修 bug 前是 0
+```
+
+> ★ **验收 Stage 2 时请先确认这三行** —— 写法错了 loss 照样在降，但指标是假的。
+> 已写进契约 §4.5.3b。
+
+> ★ 顺带把 `ConvNorm` 的卷积属性名从 `conv_layer` 改成官方的 `conv`
+> ⇒ 我们的 checkpoint 的键名与**官方 AutoVC 的 `Generator` 完全一致**（实测 107 = 107）
+> ⇒ ① B 的 `TorchAutoVCStage1`（内部用官方 `Generator`）能直接加载我们的权重；
+> ② 将来拿到 AutoVC 官方权重也能直接加载进我们的模型。
+
 ### 0.10.5 开训前还缺什么（只剩数据）
 
 | # | 缺什么 | 谁 | 怎么办 |

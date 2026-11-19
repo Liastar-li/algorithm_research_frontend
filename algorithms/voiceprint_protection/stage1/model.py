@@ -54,7 +54,16 @@ class LinearNorm(nn.Module):
 
 
 class ConvNorm(nn.Module):
-    """一维卷积 + 权重归一化的官方写法（padding 使时间轴长度不变）。"""
+    """一维卷积 + 权重归一化的官方写法（padding 使时间轴长度不变）。
+
+    ⚠️ **属性名必须是 `conv`**（官方 AutoVC `model_vc.py::ConvNorm` 里就叫 `self.conv`）——
+    这决定了我们保存的 checkpoint 的键名是
+    `encoder.convolutions.0.0.conv.weight`，
+    **与官方 AutoVC 的 `Generator` 完全一致** ⇒
+    ① 成员 B 的 `stage2/models.py::TorchAutoVCStage1`（内部用官方 `Generator`）
+       能直接加载我们的 checkpoint；
+    ② 将来若拿到 AutoVC 官方权重，也能直接加载进我们的模型。
+    """
 
     def __init__(self, in_channels: int, out_channels: int, kernel_size: int = 1,
                  stride: int = 1, padding: int | None = None, dilation: int = 1,
@@ -63,14 +72,14 @@ class ConvNorm(nn.Module):
         if padding is None:
             assert kernel_size % 2 == 1
             padding = int(dilation * (kernel_size - 1) / 2)
-        self.conv_layer = nn.Conv1d(in_channels, out_channels, kernel_size=kernel_size,
-                                    stride=stride, padding=padding, dilation=dilation,
-                                    bias=bias)
-        nn.init.xavier_uniform_(self.conv_layer.weight,
+        self.conv = nn.Conv1d(in_channels, out_channels, kernel_size=kernel_size,
+                              stride=stride, padding=padding, dilation=dilation,
+                              bias=bias)
+        nn.init.xavier_uniform_(self.conv.weight,
                                 gain=nn.init.calculate_gain(w_init_gain))
 
     def forward(self, signal: torch.Tensor) -> torch.Tensor:
-        return self.conv_layer(signal)
+        return self.conv(signal)
 
 
 # ---------------------------------------------------------------------------
@@ -279,3 +288,18 @@ class Stage1Model(nn.Module):
 
 def count_parameters(model: nn.Module) -> int:
     return sum(parameter.numel() for parameter in model.parameters() if parameter.requires_grad)
+
+
+def remap_to_official_keys(state: dict) -> dict:
+    """把旧 checkpoint 的键名改成**官方 AutoVC** 的键名。
+
+    历史原因：早期版本的 `ConvNorm` 把卷积叫 `self.conv_layer`，
+    官方 AutoVC 叫 `self.conv`。现在源码里已经统一成 `conv`，
+    这个函数只用来读**改名前**保存的 checkpoint（自动兼容，不用重训）。
+
+    转换规则：`*.conv_layer.*` -> `*.conv.*`
+    """
+    remapped = {}
+    for key, value in state.items():
+        remapped[key.replace(".conv_layer.", ".conv.")] = value
+    return remapped

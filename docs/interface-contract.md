@@ -275,8 +275,33 @@ G → h_adv → D(c, h_adv) → V(·) → E_spk(·) → L_de
 > `stage2/verify_mel.py` 保证 torch 版 GE2E 与上游 numpy 版**逐值一致**
 > （mel 误差 2.3e-05，嵌入余弦 0.99999481）。
 
-#### 4.5.4 损失函数签名（论文式 7–13）
+#### 4.5.3b ★★ 成员 A 修的 Stage 2 两个**致命 bug**（2026-11-19）
 
+> 这两个 bug 都在 `stage2/models.py::TorchAutoVCStage1`，
+> **症状是"训练能跑、loss 在降、但防御机制根本没生效"** —— 最坏的一类。
+
+| # | bug | 原来的写法 | 后果 | 修法 |
+|---|---|---|---|---|
+| 1 | **目标嵌入没进解码器** | `self.model(mel, embedding, embedding)` | 官方 `Generator.forward(x, c_org, c_trg)` 的**第三个参数才是目标嵌入**。两个都传 embedding ⇒ **`h_adv` 根本没参与重建** ⇒ 扰动嵌入对 `x_adv` 毫无影响，防御机制完全失效，**且不报错** | `decode()` 自己实现摊开 + 解码，**c_trg = 给定的目标嵌入** |
+| 2 | **`content` 参数被忽略** | `decode()` 里根本没用 `content` | 论文的 **"arbitrary content"**（`c_arb`，攻击者用**任意内容**克隆）没起作用，`x_clone` 用的还是原句内容 ⇒ `L_de` 测的不是论文那个场景 | `decode(..., content=c)` 支持注入内容码 |
+
+**修复后的实测**（成员 A，`stage2/models.py` 载入 A 训的 Stage 1 checkpoint）：
+
+```
+content_code -> (2, 7, 64)                              ✅ 与 §4.5.1 一致
+D(c,h) 与 D(c,h_adv) 的平均差 = 0.525248                ✅ 修 bug 前是 0（h_adv 没进去）
+梯度能回到 h_adv: ✅ (absmax = 2165)                    ✅ 修 bug 前是 0
+content 被真正使用: ✅                                   ✅ 修 bug 前是 0
+```
+
+**⇒ 验收 Stage 2 时，请先确认这三行。** 写法错了 loss 照样在降，但指标是假的。
+
+> ★ 顺带：`content_code()` 的返回值从 **list** 改成**张量** `(B, T', 64)`
+> —— 官方 AutoVC 的 `Encoder.forward` 返回 list，
+> 但 `stage2/train.py` 要写 `content_codes[permutation]`（batch 内随机置换），
+> 对 list 索引是错的。
+
+#### 4.5.4 损失函数签名（论文式 7–13）
 ```python
 from stage2.losses import (
     mel_loss, mask_loss, perceptual_loss,          # 式 7/8/9

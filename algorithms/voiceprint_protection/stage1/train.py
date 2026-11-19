@@ -59,12 +59,12 @@ import paths  # noqa: E402
 try:                                   # 作为包的子模块运行（python -m ...）
     from . import losses as stage1_losses
     from .dataset import build_dataloader
-    from .model import Stage1Model, count_parameters
+    from .model import Stage1Model, count_parameters, remap_to_official_keys
     from .speaker_encoder import TrainableSpeakerEncoder
 except ImportError:                    # 直接当脚本运行（python stage1/train.py）
     from stage1 import losses as stage1_losses
     from stage1.dataset import build_dataloader
-    from stage1.model import Stage1Model, count_parameters
+    from stage1.model import Stage1Model, count_parameters, remap_to_official_keys
     from stage1.speaker_encoder import TrainableSpeakerEncoder
 
 WEIGHTS_DIR = paths.WEIGHTS_DIR
@@ -345,7 +345,7 @@ def train_model(args) -> int:
             print("  [警告] 没找到可续训的 checkpoint，从头开始。")
         else:
             saved = torch.load(checkpoint, map_location="cpu", weights_only=False)
-            model.load_state_dict(saved["model"])
+            model.load_state_dict(remap_to_official_keys(saved["model"]))
             speaker_encoder.model.load_state_dict(saved["speaker_encoder"])
             if "optimizer" in saved:
                 optimizer.load_state_dict(saved["optimizer"])
