@@ -499,8 +499,26 @@ N = (crop_frames - 1) * hop          # 不是 crop_frames * hop（那样会多�
 |---|---|---|
 | `L_rec` | `‖x−x̂‖² + ‖x−x̂_psnt‖²` | `stage1/losses.py::reconstruction_loss` |
 | `L_cd` | `‖E_c(x,h)−E_c(x̂,h)‖₁ + ‖E_c(x,h)−E_c(x̂_psnt,h)‖₁` | `content_consistency_loss` |
-| `L_dis` | `Σ_k p_s(k|c̃) log p_s(k|c̃)` | `disentanglement_loss` |
+| `L_dis` | `Σ_k p_s(k|c̃) log p_s(k|c̃)` = **−H(p_s)** | `disentanglement_loss` |
 | 总 | `L_rec + λ_cd·L_cd + λ_dis·L_dis`（λ_cd=1.0, λ_dis=0.01） | `stage1_loss` |
+
+> ★★ **L_dis 的符号方向（2026-11-20 修了一个致命 bug，成员 A）**
+>
+> 论文式(5)：`L_dis = −H(p_s) = Σ_k p_s(k|c̃) log p_s(k|c̃)`。
+> **`Σ p log p` 本身就是 −H（熵的负数）**，所以实现里**不要再加负号**。
+>
+> | p 的分布 | 论文的 `L_dis` = Σ p log p | 含义 |
+> |---|---|---|
+> | 均匀 | **−log K = −4.38**（最负） | 分类器**完全猜不准** ⭐ 解耦成功 |
+> | one-hot | ≈ 0 | 分类器很确定 ⭐ 解耦失败 |
+>
+> ⇒ **最小化 `L_dis` ⇒ 越负越均匀 ⇒ 分类器越猜不出说话人**（与论文 "Minimizing L_dis maximizes H" 一致）。
+>
+> **踩过的坑**：原实现写成 `-(p * log p).sum()`，那是 **+H(p)**，
+> 最小化它 = **最小化熵** = 让分类器**更确定** —— **与论文正好相反**。
+> 现象：第一次真训练时 `dis` 停在 `0.0016`（= H≈0，分类器完全确定），
+> 说明内容码里的说话人信息一点没去掉。
+> ⚠️ **这个 bug 不会报错、loss 照样下降**，只能靠看 `dis` 的数值和方向发现。
 
 ### 7.4 两阶段训练的顺序（★ 顺序不能反）
 
