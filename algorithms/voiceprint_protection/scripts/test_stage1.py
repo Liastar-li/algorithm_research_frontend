@@ -156,6 +156,33 @@ def test_entropy_maximization() -> None:
           "会优化成\"让分类器更确定\"。）")
 
 
+def test_padding() -> None:
+    print("\n【4】帧数补齐（推理时输入长度任意）")
+    from stage1.model import pad_mel_to_freq
+
+    freq = config.AUTOVC_MODEL["freq"]
+    for frames in (167, 160, 192, 32):
+        mel = np.random.rand(frames, config.FRAME_DIM).astype(np.float32)
+        padded, original = pad_mel_to_freq(mel)
+        check(f"{frames} 帧 -> 补到 {padded.shape[0]}（freq={freq} 的倍数）",
+              padded.shape[0] % freq == 0, f"实际 {padded.shape}")
+        check(f"原始帧数被记住（{original}）", original == frames)
+        check("补齐是零填充，不改动原有帧",
+              np.array_equal(padded[:frames], mel))
+
+    # 关键回归：帧数不是 freq 的整数倍时，编码器**不能越界**
+    torch.manual_seed(config.SEED)
+    model = Stage1Model()
+    mel = torch.randn(1, 167, config.FRAME_DIM)
+    embedding = torch.nn.functional.normalize(torch.randn(1, config.SPEAKER_DIM), dim=-1)
+    padded, original = pad_mel_to_freq(mel[0].numpy())
+    try:
+        model(torch.from_numpy(padded).unsqueeze(0), embedding, embedding)
+        check("非整倍帧长的 mel 也能跑通（补齐后）", True)
+    except IndexError as error:
+        check("非整倍帧长的 mel 也能跑通（补齐后）", False, str(error))
+
+
 def main() -> int:
     print("=" * 66)
     print("  Stage 1 自检（形状 / 损失 / 熵最大化）")
@@ -164,6 +191,7 @@ def main() -> int:
     test_shapes()
     test_losses()
     test_entropy_maximization()
+    test_padding()
 
     print()
     print("=" * 66)

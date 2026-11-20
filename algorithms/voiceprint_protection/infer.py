@@ -97,11 +97,21 @@ class Protector:
     三件套（都是上游 Real-Time-Voice-Cloning，权重全部可下载）：
       · speaker  —— 体检仪：波形 -> 256 维身份卡
       · cloner   —— 骗子：(文本, 身份卡) -> 音频
-      · autovc   —— 可选：AutoVC 解码器（Stage 1 权重到位后启用）
+      · stage1   —— ★ 可选：**论文原版**的重建器（成员 A 训的 Stage 1 + HiFi-GAN）
+
+    【两条路线，差别很大】
+    | 路线 | 保护后语音怎么来的 | Sim_prot 上限 |
+    |---|---|---|
+    | "clone"（路线 B，默认） | `clone(text, h_adv)` —— 用克隆机**重新合成** | **≈0.82**（重新合成本身就改音色/韵律） |
+    | "stage1"（★ 论文原版） | `D(c, h_adv)` —— **重建原句**，只换音色 | 论文 0.95 |
+
+    成员 B 在 `docs/experiments.md §3c` 实测过：路线 B 的 Sim_prot 有 **0.82 的
+    结构性天花板**，与扰动强弱无关 —— 论文那组数字**必须走 stage1 路线**。
     """
 
     def __init__(self, use_speaker_bridge: bool = True, device: str | None = None,
-                 with_cloner: bool = True):
+                 with_cloner: bool = True, stage1_checkpoint: str | Path | None = None,
+                 with_stage1: bool = True):
         from bridge_speaker import SpeakerBridge
 
         self.device = device
@@ -113,7 +123,162 @@ class Protector:
             self.cloner = ClonerBridge(device=device)
         self._autovc = None   # AutoVC 路线按需加载（需要 AutoVC 权重）
 
+        # ★ Stage 1 路线（论文原版）：成员 A 训的解耦-重建网络 + HiFi-GAN
+        self.stage1 = None
+        self.stage1_speaker = None
+        self.vocoder = None
+        if with_stage1:
+            self.load_stage1(stage1_checkpoint)
+
         self.spec = audio_utils.MelSpec()
+
+    # -- Stage 1 路线 ----------------------------------------------------
+    def load_stage1(self, checkpoint: str | Path | None = None) -> bool:
+        """加载 Stage 1（解耦-重建网络）+ 随训微调的 GE2E + HiFi-GAN 声码器。
+
+        返回是否成功（没有 checkpoint 时返回 False，调用方退回 "clone" 路线）。
+        """
+        import torch
+
+        from stage1.model import Stage1Model
+        from stage1.speaker_encoder import TrainableSpeakerEncoder
+
+        device = self.device or ("cuda" if torch.cuda.is_available() else "cpu")
+        # 优先用训练完的最终权重；训练中就退回断点（它也有 "model" 键）
+        candidates = [Path(checkpoint)] if checkpoint else [
+            paths.WEIGHTS_DIR / "stage1_model.pt",
+            paths.WEIGHTS_DIR / "stage1_last_ckpt.pt",
+        ]
+        path = next((p for p in candidates if p.exists()), candidates[0])
+        if not path.exists():
+            return False
+
+        try:
+            state = torch.load(path, map_location="cpu", weights_only=False)
+            model = Stage1Model()
+            model.load_state_dict(state["model"])
+            model.eval().to(device)
+            for parameter in model.parameters():
+                parameter.requires_grad_(False)
+
+            # ★ 用**随 Stage 1 一起微调过的** GE2E（论文的 E_spk），
+            #   而不是上游那个原始的 —— 契约 §7.5
+            encoder = TrainableSpeakerEncoder(device=device, fine_tune=False)
+            if "speaker_encoder" in state:
+                encoder.model.load_state_dict(state["speaker_encoder"])
+            encoder.model.eval().to(device)
+
+            from bridge_vocoder import VocoderBridge
+
+            self.stage1 = model
+            self.stage1_speaker = encoder
+            self.vocoder = VocoderBridge(device=device)
+            self.stage1_checkpoint = path
+            return True
+        except Exception as error:  # noqa: BLE001
+            print(f"  [警告] Stage 1 加载失败（{error}），退回 clone 路线。")
+            self.stage1 = None
+            return False
+
+    @property
+    def has_stage1(self) -> bool:
+        return self.stage1 is not None
+
+    def protect_stage1(self, wav: np.ndarray, alpha: float = config.STAGE2["alpha"],
+                       delta: np.ndarray | None = None,
+                       seed: int = config.SEED, verbose: bool = True) -> dict:
+        """★ 论文原版：x_adv = D(c, h_adv) -> HiFi-GAN。
+
+        步骤（与论文 Figure 1 的 Stage 2 一一对应）：
+          1. c = E_c(x, h)              内容码（说的是什么）
+          2. h_adv = h + α·δ            被污染的音色
+          3. x_adv = D(c, h_adv)        重建原句，只换音色
+          4. protected = V(x_adv)       过声码器成波形
+          5. h_stolen = E_spk(protected) 攻击者从保护后语音重新提卡
+          6. cloned = V(D(c, h_stolen)) 攻击者用偷到的卡重建
+             （★ 与 x_adv 用**同一份内容码 c**，只有音色不同 ——
+               这样两者的差异就**纯粹是防御效果**，比随机换内容更干净）
+        """
+        import torch
+
+        if self.stage1 is None:
+            raise RuntimeError("Stage 1 未加载 —— 先调 load_stage1()。")
+
+        if delta is None:
+            delta = random_perturbation(seed=seed)
+
+        device = next(self.stage1.parameters()).device
+        sample_rate = config.MEL_PRESETS[config.DEFAULT_PRESET]["sample_rate"]
+
+        # 1. 体检：波形 -> 身份卡 h（用的是随 Stage 1 微调过的 E_spk）
+        with torch.no_grad():
+            embedding = self.stage1_speaker.embed_numpy(wav)
+            steps = {"embedding": embedding.shape}
+
+            # 2. 打疫苗
+            embedding_adv = perturb_embedding(embedding, delta, alpha)
+            steps["embedding_adv"] = embedding_adv.shape
+
+            # 3. 内容码 + 重建
+            # ★ 帧数必须补到 freq 的整数倍（编码器要取 index+freq-1），
+            #   补完再把输出**裁回原始帧数** —— 保证"输入输出等长"（契约 §2）
+            from stage1.model import pad_mel_to_freq
+
+            mel_np, original_frames = pad_mel_to_freq(audio_utils.model_mel(wav))
+            mel = torch.from_numpy(mel_np).unsqueeze(0).to(device)      # (1, T', 80)
+            h = torch.from_numpy(embedding).unsqueeze(0).to(device)
+            h_adv = torch.from_numpy(embedding_adv).unsqueeze(0).to(device)
+
+            _, protected_mel, codes = self.stage1(mel, h, h_adv)           # x_adv
+            content = torch.stack(codes, dim=1)                            # (1, T', 64)
+
+            # 4. 过声码器（先裁回原始帧数）
+            protected = self.vocoder.mel_to_wav(
+                protected_mel[0, :original_frames].cpu().numpy())
+            steps["protected_waveform"] = protected.shape
+
+            # 5. 攻击者重新提卡
+            stolen = self.stage1_speaker.embed_numpy(protected)
+            steps["stolen_embedding"] = stolen.shape
+
+            # 6. 攻击者用偷到的卡重建（同一份内容码，只换音色）
+            h_stolen = torch.from_numpy(stolen).unsqueeze(0).to(device)
+            _, cloned_mel, _ = self.stage1(mel, h_stolen, h_stolen)
+            cloned = self.vocoder.mel_to_wav(
+                cloned_mel[0, :original_frames].cpu().numpy())
+
+            # 对照：未防御的重建 D(c, h)
+            _, baseline_mel, _ = self.stage1(mel, h, h)
+            baseline = self.vocoder.mel_to_wav(
+                baseline_mel[0, :original_frames].cpu().numpy())
+
+        if verbose:
+            print(f"  [1] 身份卡 h        {tuple(embedding.shape)}  "
+                  f"L2 范数 {float(np.linalg.norm(embedding)):.4f}")
+            print(f"  [2] 扰动后身份卡    {tuple(embedding_adv.shape)}  "
+                  f"与原卡余弦 {float(np.dot(embedding, embedding_adv)):.4f}（α={alpha}）")
+            print(f"  [3] 内容码 c        {tuple(content.shape)}（时间分辨率 1/{config.CONTENT_DOWNSAMPLE}）")
+            print(f"  [4] 保护后语音      {tuple(protected.shape)}  "
+                  f"RMS {audio_utils.rms_energy(protected):.5f}  ★D(c,h_adv)→HiFi-GAN")
+            print(f"  [5] 攻击者重新提的卡 {tuple(stolen.shape)}  "
+                  f"与原卡余弦 {float(np.dot(embedding, stolen)):.4f}")
+            print(f"      （越小 -> 防御越有效；论文用 Sim_clone 衡量）")
+            print(f"  [6] 未防御重建 D(c,h) {tuple(baseline.shape)}  "
+                  f"RMS {audio_utils.rms_energy(baseline):.5f}")
+            print(f"  [7] 防御后重建      {tuple(cloned.shape)}  "
+                  f"RMS {audio_utils.rms_energy(cloned):.5f}")
+
+        result = {
+            "embedding": embedding,
+            "embedding_adv": embedding_adv,
+            "stolen_embedding": stolen,
+            "protected_waveform": protected,
+            "clone_baseline_waveform": baseline,
+            "clone_protected_waveform": cloned,
+            "shapes": {key: list(value) for key, value in steps.items()},
+            "route": "stage1",
+        }
+        return result
 
     # -- 单步，便于逐步打印与调试 ----------------------------------------
     def to_mel(self, wav: np.ndarray) -> np.ndarray:
@@ -139,7 +304,8 @@ class Protector:
     def protect(self, wav: np.ndarray, alpha: float = config.STAGE2["alpha"],
                 delta: np.ndarray | None = None, seed: int = config.SEED,
                 text: str = DEFAULT_REFERENCE_TEXT,
-                attack_mode: str = "clone", verbose: bool = True) -> dict:
+                attack_mode: str = "clone", verbose: bool = True,
+                mode: str = "clone") -> dict:
         """一整条链：波形 -> 保护后波形（+ 攻击者克隆对比）。
 
         参数
@@ -148,9 +314,19 @@ class Protector:
         alpha       : 扰动强度 α
         text        : 攻击者要念的文本（参考文本）
         attack_mode : "clone" 时额外产出攻击者克隆音；"none" 只产出保护后语音
+        mode        : ★ 路线选择
+                     "clone"  —— 用克隆机重新合成（默认；Sim_prot 上限 ≈0.82）
+                     "stage1" —— ★ 论文原版 D(c, h_adv) → HiFi-GAN
+                     "auto"   —— 有 Stage 1 权重就用 stage1，否则退回 clone
 
         返回 dict，含中间每一步，便于逐步核对形状。
         """
+        if mode == "auto":
+            mode = "stage1" if self.has_stage1 else "clone"
+        if mode == "stage1":
+            return self.protect_stage1(wav, alpha=alpha, delta=delta,
+                                       seed=seed, verbose=verbose)
+
         if delta is None:
             delta = random_perturbation(seed=seed)
 
@@ -216,7 +392,8 @@ def protect(wav_path: str | Path, alpha: float = config.STAGE2["alpha"],
             text: str = DEFAULT_REFERENCE_TEXT,
             attack_mode: str = "clone",
             seed: int = config.SEED,
-            sample_rate: int = 16000) -> dict:
+            sample_rate: int = 16000,
+            mode: str = "clone") -> dict:
     """一站式保护：读音频 -> 保护 -> 写音频。
 
     参数
@@ -226,6 +403,7 @@ def protect(wav_path: str | Path, alpha: float = config.STAGE2["alpha"],
     output_path : 保护后音频的输出路径（None 时不写文件）
     text        : 攻击者要念的参考文本
     attack_mode : "clone" 时额外把攻击者克隆音写到同目录
+    mode        : ★ 路线选择 —— "clone"（默认）/ "stage1"（论文原版）/ "auto"
 
     返回
     ----
@@ -237,7 +415,8 @@ def protect(wav_path: str | Path, alpha: float = config.STAGE2["alpha"],
 
     protector = Protector()
     result = protector.protect(
-        wav, alpha=alpha, seed=seed, text=text, attack_mode=attack_mode, verbose=False
+        wav, alpha=alpha, seed=seed, text=text, attack_mode=attack_mode,
+        verbose=False, mode=mode,
     )
 
     written: dict[str, str] = {}

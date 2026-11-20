@@ -290,6 +290,32 @@ def count_parameters(model: nn.Module) -> int:
     return sum(parameter.numel() for parameter in model.parameters() if parameter.requires_grad)
 
 
+def pad_mel_to_freq(mel: np.ndarray, freq: int | None = None) -> tuple[np.ndarray, int]:
+    """把 mel 的帧数补到 `freq` 的整数倍。
+
+    ★ 为什么必须补：编码器取 `out_forward[:, index + freq - 1, :]`
+      （index = 0, freq, 2·freq, …），**T 不是 freq 的整数倍时越界**：
+      ```
+      IndexError: index 191 is out of bounds for dimension 1 with size 167
+      ```
+      训练时数据集保证帧数是 32 的倍数（契约 §7.1b），
+      但**推理时输入是任意长度的音频** ⇒ 必须在这里补。
+
+    返回 (补齐后的 mel, 原始帧数) —— 调用方记得把输出**裁回原始帧数**
+    （否则输出与输入不等长，破坏契约 §2 的形状不变量）。
+    """
+    import numpy as np
+
+    freq = freq or config.AUTOVC_MODEL["freq"]
+    original = mel.shape[0]
+    padding = (-original) % freq
+    if padding == 0:
+        return mel, original
+    padded = np.pad(np.asarray(mel, dtype=np.float32), ((0, padding), (0, 0)),
+                    mode="constant")
+    return padded, original
+
+
 def remap_to_official_keys(state: dict) -> dict:
     """把旧 checkpoint 的键名改成**官方 AutoVC** 的键名。
 
