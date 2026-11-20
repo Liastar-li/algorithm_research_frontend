@@ -79,7 +79,7 @@ python algorithms/voiceprint_protection/scripts/prepare_data.py
 | 项 | 值 |
 |---|---|
 | 说话人 | **110**（109 个 `pXXX` + **1 个 `s5`**）—— 与论文一致 |
-| 语句数 | 11,004（每人 100 句，**均匀抽样**，不是取前 100 句） |
+| 语句数 | 11,000（每人 100 句，**均匀抽样**，不是取前 100 句） |
 | 原始格式 | 48 kHz / 单声道 / FLAC（`wav48_silence_trimmed`） |
 | 划分 | seed=42 → **80 训练 / 10 验证 / 20 测试** |
 | 清单 | `train.txt` 8,004 行 / `val.txt` 1,000 行 / `test.txt` 2,000 行 / `spk2id.txt` 80 行 |

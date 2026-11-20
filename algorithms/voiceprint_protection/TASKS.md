@@ -43,7 +43,7 @@
 | `config.py` / `audio_utils.py` | ✅ 已写好（★ 已按 AutoVC 官方实测对齐） |
 | `third_party/AutoVC` | ✅ 已克隆，commit `c1827a6` |
 | `third_party/RTC`（GE2E） | ✅ 已克隆，commit `890f3a0`；权重 `encoder.pt` 已下载并校验 |
-| VCTK 数据 | ✅ 110 说话人 / 11,004 条，划分 80/10/20 已自检通过 —— ⚠️ **但只在成员 B 的机器上**；成员 A 这边**还没下载**（`data/` 只有 `models/`）。★ **2026-11-20 夜源站恢复**，A 可直接自取（见 §0.13） |
+| VCTK 数据 | ✅ 110 说话人 / 11,000 条，划分 80/10/20 已自检通过 —— ⚠️ **但只在成员 B 的机器上**；成员 A 这边**还没下载**（`data/` 只有 `models/`）。★ **2026-11-20 夜源站恢复**，A 可直接自取（见 §0.13） |
 | Stage 1 代码 | ✅ 已实现，19 项自检全过（`scripts/test_stage1.py`） |
 | HiFi-GAN 16 kHz 声码器 | ✅ **权重就位**（HF `speechbrain/tts-hifigan-libritts-16kHz`，234/234 键 strict 通过，可求导） |
 | 接口契约 | ✅ **v0.5 双方已签字**（`docs/interface-contract.md` §9） |
@@ -72,7 +72,7 @@
 | 任务 | 产出 | 状态 |
 |---|---|---|
 | D1-3 | 克隆 RTC（commit `890f3a0`）+ 从 HuggingFace 下 `encoder.pt`（17,090,379 B，已校验） | ✅ |
-| D1-4 | VCTK 下载：**1.36 GiB / 11,004 条 / 110 说话人**（用 `scripts/download_vctk.mjs`） | ✅ |
+| D1-4 | VCTK 下载：**1.36 GiB / 11,000 条 / 110 说话人**（用 `scripts/download_vctk.py`，云机没 Node 也能跑） | ✅ |
 | D1-5 | `scripts/survey_vctk.py` → `docs/notes/vctk_layout.md`（自动生成） | ✅ |
 | D2-4 | `docs/notes/ge2e_interface.md`（四个问题按上游源码逐条核实 + 实测记录） | ✅ **已收口** |
 | D2-5 / D3-5 | `scripts/prepare_data.py`：转换 + 80/10/20 划分 + **三条硬要求自检** | ✅ **全通过** |
@@ -612,7 +612,7 @@ Stage 2 也只在 `--stub`（替身 Stage 1 + 替身声码器）上跑过。
 | D1-1 | A | 克隆 AutoVC 官方仓库 → `third_party/AutoVC`，记下 **commit hash** | — | `third_party/AutoVC/` | ✅ **已完成** `c1827a6`，仓库见 `third_party/README.md` |
 | D1-2 | A | 读它的 `hparams.py`，把 **mel 参数**抄进 `docs/notes/` | D1-1 | `docs/notes/autovc_alignment.md` | ✅ **已完成**，实测参数已记录 |
 | D1-3 | B | 克隆 `CorentinJ/Real-Time-Voice-Cloning` → `third_party/RTC`，记 commit | — | `third_party/RTC/` | ✅ **已完成** commit `890f3a0`；⚠️ 权重改从 HF 下 `encoder.pt` |
-| D1-4 | B | 下载 VCTK（Edinburgh DataShare）→ `data/raw/`，解压 | — | `data/raw/` | ✅ **已完成** 1.36 GiB / 11,004 条 / 110 说话人 |
+| D1-4 | B | 下载 VCTK（Edinburgh DataShare）→ `data/raw/`，解压 | — | `data/raw/` | ✅ **已完成** 1.36 GiB / 11,000 条 / 110 说话人 |
 | D1-5 | B | 勘察 VCTK 目录：**统计说话人数、每个说话人的句子数、有多少 `p*_eval` 目录** | D1-4 | `docs/notes/vctk_layout.md` | ✅ **已完成** 110 人（含 `s5`）；本包无 `p*_eval` |
 | D1-6 | **共同** | 建 `third_party/README.md`：每个组件的 **URL + commit + 许可证 + 用途** | D1-1, D1-3 | `third_party/README.md` | ✅ **已完成**（待 D1-3 后补 RTC 条目） |
 | **D1-7** | **A** | **下载 AutoVC 官方权重**（IBM Box，主模型 + WaveNet 声码器）；`3000000-BL.ckpt` 也要 | D1-1 | `algorithms/voiceprint_protection/weights/` | 权重文件就位，**不提交到 git**（`.gitignore` 已忽略 `*.pt`） |

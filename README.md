@@ -47,7 +47,7 @@
 
   上游权重全部来自 HuggingFace `CorentinJ/SV2TTS`（`encoder.pt` / `synthesizer.pt` / `vocoder.pt`）。
 - **数据**：VCTK（Edinburgh DataShare，[DOI 10.7488/ds/2645](https://doi.org/10.7488/ds/2645)），**CC BY 4.0**。
-  110 说话人 / 11,004 句，seed=42 划分 80 训练 / 10 验证 / 20 测试。
+  110 说话人 / 11,000 句，seed=42 划分 80 训练 / 10 验证 / 20 测试。
 - **本组算法代码位置**：[`algorithms/voiceprint_protection/`](algorithms/voiceprint_protection/)（本分支）
 - **第三方许可证与引用说明**：见 [`third_party/README.md`](third_party/README.md)；
   样例音频的署名见 [`public/samples/group_n005_voiceprint_protection/SOURCES.md`](public/samples/group_n005_voiceprint_protection/SOURCES.md)。
