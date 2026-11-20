@@ -43,7 +43,7 @@
 | `config.py` / `audio_utils.py` | ✅ 已写好（★ 已按 AutoVC 官方实测对齐） |
 | `third_party/AutoVC` | ✅ 已克隆，commit `c1827a6` |
 | `third_party/RTC`（GE2E） | ✅ 已克隆，commit `890f3a0`；权重 `encoder.pt` 已下载并校验 |
-| VCTK 数据 | ✅ 110 说话人 / 11,004 条，划分 80/10/20 已自检通过 —— ⚠️ **但只在成员 B 的机器上**；成员 A 这边**还没下载**（`data/` 只有 `models/`） |
+| VCTK 数据 | ✅ 110 说话人 / 11,004 条，划分 80/10/20 已自检通过 —— ⚠️ **但只在成员 B 的机器上**；成员 A 这边**还没下载**（`data/` 只有 `models/`）。★ **2026-11-20 夜源站恢复**，A 可直接自取（见 §0.13） |
 | Stage 1 代码 | ✅ 已实现，19 项自检全过（`scripts/test_stage1.py`） |
 | HiFi-GAN 16 kHz 声码器 | ✅ **权重就位**（HF `speechbrain/tts-hifigan-libritts-16kHz`，234/234 键 strict 通过，可求导） |
 | 接口契约 | ✅ **v0.5 双方已签字**（`docs/interface-contract.md` §9） |
@@ -51,7 +51,7 @@
 | **训练链路** | ✅ **2026-11-18 审计后全部打通**：AMP / 梯度累积 / 断点续训 / 验证回路 / 两种启动方式 / 帧数约定 —— 详见 **§0.10** |
 | **当前阶段** | **W2 收尾 → W3（平台打通）**；W4 的 Stage 1 训练**代码已就绪，等数据** |
 | **下一个里程碑** | **M2 平台打通**（W3：`service.py` + 方法 JSON + 平台端到端） |
-| **开训的唯一阻塞** | **VCTK 数据还没下到成员 A 的机器上** —— 步骤见 §0.10.5 |
+| **开训的唯一阻塞** | **VCTK 数据还没下到成员 A 的机器上** —— 步骤见 §0.10.5；★ 源站已恢复，**不必等 B 打包**，A 可自取（§0.13） |
 | **待补依赖** | `python-multipart` 升到 0.0.20（起服务前必须）、`scikit-learn==1.5.2`（上游 GE2E 必需） |
 
 ### ★ 本周已取得的关键结论（2026-11-13 实测，详见 [docs/notes/autovc_alignment.md](docs/notes/autovc_alignment.md)）
@@ -507,7 +507,7 @@ content 被真正使用: ✅                       ✅ 修 bug 前是 0
 
 | # | 缺什么 | 谁 | 怎么办 |
 |---|---|---|---|
-| 1 | **VCTK 数据** | **你（成员 A）** | `node scripts/download_vctk.mjs`（约 55 分钟 / 1.36 GiB），或让 B 把已下好的打包发你 |
+| 1 | **VCTK 数据** | **你（成员 A）** | ★ **源站已恢复**（2026-11-20 夜实测 HTTP 200，11.75 GiB 可下）。用 B 新写的 **Python 版**定向下载器：`python scripts/download_vctk.py --out <数据根>/raw`（只用标准库，**云机没装 Node 也能跑**）。约 55 分钟 / 1.36 GiB |
 | 2 | `data/train.txt` / `val.txt` / `test.txt` / `spk2id.txt` | 你（B 的 `prepare_data.py` 已就绪） | `python algorithms/voiceprint_protection/scripts/prepare_data.py` |
 | 3 | 云端 GPU（论文量级训练） | 你 | ⚠️ **代金券能开 ECS(NVIDIA) 还是只有昇腾 ModelArts 仍未确认**（见 §8） |
 
@@ -555,6 +555,37 @@ Stage 2 也只在 `--stub`（替身 Stage 1 + 替身声码器）上跑过。
 > Stage 2 用真 Stage 1 + 真 HiFi-GAN 是 **30~35 s/step**（CPU, batch 8）；
 > 按 A 的 4060 实测（0.3 s/step）推算，200k 步约 **17 小时**。
 
+
+### 0.13 ★ 本轮进展（成员 B · 2026-11-20 夜：P2 基线 / P3 绝对 WER / P5 云机脚本 + 修两个**静默失效**的 bug）
+
+**背景**：A 的三个行动项里 (1)(2)(3) 已完成（§0.11）。剩下 B 能独立推进的是
+**P2（测试集基线指标）**、**P3（绝对 WER）**、**P5（云机一键脚本）**。
+这一轮三件事都推到底了，**顺带抓出两个"看起来正常、其实结果错了"的 bug**。
+
+| # | 事项 | 结论 |
+|---|---|---|
+| 1 | ★★ `datashare.ed.ac.uk` **恢复了** | ✅ HTTP 200，11.75 GiB 源可下（此前 3 次尝试全部超时）。**A 现在可以直接自取 VCTK，不必等 B 打包** |
+| 2 | ★ 新增 `scripts/download_vctk.py`（Python 版定向下载器） | ✅ 云机常常没装 Node，`.mjs` 用不了；这个版本**只用标准库**，支持 `--speakers` / `--per-speaker` / `--include`，且**断点续传**（已落盘且大小对就跳过） |
+| 3 | ★★ 修「下载选择**不可复现**」 | ✅ 旧 `.mjs` 用 `localeCompare` 排序（**依赖运行机器的 locale 与 ICU 版本**），且把 `wav48_silence_trimmed/log.txt` 也算进了每说话人配额。两处都改成**码点序 + 只按音频文件计配额**；`.py` 与 `.mjs` 现在选出**完全相同**的 11,000 个文件 |
+| 4 | ★★ B 的数据集与规则**重新对齐** | ✅ B 机器上多出 4 个"野文件"（p303/p304 各 2 个，早期分批下载的残留）⇒ 清单 11,004 条 ≠ 规则的 11,000 条。删掉这 4 个并重跑 `prepare_data.py`（**0 条重转**）⇒ 现在**两边逐条一致**（`EXACT MATCH: True`），清单 train 8,000 / val 1,000 / test 2,000 |
+| 5 | ★★ 抓到一个**静默失效**：`load_transcripts()` 只扫顶层 | VCTK 的 `txt/` 是**按说话人分子目录**的（`txt/p225/p225_001.txt`），`glob("*.txt")` 一个都找不到 ⇒ **绝对 WER 会无声退化成"Whisper 转写原音"的相对 WER，而且不报错**。改 `rglob` |
+| 6 | ★★ 抓到一个**静默失效**：转写键对不上 | 我们把两路麦克风都收了，转 16 kHz 时改名成 `p228_001_mic1.wav`，而 VCTK 的转写只有一路、叫 `p228_001.txt`。拿 `path.stem` 去查**永远查不到** ⇒ 同上，退化成相对 WER。新增 `transcript_key()` 去掉 `_mic1`/`_mic2` 后缀 |
+| 7 | ★ 让退化**可见** | 统计"没找到原始转写"的条数，有就用醒目提示打印出来，不再默默算 |
+| 8 | ★ P2 基线（用 v0.5 的新代码复测） | ✅ `mode=none`，20 条（测试集 20 个说话人各 1 条），**22 s/条**（CPU）。结果见 `docs/experiments.md` §3i |
+| 9 | ★ P3 绝对 WER | ✅ 补齐了 VCTK 的 `txt/`（8,000 个文件 / 5.2 分钟下完）；WER 计算链路上两个静默失效已修 |
+| 10 | ★ P5 云机一键脚本 | `scripts/cloud_train_stage1.sh`：`--setup` / `--start` / `--status` / `--stop`。**"配环境"和"烧钱训练"分成两条命令** —— 云机按小时计费，别一开机就跑满 |
+| 11 | 回归 | ✅ 7 个自检脚本全绿（`test_audio_utils` / `verify_mel` 4 / `verify_psychoacoustics` 20 / `verify_gradients` 20 / `verify_rtc_mel` / `verify_hifigan` / `test_stage1`） |
+
+> ★ **给成员 A 的数据复现配方**（源站已恢复，可直接照做）：
+>
+> ```bash
+> python scripts/download_vctk.py --out <数据根>/raw >        --include wav48_silence_trimmed --include txt --per-speaker 100
+> python algorithms/voiceprint_protection/scripts/prepare_data.py
+> ```
+>
+> 应当得到 **11,000 条**（train 8,000 / val 1,000 / test 2,000），说话人划分用
+> `scripts/split_speakers.py --check` 对账（名单见 `docs/notes/vctk_speakers.txt`）。
+> 逐条对账：B 侧 `EXACT MATCH: True`（11,000 == 11,000，差集为空）。
 
 ## 1. W2 详细分解：指南第 3 步 + 第 4 步
 
@@ -830,6 +861,8 @@ cut -d' ' -f2 data/train.txt | sort -u | wc -l
 - **代码同步**：`git push` 到 GitHub → 云机 `git clone`（顺便保证两人同一份代码）
 - **数据**：VCTK 在云机上重新下载，或先在本地下载后传 OBS
 - **断线保护**：**必须用 `tmux`**（SSH 断了训练不能停）
+- ★ **一键脚本**：`scripts/cloud_train_stage1.sh` —— `--setup`（配环境 + 下数据 + 下权重）/ `--start`（tmux 里开跑）/ `--status` / `--stop`。
+  它把**「配环境」和「烧钱训练」分成两条命令**：云机按小时计费，别一开机就跑满；先 `--setup` + `check_env.py` 自检，确认无误再 `--start`
 - **结果回收**：训练完把 checkpoint + 指标 `scp` 回本地，再释放实例
 
 ### 8.4 如果券只能开昇腾（ModelArts）
