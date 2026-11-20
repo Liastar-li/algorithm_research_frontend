@@ -126,6 +126,16 @@ fetch_weights() {
   "$PY" "$pkg/download_hifigan_weights.py"
   echo "  权重目录：$DATA_ROOT/models/default"
   echo "  HF_ENDPOINT=$HF_ENDPOINT"
+
+  # WER 用的 Whisper（论文用 Whisper-large = faster-whisper 的 large-v3）。
+  # 云机带宽通常比家里好；缺了也不影响训练，只是算不了 WER。
+  local whisper_model="${VPP_WHISPER_MODEL:-large-v3}"
+  echo "  下载 Whisper：$whisper_model"
+  if "$PY" -c "from faster_whisper import WhisperModel; WhisperModel('$whisper_model', device='cpu', compute_type='int8')"; then
+    echo "  [OK] Whisper 就位"
+  else
+    echo "  [提示] Whisper 没下成功 —— 不影响训练，只是算不了 WER，回头再补"
+  fi
 }
 
 prepare_data() {
@@ -144,7 +154,10 @@ prepare_data() {
   local raw="$DATA_ROOT/raw"
   if [ ! -d "$raw/wav48_silence_trimmed" ]; then
     echo "  下载 VCTK（只取 wav48_silence_trimmed + txt）…"
-    "$PY" "$REPO_ROOT/scripts/download_vctk.py" --out "$raw" --include wav48_silence_trimmed --include txt --concurrency 32
+    # ★ --per-speaker 100 是**数据契约**：每人均匀取 100 条 = 11,000 条，
+    #   与 B 侧逐条一致（差集为空）。不给它会下全部 88,328 个 flac（10.9 GiB），
+    #   而且数据跟 B 的那份对不上。
+    "$PY" "$REPO_ROOT/scripts/download_vctk.py" --out "$raw" --include wav48_silence_trimmed --include txt --per-speaker 100 --concurrency 32
   else
     echo "  [跳过] 已有 $raw/wav48_silence_trimmed"
   fi
