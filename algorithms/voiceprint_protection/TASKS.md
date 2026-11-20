@@ -52,7 +52,7 @@
 | **当前阶段** | **W2 收尾 → W3（平台打通）**；W4 的 Stage 1 训练**代码已就绪，等数据** |
 | **下一个里程碑** | **M2 平台打通**（W3：`service.py` + 方法 JSON + 平台端到端） |
 | **开训的唯一阻塞** | **VCTK 数据还没下到成员 A 的机器上** —— 步骤见 §0.10.5；★ 源站已恢复，**不必等 B 打包**，A 可自取（§0.13） |
-| **待补依赖** | `python-multipart` 升到 0.0.20（起服务前必须）、`scikit-learn==1.5.2`（上游 GE2E 必需） |
+| **待补依赖** | ✅ **已装齐**（实测 2026-11-20：`python-multipart` **0.0.20**（起服务必须）/ `scikit-learn` **1.5.2**（上游 GE2E 必需）/ `faster-whisper` 1.1.0）—— 服务与 GE2E 都已实测通过 |
 
 ### ★ 本周已取得的关键结论（2026-11-13 实测，详见 [docs/notes/autovc_alignment.md](docs/notes/autovc_alignment.md)）
 
