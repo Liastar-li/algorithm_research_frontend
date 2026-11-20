@@ -575,6 +575,7 @@ Stage 2 也只在 `--stub`（替身 Stage 1 + 替身声码器）上跑过。
 | 9 | ★ P3 绝对 WER | ✅ 补齐了 VCTK 的 `txt/`（8,000 个文件 / 5.2 分钟下完）；WER 计算链路上两个静默失效已修 |
 | 10 | ★ P5 云机一键脚本 | `scripts/cloud_train_stage1.sh`：`--setup` / `--start` / `--status` / `--stop`。**"配环境"和"烧钱训练"分成两条命令** —— 云机按小时计费，别一开机就跑满 |
 | 11 | 回归 | ✅ 7 个自检脚本全绿（`test_audio_utils` / `verify_mel` 4 / `verify_psychoacoustics` 20 / `verify_gradients` 20 / `verify_rtc_mel` / `verify_hifigan` / `test_stage1`） |
+| 12 | ★ 新增 `scripts/parallel_download.py` | ✅ HuggingFace 的 CDN 从国内**单连接只有 ~350 KB/s**，而 Whisper `large-v3` 的 `model.bin` 有 **3.09 GB**（单连接要 2.4 小时）。这个脚本并发拉取；实测 `large-v3` 用 24 路并发约 20 分钟下完。**三个坑**（都写在脚本注释里）：urllib 默认 UA 被 **403**；CDN 对 **HEAD** 不响应（会挂住）；hf-mirror 对**小文件**会忽略 `Range` ⇒ 必须先探，不支持就退回单流。**验证**：8 路并发下 HiFi-GAN 权重与本机已下的那份**逐字节一致**（sha256 `2d92a97446467ae5…`） |
 
 > ★ **给成员 A 的数据复现配方**（源站已恢复，可直接照做）：
 >
