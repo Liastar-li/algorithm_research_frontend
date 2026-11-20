@@ -329,10 +329,48 @@ class TorchAutoVCStage1(nn.Module):
             paths.models_dir() / "default" / "stage1.pt",
             paths.models_dir() / "default" / "stage1_model.pt",
         ]
+        skipped: list[tuple[Path, int]] = []
         for candidate in candidates:
-            if candidate.exists():
-                return candidate
+            if not candidate.exists():
+                continue
+            # ★★ 2026-11-20（成员 B 建议，A 实现）：**跳过"冒烟 checkpoint"**。
+            #   冒烟测试（`--iterations 3 --smoke`）也会写 `stage1_model.pt`，
+            #   它只训了几步、**指标全是垃圾**，但会被这里静默捡去用，
+            #   **而且不报错** —— 最坏的一类。
+            #   ⇒ 只接受训够步数的权重；不够的**明确跳过并说明**。
+            step = self._read_step(candidate)
+            minimum = config.STAGE1.get("min_steps_for_real_use", 1000)
+            if step is not None and step < minimum:
+                print(f"  [跳过] {candidate.name} 只训了 {step} 步"
+                      f"（< {minimum}），看着像冒烟产物 —— 指标无意义。")
+                skipped.append((candidate, step))
+                continue
+            return candidate
+
+        if skipped:
+            # ★ 全部候选都是冒烟产物 ⇒ **明确报错**，不要静默兜底
+            #   （兜底会把刚跳过的垃圾权重又捡回来，等于白跳）。
+            detail = "\n".join(f"    {path.name}：{step} 步"
+                               for path, step in skipped)
+            raise FileNotFoundError(
+                "找到的 Stage 1 权重都只训了很少的步数（看着像冒烟产物），已拒绝使用：\n"
+                f"{detail}\n"
+                "正式训练请用 --stage1-checkpoint 显式指定正式权重。")
+
         return candidates[0]
+
+    @staticmethod
+    def _read_step(path: Path) -> int | None:
+        """从 checkpoint 里读训练步数（读不出来就返回 None，不拦）。"""
+        try:
+            data = torch.load(path, map_location="cpu", weights_only=False)
+        except Exception:  # noqa: BLE001
+            return None
+        if isinstance(data, dict):
+            step = data.get("step")
+            if isinstance(step, int):
+                return step
+        return None
 
     # -- 内部 -------------------------------------------------------------
     def _pad(self, mel: torch.Tensor) -> torch.Tensor:

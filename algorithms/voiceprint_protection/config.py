@@ -258,6 +258,11 @@ STAGE1 = {
     "max_seconds": 3.0,        # 训练片段截断长度（秒）
     "amp": True,               # 混合精度（fp16）：省显存 + 快 1.5~2 倍
     "lr": 1e-4,
+    # ★ 训练步数少于这个值的 checkpoint **不许当正式权重用**
+    #   （冒烟测试 `--iterations 3 --smoke` 也会写 `stage1_model.pt`，
+    #     指标全是垃圾，但会被 Stage 2 静默捡去用，**而且不报错**）。
+    #   见 `stage2/models.py::TorchAutoVCStage1._guess_checkpoint()`。
+    "min_steps_for_real_use": 1000,
     # ★ 模型侧用哪套 mel 约定（Ec/D 的输入）。
     #   "hifigan16k" = **HiFi-GAN 声码器那套**（n_fft 1024 / hop 256 / fmin 0 /
     #                fmax 8000 / log(clamp(1e-5))）—— ★ 当前默认
