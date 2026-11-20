@@ -157,8 +157,11 @@ def main() -> int:
         print("  【什么算对】")
         print("    · rec ↓ 稳定下降（重建在变好）")
         print("    · cd  ↓ 下降（内容没丢）")
-        print("    · dis 稳在 log(80) = 4.38 附近")
-        print("      （= 分类器完全猜不出说话人 = ★解耦成功）")
+        print("    · dis 往 **−4.38**（= −log 80）靠 —— **越负越好**")
+        print("      （L_dis = −H(p)：越负 = 分类器的输出越均匀")
+        print("        = 它越猜不出说话人 = ★解耦成功）")
+        print("      ⚠️ 2026-11-20 修过一个符号 bug（实现多了一个负号，方向反了），")
+        print("         现在 dis 的范围是 [−4.38, 0]，**越负越好**。")
         print("  【别直接上 50 万步】先用 5k~20k 看曲线形状，形状对了再拉长。")
         print("  【断了怎么办】重跑加 --resume，从最近的断点接着跑。")
         code = run([PYTHON, str(train_script), "--stage", "model",

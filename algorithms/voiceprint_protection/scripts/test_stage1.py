@@ -130,22 +130,30 @@ def test_entropy_maximization() -> None:
     loss = stage1_losses.disentanglement_loss(codes, classifier)
     check("L_dis 是有限数", bool(torch.isfinite(loss)))
 
-    # 极端情况：所有类概率相等 -> 熵最大 -> L_dis = log(K)
+    # ★ 2026-11-20 修正了断言的符号（原来跟着实现一起写反了）：
+    #   论文式 5：L_dis = −H(p) = Σ p log p
+    #     p 均匀   → Σ p log p = **−log(K)**（最负 = 最均匀）
+    #     p one-hot→ Σ p log p = **≈ 0**
+    #   最小化 L_dis ⇒ 越负越均匀 ⇒ 分类器越猜不准。
+    # 极端情况：所有类概率相等 -> 熵最大 -> L_dis = -log(K)
     uniform_logits = torch.zeros(1, num_speakers)
     uniform_probability = torch.softmax(uniform_logits, dim=-1)
-    uniform_value = float(-(uniform_probability * uniform_probability.log()).sum())
-    check(f"均匀分布时 L_dis ≈ log(K) = {np.log(num_speakers):.4f}",
+    uniform_value = float((uniform_probability * uniform_probability.log()).sum())
+    check(f"均匀分布时 L_dis ≈ -log(K) = {-np.log(num_speakers):.4f}",
           abs(uniform_value - float(loss.detach())) < 1e-3,
           f"实测 {float(loss.detach()):.4f}")
     print("  [说明] 最小化 L_dis = 最大化熵 = 让说话人分类器在内容码上完全猜不准。")
 
-    # 极端情况：分类器非常确定 -> 熵小 -> L_dis 小（更容易被优化）
+    # 极端情况：分类器非常确定 -> 熵≈0 -> L_dis ≈ 0（比均匀时**大**）
     confident_logits = torch.zeros(1, num_speakers)
     confident_logits[0, 0] = 50.0
     confident_probability = torch.softmax(confident_logits, dim=-1)
-    confident_value = float(-(confident_probability * confident_probability.log()).sum())
-    check("分类器很确定时 L_dis 明显更小", confident_value < float(loss.detach()),
-          f"{confident_value:.6f} < {float(loss.detach()):.6f}")
+    confident_value = float((confident_probability * confident_probability.log()).sum())
+    check("分类器很确定时 L_dis ≈ 0（比均匀时大）", confident_value > float(loss.detach()),
+          f"{confident_value:.6f} > {float(loss.detach()):.6f}")
+    print("  [说明] ★ 符号方向：L_dis 越**负** = 越均匀 = 解耦越好。"
+          "（2026-11-20 修：原来实现多了一个负号，方向反了 —— "
+          "会优化成\"让分类器更确定\"。）")
 
 
 def main() -> int:

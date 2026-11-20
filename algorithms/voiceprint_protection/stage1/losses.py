@@ -158,11 +158,21 @@ def disentanglement_loss(codes: list[torch.Tensor],
                          window: int | None = None) -> torch.Tensor:
     """L_dis = −H(p_s) = Σ_k p_s(k|c̃) log p_s(k|c̃)   （论文式 5）
 
-    最小化它 = 最大化熵 = 让说话人分类器在内容码上**完全猜不准**。
+    最小化它 = **最大化熵** = 让说话人分类器在内容码上**完全猜不准**。
 
-    注意符号：论文写 L_dis = −H(p_s) = Σ p log p，
-    而 Σ p log p 本身就是 −H，论文式子里那个负号与展开式不一致；
-    我们按**展开式**实现（Σ p log p），最小化它等价于最大化熵 —— 效果与论文一致。
+    ★★ 2026-11-20（成员 A）修了一个**符号错误**（很隐蔽，靠看曲线才发现）：
+      原来写的是 `-(p * log p).sum()`，那是 **+H(p)**（熵本身），
+      最小化它 = **最小化熵** = 让分类器**更确定** —— 与论文**正好相反**。
+      现象：训练出来的 `dis` 停在 0.0016（≈ H=0，分类器完全确定），
+            说明内容码里**说话人信息一点没去掉**，解耦是反的。
+
+      论文式(5)写的是 `L_dis = −H(p_s) = Σ_k p_s(k|c̃) log p_s(k|c̃)`，
+      而 `Σ p log p` **本身就是 −H**（熵的负数）⇒ **不要再多加一个负号**。
+
+      数值对照（K = 80）：
+        p 均匀   → Σ p log p = **−4.3820**（= −log K，最负 = 最均匀）
+        p one-hot→ Σ p log p = **≈ 0**
+      最小化它 ⇒ 越负越均匀 ⇒ 分类器越猜不准 ✅
     """
     windows = content_windows(codes, window)
     if not windows:
@@ -173,7 +183,8 @@ def disentanglement_loss(codes: list[torch.Tensor],
         logits = classifier(aggregated)               # (B, K)
         log_probabilities = F.log_softmax(logits, dim=-1)
         probability = log_probabilities.exp()
-        losses.append(-(probability * log_probabilities).sum(dim=-1).mean())
+        # ★ 就是 Σ p log p（= −H），**不要再加负号**
+        losses.append((probability * log_probabilities).sum(dim=-1).mean())
     return torch.stack(losses).mean()
 
 
