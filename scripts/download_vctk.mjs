@@ -329,19 +329,31 @@ async function main() {
     bySpeaker.get(speaker).push(e);
   }
 
+  const AUDIO_EXTS = ['.flac', '.wav', '.mp3'];
   let wanted = [];
-  for (const [speaker, list] of bySpeaker) {
-    list.sort((a, b) => a.name.localeCompare(b.name));
-    if (PER_SPEAKER > 0 && list.length > PER_SPEAKER) {
+  for (const speaker of [...bySpeaker.keys()].sort()) {
+    const list = bySpeaker.get(speaker);
+    // ★ 用**码点序**排序，不要用 localeCompare：
+    //   localeCompare 依赖运行机器的 locale 与 ICU 版本，
+    //   两台机器可能挑出**不同的**句子 -> 数据不可复现。
+    list.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+    // ★ 配额只算**音频文件**：wav48_silence_trimmed/ 里混着一个 log.txt，
+    //   它不是音频，不该占掉一个名额（prepare_data 也只认 .flac/.wav）；
+    //   但它要一起下载（那是 VCTK 的日志，README 要引）。
+    const isAudio = (e) => AUDIO_EXTS.some((ext) => e.name.toLowerCase().endsWith(ext));
+    const audio = list.filter(isAudio);
+    const others = list.filter((e) => !isAudio(e));
+    if (PER_SPEAKER > 0 && audio.length > PER_SPEAKER) {
       // 均匀取样：覆盖整句话表，而不是只取开头几句
       const picked = [];
       for (let i = 0; i < PER_SPEAKER; i++) {
-        picked.push(list[Math.floor((i * list.length) / PER_SPEAKER)]);
+        picked.push(audio[Math.floor((i * audio.length) / PER_SPEAKER)]);
       }
       wanted.push(...picked);
     } else {
-      wanted.push(...list);
+      wanted.push(...audio);
     }
+    wanted.push(...others);
   }
 
   const totalBytes = wanted.reduce((sum, e) => sum + e.compSize, 0);
