@@ -619,7 +619,9 @@ python algorithms/voiceprint_protection/scripts/prepare_data.py
 ### 3i.5 ★ P3 的实测结果（绝对 WER）
 
 ```
-python algorithms/voiceprint_protection/evaluate.py --mode none --split test        --limit-per-speaker 5 --wer --whisper-model <模型>        --transcript-dir <数据根>/raw/txt
+python algorithms/voiceprint_protection/evaluate.py --mode none --split test \
+       --limit-per-speaker 5 --wer --whisper-model <模型> \
+       --transcript-dir <数据根>/raw/txt
 ```
 
 | 变体 | 样本 | Sim_prot ↑ | Sim_clone ↓ | DSR(tau=0.3) | DSR(tau=0.4) | DSR(tau=0.5) | WER(保护后) ↓ | WER(原音·ASR 下限) |
@@ -627,6 +629,24 @@ python algorithms/voiceprint_protection/evaluate.py --mode none --split test    
 | **无防御**（mode=none） | 100 | 0.8043 | 0.7080 | 0.00% | 0.00% | 0.00% | 5.81% | 3.30% |
 | 高斯噪声扰动（mode=random） | 100 | 0.8053 | 0.6995 | 0.00% | 0.00% | 0.00% | — | — |
 | **无防御 · 论文同款 Whisper**（`large-v3`） | — | — | — | — | — | — | — | — |
+
+> 高斯噪声那一行**没算 WER**（`mode=random` 那一跑没带 `--wer`）—— 它要回答的是
+> 「随机扰动能不能骗过克隆」，WER 对它意义不大；无防御那两行才是 WER 的正主。
+
+**和 §3c 的旧数字对一下**（§3c 是 2026-11-18 用**旧代码**、n=40 测的）：
+
+| | Sim_prot | Sim_clone | DSR(0.3/0.4/0.5) |
+|---|---|---|---|
+| §3c 无防御（n=40，旧代码） | 0.8089 | 0.6967 | 0% / 0% / 0% |
+| **§3i.5 无防御（n=100，v0.5 新代码）** | **0.8043** | **0.7080** | **0% / 0% / 0%** |
+| §3c 高斯噪声（n=40） | 0.8171 | 0.6994 | 0% / 0% / 2.5% |
+| **§3i.5 高斯噪声（n=100）** | **0.8053** | **0.6995** | **0% / 0% / 0%** |
+
+→ 结论一致，而且更稳：**换 mel 预设（v0.5）没有把基线带偏**；
+**高斯噪声几乎与无防御无法区分**（Sim_clone 0.6995 vs 0.7080，DSR 全 0），
+这正是论文 Table 1 里「Gaussian Noise」那一行给我们的启示 —— 随机方向的扰动
+在 256 维球面上几乎不改变「克隆音像不像本人」。论文那一行能拿到
+Sim_clone 0.35 / DSR 32~45%，是因为它扰动的是**声纹空间**而不是重建出来的音色。
 
 **怎么读这两个 WER**：
 - 「WER(原音·ASR 下限)」= 原始录音被 Whisper 转写的错误率。**这是地板** ——
@@ -662,6 +682,22 @@ python algorithms/voiceprint_protection/evaluate.py --mode none --split test    
 **耗时**：保护链要在 CPU 上跑两遍克隆（保护后 + 未防御），**27 s/条**（实测 2,720 s / 100 条）；
 完整测试集 2,000 条 ≈ **15 小时**，本机跑不完 —— 所以上表是 **20 个测试说话人 x 5 句 = 100 条**
 的分层抽样，**样本量写在表里，不能当全集数字用**。
+
+**★ 为什么 DSR 全是 0%（连高斯噪声也救不回来）—— 这是路线的天花板，不是实现 bug**
+
+DSR 的定义是「攻击者克隆出来的**声音**有多不像本人」。在 L1 路线里，攻击者的克隆是
+`clone(参考文本, h_stolen)`，其中 `h_stolen = E_spk(保护后语音)`。
+而保护后语音本身又是 `clone(原句, h_adv)` 生成的 —— **保护前后都是同一个合成器念的**，
+音色天然就贴着原说话人。所以不管 `h_adv` 怎么扰，
+`E_spk(克隆音)` 都落不到离原说话人足够远的地方 ⇒ DSR = 0%。
+
+论文之所以能把 Sim_clone 压到 0.13、DSR 拉到 79.8~87.2%，是因为它走的是
+`x_adv = D(c, h_adv)`：**内容码 c 保住「说了什么」**，解码器只换音色，
+攻击者的克隆用的是**被污染的声纹**，和原说话人拉开了距离。
+→ **这与 §3c 的 Sim_prot ~0.80 天花板、WER 的成分差异，是同一个结论的三种表现。**
+
+---
+
 ## 4. 待补充（未做的不要填数字）
 
 - [ ] **M1 验收**：成员 A 的 `infer.py` 就位后跑 `scripts/smoke_test.py`，
