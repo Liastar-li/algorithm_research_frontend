@@ -134,6 +134,10 @@ fetch_weights() {
   # 云机带宽通常比家里好；缺了也不影响训练，只是算不了 WER。
   local whisper_model="${VPP_WHISPER_MODEL:-large-v3}"
   echo "  下载 Whisper：$whisper_model"
+  # ⚠️ `large-v3` 的 model.bin 有 3.09 GB，从国内单连接只有 ~350 KB/s（要 2.4 小时），
+  #    而且连接会被中途 reset。嫌慢就先用 `scripts/parallel_download.py` 把
+  #    model.bin 并发拉下来，再把模型目录整个传进云机。
+  #    参考（本机实测，2026-11-20）：large-v3 用 24 路并发，约 20 分钟下完。
   if "$PY" -c "from faster_whisper import WhisperModel; WhisperModel('$whisper_model', device='cpu', compute_type='int8')"; then
     echo "  [OK] Whisper 就位"
   else
