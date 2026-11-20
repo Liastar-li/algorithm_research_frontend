@@ -307,11 +307,12 @@ mu-law 采样），与"默认 vs 快速"的差异 **0.09279 同量级** → 差�
 | 5 | **梯度能回到 h_adv** | OK |
 | 6 | **content 参数真的被用上**（换 content 后之差 > 0） | **0.005156**（修 bug 前是 0） |
 | 7 | `decode()` 与官方 `Generator.forward(x, c_org, c_trg)` **逐值一致** | 最大差 **2.38e-06** |
+| 8 | `decode()` 在 `T` 不是 freq 整数倍 时 仍返回同样帧数 (§3g.2 / §4.5.3d) | 90 -> 90 |
 
 > 第 7 条最硬：它把 `decode()` 的语义**钉死**在官方 AutoVC 上，
 > 以后谁改 `decode()` 改出偏差，这一条立刻会红。
 
-`verify_gradients.py` 现在 **19 项全通过**（原 12 项 + 新 7 项）。
+`verify_gradients.py` 现在 **20 项全通过**（原 12 项 + 新 7 项）。
 
 ### 3f.3 ★ B 顺手修掉的三个自己的坑（都在共同区）
 
@@ -328,7 +329,7 @@ mu-law 采样），与"默认 vs 快速"的差异 **0.09279 同量级** → 差�
 | `scripts/test_audio_utils.py` | ✅ 通过 |
 | `stage2/verify_mel.py` | ✅ 通过（mel 误差 2.3e-05，嵌入余弦 0.99999481） |
 | `stage2/verify_psychoacoustics.py` | ✅ **20/20** |
-| `stage2/verify_gradients.py` | ✅ **19/19**（含新增 7 项） |
+| `stage2/verify_gradients.py` | ✅ **20/20**（含新增 7 项） |
 | `scripts/verify_rtc_mel.py` | ✅ 通过（与上游 WaveRNN 兼容，最佳 scale=4） |
 | `scripts/verify_hifigan.py` | ✅ 通过（余弦 **0.9745**、梯度可回传 absmax 0.8925） |
 | `scripts/test_stage1.py` | ✅ 通过 |
@@ -348,6 +349,96 @@ mu-law 采样），与"默认 vs 快速"的差异 **0.09279 同量级** → 差�
 ```bash
 python algorithms/voiceprint_protection/scripts/split_speakers.py --check <数据根>/split_speakers.json
 ```
+
+
+## 3g. ★★ 2026-11-20：Stage 1/2 在**真数据**上跑通，并抓到一个致命 bug（成员 B）
+
+> 这一节记的是"把两个模块接起来"才暴露出来的问题 ——
+> **单独测每个模块都是绿的，接起来就崩**。这类 bug 只有真跑才能发现。
+
+### 3g.1 做了什么
+
+A 的 Stage 1 代码之前只在**假数据**上验过（`scripts/test_stage1.py` 19 项），
+Stage 2 也只在 `--stub` 上跑过（替身 Stage 1 + 替身声码器）。
+这一轮把它们接到**真 VCTK + 真 HiFi-GAN + 真 GE2E** 上跑。
+
+| # | 跑的东西 | 结果 |
+|---|---|---|
+| 1 | `stage1/train.py --stage model --iterations 3 --smoke`（真 VCTK） | ✅ 通。模型 28,422,464 参数 / GE2E fine_tune=True / **模型侧 mel = hifigan16k**（A 的 v0.5 生效）/ loss 2.4522 → 2.3852 → 2.3757 递减 / **14 s/step**（CPU, batch 4） |
+| 2 | `stage2/train.py --stub --vocoder hifigan --steps 6`（真数据 + 真声码器） | ✅ 通。数据 8004 条 / 80 说话人；L_de 0.44~0.50、L_mask 0.29~1.18 dB、L_mel 0.11~0.13、gan ~1.0 全部有限且在动；**45.5 s/step**（CPU, batch 8） |
+| 3 | `stage2/train.py --vocoder hifigan --stage1-checkpoint <真 checkpoint>` | ❌ **崩了** —— 见 3g.2 |
+
+> 为此先把 `stage2/train.py` 的 `--stub` 与 `--vocoder` **解耦**：
+> 原来 `--stub` 会强制使用替身声码器，**真实声码器根本没机会上场**，
+> 于是"真声码器能不能跑通 Stage 2"这件事一直没人验过。
+> 解耦后 `--stub --vocoder hifigan` = 替身 Stage 1 + 真声码器（最有用的冒烟组合）。
+
+### 3g.2 ★★ 抓到的 bug：接上真实 Stage 1 就崩（帧数不变式被打破）
+
+```
+RuntimeError: x 与 x_adv 的帧数必须相等（契约 §2 的形状不变量），实际 188 vs 192
+```
+
+**根因**（两个地方各有一半责任）：
+
+| # | 位置 | 问题 |
+|---|---|---|
+| 1 | `stage2/models.py::TorchAutoVCStage1.decode()` | AutoVC 的解码器要求 `T` 是 `freq` 的整数倍，**内部会 pad**（188 → 192），但**输出没裁回来** ⇒ 解码结果比输入多 4 帧 |
+| 2 | `stage2/dataset.py::VCTKManifest` | Stage 1 的数据集**保证**帧数是 `freq` 的整数倍（契约 §7.1b），**Stage 2 的数据集没有** ⇒ 裁出来的片段帧数是任意的 |
+
+**为什么之前没发现**：
+- `verify_gradients.py` 用的是 `StubStage1`，它的 `decode()` 用线性插值补齐长度，**永远等长**；
+- `stage2/train.py --stub` 走的是同一条路；
+- ⇒ **只要不把真实 Stage 1 接进来，就碰不到**。
+
+**修法**（两处都改，根因 + 防御）：
+
+- `decode()` 记下**原始**帧数，输出裁回该长度 ⇒ "输出与输入等长"这个不变式
+  **由构造保证**，不再依赖调用方喂进来的 `T` 恰好是 32 的倍数；
+- `stage2/dataset.py` 按 Stage 1 的同一套约定裁
+  （`frames = int(max_seconds*sr/hop)` 向下取整到 32 的倍数，`N = (frames-1)*hop`），
+  且长度**恒定**（不够就补零）⇒ batch 内帧数一致。
+
+**修完**：
+
+```
+stage2/train.py --vocoder hifigan --stage1-checkpoint <真 checkpoint> --steps 3
+   0  total 6.4975  gan 0.9965  de 0.4468  per 0.2178  mel 0.1636  mask 0.5416  sim_clone 0.4526   [41s]
+   1  total 6.4733  gan 1.0224  de 0.4243  per 0.2220  mel 0.1587  mask 0.6329  sim_clone 0.4272   [70s]
+   2  total 7.1484  gan 1.0010  de 0.4528  per 0.2589  mel 0.1535  mask 1.0540  sim_clone 0.4562   [102s]
+```
+
+⇒ **Stage 2 现在能接真实 Stage 1 checkpoint 跑了**（30~35 s/step, CPU, batch 8）。
+并且验证了 A 说的「我们的 checkpoint 键名与官方 AutoVC 的 `Generator` 完全一致」——
+`TorchAutoVCStage1` 直接 `load_state_dict` 成功（28,422,464 参数全对上，**没报错**）。
+
+> ★ 已加成会失败的断言：`stage2/verify_gradients.py`【6】段 (e) 项 ——
+> 用 `T = 90`（不是 32 的倍数）喂 `decode()`，断言输出帧数仍是 90。
+> 现在共 **20 项**全通过。
+
+### 3g.3 ★ 另一个坑：3 步的冒烟 checkpoint 会被当成正式权重
+
+`stage1/train.py` 训完会把模型存成 `weights/stage1_model.pt`，
+而 `stage2/models.py::_guess_checkpoint()` 的候选列表里 **`stage1_model.pt` 排第一** ⇒
+一个只训了 3 步的**垃圾权重**会被 Stage 2 静默捡去用，**而且不报错**。
+
+处置：把这次冒烟产出的文件改名成 `stage1_smoke3steps_NOT_TRAINED.pt`，
+让 `_guess_checkpoint()` 找不到它。（正式训练出来的 checkpoint 仍用 `stage1_model.pt`。）
+
+> 💡 **建议**（给 A）：正式训练前把 `_guess_checkpoint()` 改成
+> "只认显式传入的路径"，或者在文件名里带 step 数 —— 否则这个坑迟早再踩一次。
+
+### 3g.4 云机预算的实测依据
+
+| 场景 | 设备 | 每步耗时 | batch |
+|---|---|---|---|
+| Stage 1 | CPU（本机） | 14 s | 4 |
+| Stage 2（替身 Stage 1 + 真 HiFi-GAN） | CPU（本机） | 45.5 s | 8 |
+| Stage 2（真 Stage 1 + 真 HiFi-GAN） | CPU（本机） | 30~35 s | 8 |
+| Stage 1 | RTX 4060 Laptop（A 实测，见 TASKS §0.10.4b） | **0.3 s** | 16 |
+
+⇒ 按 A 的 4060 数据推算，Stage 2 的 200k 步约 **17 小时**，一次性开一台卡就够 ——
+这正好是任务板 §8「只在真正要训练时才开机」那条规则的依据。
 
 
 ## 4. 待补充（未做的不要填数字）
@@ -393,7 +484,7 @@ python algorithms/voiceprint_protection/scripts/split_speakers.py --check <数�
 |---|---|
 | `stage2/` 12 个模块 | ✅ 代码写完（generator / discriminator / psychoacoustics / losses / models / pipeline / dataset / train + 3 个 verify 脚本） |
 | 训练机制跑通 | ✅ `--stub --steps 5` 正常训练（8004 条 / 80 说话人；L_de / L_per / L_mask / L_GAN 全有值） |
-| **梯度通路自检** | ✅ **19/19 通过**（`stage2/verify_gradients.py`；含成员 A 修的两个 bug 的 7 项回归断言） |
+| **梯度通路自检** | ✅ **20/20 通过**（`stage2/verify_gradients.py`；含成员 A 修的两个 bug 的 7 项回归断言） |
 | torch GE2E vs 上游数值对照 | ✅ mel 最大绝对误差 **2.3e-05**；嵌入余弦 **0.99999481**（`stage2/verify_mel.py`） |
 | **心理声学掩蔽自检** | ✅ **20/20 通过**（`stage2/verify_psychoacoustics.py`） |
 | 正式训练 | ⛔ **缺可求导声码器 + 缺 Stage 1 checkpoint** → 见 [notes/stage2_blockers.md](notes/stage2_blockers.md) |

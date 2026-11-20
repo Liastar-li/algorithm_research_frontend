@@ -320,18 +320,71 @@ B 已把这段补成**会失败的断言**（`stage2/verify_gradients.py` 的【
 | 5 | **梯度能回到 h_adv** | OK |
 | 6 | **content 参数真的被用上**：换 content 后输出之差 > 0 | **0.005156**（修 bug 前是 0） |
 | 7 | `decode()` 与官方 `Generator.forward(x, c_org, c_trg)` **逐值一致** | 最大差 **2.38e-06** |
+| 8 | `decode()` 在 `T` 不是 freq 整数倍 时 仍返回同样帧数 (§3g.2 / §4.5.3d) | 90 -> 90 |
 
 > 第 7 条是最硬的一条：它把 `decode()` 的语义**钉死**在官方 AutoVC 上 ——
 > 以后谁改 `decode()` 改出偏差，这一条立刻会红。
 
 **跑法**：`python algorithms/voiceprint_protection/stage2/verify_gradients.py`
-（现在共 **19 项**断言全通过）。
+（现在共 **20 项**断言全通过）。
 
 > ★ 顺带修掉的三个 B 自己的坑（都在共同区）：
 > (1) `paths.models_dir()` 指向不存在的目录 => **权重找不到、整条链起不来**；
 > (2) `Stage2Pipeline.vocode()` 把 mel 预设写死；
 > (3) `audio_utils.MelSpec` 写死 `autovc_mel()`。
 > 详见 §9 成员 B 签字栏。
+
+#### 4.5.3d ★★ 接上真实 Stage 1 就崩：帧数不变式（成员 B，2026-11-20）
+
+> **这个 bug 只有把两个模块接起来才暴露** —— 单独测每个模块都是绿的。
+
+**症状**（Stage 2 接真实 Stage 1 checkpoint 时）：
+
+```
+RuntimeError: x 与 x_adv 的帧数必须相等（契约 §2 的形状不变量），实际 188 vs 192
+```
+
+**根因**（两处各一半责任）：
+
+| # | 位置 | 问题 |
+|---|---|---|
+| 1 | `stage2/models.py::TorchAutoVCStage1.decode()` | AutoVC 的解码器要求 `T` 是 `freq` 的整数倍，**内部会 pad**（188 → 192），但**输出没裁回来** |
+| 2 | `stage2/dataset.py::VCTKManifest` | §7.1b 的「帧数必须是 freq 整数倍」Stage 1 那边保证了，**Stage 2 这边没有** |
+
+**为什么之前没发现**：`verify_gradients.py` 与 `stage2/train.py --stub` 用的都是
+`StubStage1`，它的 `decode()` 用线性插值补齐长度，**永远等长** ——
+只要不把真实 Stage 1 接进来，就碰不到。
+
+**修法**（两处都改，根因 + 防御）：
+
+- `decode()` 记下**原始**帧数，输出裁回该长度 ⇒ "输出与输入等长"这个不变式
+  **由构造保证**，不再依赖调用方喂进来的 `T` 恰好是 32 的倍数；
+- `stage2/dataset.py` 按 Stage 1 的同一套约定裁
+  （`frames = int(max_seconds*sr/hop)` 向下取整到 32 的倍数，`N = (frames-1)*hop`），
+  且长度**恒定**（不够就补零）⇒ batch 内帧数一致。
+
+**修完的实测**（真 Stage 1 checkpoint + 真 HiFi-GAN + 真 VCTK）：
+
+```
+   0  total 6.4975  gan 0.9965  de 0.4468  per 0.2178  mel 0.1636  mask 0.5416  sim_clone 0.4526   [41s]
+   1  total 6.4733  gan 1.0224  de 0.4243  per 0.2220  mel 0.1587  mask 0.6329  sim_clone 0.4272   [70s]
+   2  total 7.1484  gan 1.0010  de 0.4528  per 0.2589  mel 0.1535  mask 1.0540  sim_clone 0.4562   [102s]
+```
+
+⇒ **Stage 2 能接真实 Stage 1 checkpoint 跑了**（30~35 s/step, CPU, batch 8）；
+同时验证了「A 的 checkpoint 键名与官方 AutoVC 的 `Generator` 完全一致」——
+`TorchAutoVCStage1` 直接 `load_state_dict` 成功（28,422,464 参数全对上，**没报错**）。
+
+> ★ 已加成会失败的断言：`stage2/verify_gradients.py`【6】段 **(e)** 项 ——
+> 用 `T = 90`（不是 32 的倍数）喂 `decode()`，断言输出帧数仍是 90。
+> `verify_gradients.py` 现在共 **20 项**全通过。
+
+> ★ 顺带记一个坑（给 A）：`stage1/train.py` 训完会把模型存成 `weights/stage1_model.pt`，
+> 而 `stage2/models.py::_guess_checkpoint()` 的候选列表里 **`stage1_model.pt` 排第一**
+> ⇒ 一个只训了几步的**垃圾权重**会被 Stage 2 **静默捡去用，而且不报错**。
+> B 已把冒烟产物改名成 `stage1_smoke3steps_NOT_TRAINED.pt`；
+> **建议把 `_guess_checkpoint()` 改成只认显式传入的路径**。
+
 
 #### 4.5.4 损失函数签名（论文式 7–13）
 ```python

@@ -47,7 +47,7 @@
 | Stage 1 代码 | ✅ 已实现，19 项自检全过（`scripts/test_stage1.py`） |
 | HiFi-GAN 16 kHz 声码器 | ✅ **权重就位**（HF `speechbrain/tts-hifigan-libritts-16kHz`，234/234 键 strict 通过，可求导） |
 | 接口契约 | ✅ **v0.5 双方已签字**（`docs/interface-contract.md` §9） |
-| Stage 2 回归 | ✅ `verify_gradients` **19/19**（含成员 A 修的两个 bug 的回归断言） |
+| Stage 2 回归 | ✅ `verify_gradients` **20/20**（含成员 A 修的两个 bug 的回归断言） |
 | **训练链路** | ✅ **2026-11-18 审计后全部打通**：AMP / 梯度累积 / 断点续训 / 验证回路 / 两种启动方式 / 帧数约定 —— 详见 **§0.10** |
 | **当前阶段** | **W2 收尾 → W3（平台打通）**；W4 的 Stage 1 训练**代码已就绪，等数据** |
 | **下一个里程碑** | **M2 平台打通**（W3：`service.py` + 方法 JSON + 平台端到端） |
@@ -522,7 +522,7 @@ content 被真正使用: ✅                       ✅ 修 bug 前是 0
 | # | 事项 | 结论 | 产出 |
 |---|---|---|---|
 | 1 | 复核 A 的三处改动 | ✅ **全部同意**，详见 `docs/experiments.md` §3f.1 | 契约 §9 已签字（v0.5） |
-| 2 | ★ 把 A 修的两个 bug **加成会失败的断言** | ✅ `stage2/verify_gradients.py`【6】段 7 项（**不依赖训练好的权重**，`random_init=True` 即可验） | 现在共 **19 项**全通过 |
+| 2 | ★ 把 A 修的两个 bug **加成会失败的断言** | ✅ `stage2/verify_gradients.py`【6】段 7 项（**不依赖训练好的权重**，`random_init=True` 即可验） | 现在共 **20 项**全通过 |
 | 3 | ★ 修 `paths.models_dir()` 指向不存在目录的 bug | ✅ 这是一个**真阻塞**：GE2E 权重找不到 ⇒ **Stage 1/2 训练 + L1 推理链 + 平台服务全部起不来** | `paths.models_dirs()` 候选目录列表 |
 | 4 | 修 `Stage2Pipeline.vocode()` 写死 mel 预设 | ✅ 换预设就会送出错的 mel（噪音且不报错） | 跟着 `config.STAGE1['mel_preset']` 走 |
 | 5 | 修 `audio_utils.MelSpec` 写死 `autovc_mel()` | ✅ `MelSpec('hifigan16k')` 也返回 AutoVC 口径 | 改走 `model_mel(wav, self.name)` |
@@ -533,6 +533,27 @@ content 被真正使用: ✅                       ✅ 修 bug 前是 0
 
 > ★ **本机环境提醒**：`vpp` 环境是 **torch 2.4.1+cpu**（无 GPU），
 > 上面所有自检都在 CPU 上跑（够用）；正式训练要另开 CUDA 环境或云机。
+
+
+### 0.12 ★ 本轮进展（成员 B · 2026-11-20 晚：Stage 1/2 在真数据上跑通 + 抓到一个致命 bug）
+
+**背景**：A 的 Stage 1 之前只在**假数据**上验过（`test_stage1.py` 19 项），
+Stage 2 也只在 `--stub`（替身 Stage 1 + 替身声码器）上跑过。
+这一轮把它们接到**真 VCTK + 真 HiFi-GAN + 真 GE2E** 上跑 —— 结果**抓到一个接上就崩的 bug**。
+
+| # | 事项 | 结论 |
+|---|---|---|
+| 1 | ★ 把 `stage2/train.py` 的 `--stub` 与 `--vocoder` **解耦** | 原来 `--stub` 强制用替身声码器 ⇒ **真实声码器从来没在 Stage 2 里上过场**，一直没人验过。解耦后 `--stub --vocoder hifigan` = 替身 Stage 1 + 真声码器 |
+| 2 | Stage 1 训练循环在**真 VCTK** 上跑通 | ✅ 3 步，loss 递减，模型侧 mel = `hifigan16k`（A 的 v0.5 生效），**14 s/step**（CPU, batch 4） |
+| 3 | Stage 2 在**真数据 + 真声码器** 上跑通 | ✅ L_de / L_mask / L_mel / gan 全部有限且在动，**45.5 s/step**（CPU, batch 8） |
+| 4 | ★★ Stage 2 接**真实 Stage 1 checkpoint** | ❌ **崩**：`x 与 x_adv 的帧数必须相等，实际 188 vs 192` |
+| 5 | ★ 修帧数不变式（两处） | `decode()` 输出裁回原始帧数（不变式**由构造保证**）+ `stage2/dataset.py` 按 Stage 1 的同一套约定裁（帧数是 32 的整数倍、长度恒定） |
+| 6 | ★ 修「冒烟 checkpoint 被当正式权重」的坑 | `stage1/train.py` 存出的 `stage1_model.pt` 会被 `_guess_checkpoint()` **优先捡走** ⇒ 3 步的垃圾权重会被静默使用。已改名 `stage1_smoke3steps_NOT_TRAINED.pt`；**建议 A 把 `_guess_checkpoint()` 改成只认显式路径** |
+| 7 | 加断言 | `verify_gradients.py`【6】段 (e)：`T=90`（非 32 倍数）时 `decode()` 输出仍是 90 帧 ⇒ 现在 **20 项**全通过 |
+
+> 详见 `docs/experiments.md` §3g。**云机预算的实测依据**也在那里：
+> Stage 2 用真 Stage 1 + 真 HiFi-GAN 是 **30~35 s/step**（CPU, batch 8）；
+> 按 A 的 4060 实测（0.3 s/step）推算，200k 步约 **17 小时**。
 
 
 ## 1. W2 详细分解：指南第 3 步 + 第 4 步

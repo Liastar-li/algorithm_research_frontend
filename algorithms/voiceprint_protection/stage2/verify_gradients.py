@@ -266,6 +266,19 @@ def main() -> int:
         official = stage1_real.model(test_mel, test_emb, test_emb_adv)[1].squeeze(1)
     ours = stage1_real.decode(test_mel, test_emb_adv, content=codes)
     official_difference = float((official - ours).abs().max())
+    # (e) ★ 帧数不变式：T **不是** freq 的整数倍时，decode() 也要返回同样帧数
+    #     （2026-11-20 实测踩到：Stage 2 接上**真实 Stage 1 checkpoint** 时直接崩
+    #      —— "x 与 x_adv 的帧数必须相等，实际 188 vs 192"。
+    #      原因：AutoVC 的解码器要求 T 是 freq 的整数倍（内部 pad 到 32 的倍数），
+    #      但输出没裁回来；而 Stage 2 的数据管道当时也没保证帧数是 32 的倍数。）
+    odd_mel = torch.randn(2, 90, config.FRAME_DIM)      # 90 不是 32 的倍数
+    odd_codes = stage1_real.content_code(odd_mel, test_emb)
+    odd_out = stage1_real.decode(odd_mel, test_emb_adv, content=odd_codes)
+    check(odd_out.shape[1] == odd_mel.shape[1],
+          f"decode() 在 T 不是 freq 整数倍时仍返回同样帧数"
+          f"（实际 {odd_out.shape[1]} vs {odd_mel.shape[1]}）",
+          "不相等 —— 解码器内部 pad 了但没裁回来，x 与 x_adv 的帧数会不等")
+
     check(official_difference < 1e-5,
           f"decode() 与官方 Generator.forward(x, c_org, c_trg) 逐值一致"
           f"（最大差 = {official_difference:.2e}）",

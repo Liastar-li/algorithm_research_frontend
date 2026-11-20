@@ -382,6 +382,11 @@ class TorchAutoVCStage1(nn.Module):
              论文的 "arbitrary content"（`c_arb`）没起作用，
              攻击者克隆的其实是原句内容。
         """
+        # ★ 记下**原始**帧数：AutoVC 的解码器要求 T 是 freq 的整数倍，
+        #   所以内部会 pad。但契约 §2 要求 **x_adv 与 x 帧数完全相等**，
+        #   因此最后要把多出来的帧裁掉 —— 不裁的话调用方直接报
+        #   "x 与 x_adv 的帧数必须相等"（实测 188 vs 192）。
+        target_frames = mel.shape[1]
         mel = self._pad(mel)
 
         if content is None:
@@ -404,6 +409,10 @@ class TorchAutoVCStage1(nn.Module):
         mel_outputs = self.model.decoder(decoder_input)                 # (B, T, 80)
         mel_postnet = self.model.postnet(mel_outputs.transpose(2, 1))   # (B, 80, T)
         mel_postnet = mel_outputs + mel_postnet.transpose(2, 1)         # (B, T, 80)
+        if mel_postnet.shape[1] != target_frames:
+            # 裁回原始帧数 —— 保证 "输出与输入等长" 这个不变式**由构造保证**，
+            # 而不是依赖调用方喂进来的 T 恰好是 freq 的整数倍。
+            mel_postnet = mel_postnet[:, :target_frames]
         return mel_postnet
 
     def reconstruct(self, mel: torch.Tensor, embedding: torch.Tensor) -> torch.Tensor:

@@ -102,14 +102,18 @@ def build_pipeline(args, device) -> Stage2Pipeline:
     # -- 声码器 V --------------------------------------------------------
     vocoder = None
     convention = "hifigan"
-    if args.stub:
-        vocoder = stage1.vocoder          # StubStage1 自带一个可导的替身
-        convention = "hifigan"
-        print("声码器 V：StubVocoder（随机权重，指标无意义）")
-    elif args.vocoder == "hifigan":
+    # ★ `--stub` 与 `--vocoder` 现在是**正交**的两个开关（2026-11-20，B）：
+    #   `--stub` 只决定 **Stage 1 用不用替身**；`--vocoder` 决定声码器用哪个。
+    #   为什么要拆开：`--stub --vocoder hifigan` 才是**最有用的冒烟测试** ——
+    #   Stage 1 用随机权重（指标无意义），但**数据管道 / 梯度通路 / 真实声码器 /
+    #   心理声学掩蔽全部是真的**。A 的 Stage 1 checkpoint 还没出来时，
+    #   用它就能先把整条 Stage 2 训练链跑通并测出每步耗时，不用干等。
+    if args.vocoder == "hifigan":
         vocoder = HiFiGANVocoder(device=str(device))
-        convention = "hifigan"
         print("声码器 V：HiFi-GAN（论文同款；★ 不再做 mel 口径近似换算）")
+    elif args.stub:
+        vocoder = stage1.vocoder          # StubStage1 自带一个可导的替身
+        print("声码器 V：StubVocoder（随机权重，指标无意义）")
     else:
         raise SystemExit(
             "正式训练需要一个**可求导**的声码器。\n"

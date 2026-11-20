@@ -60,6 +60,23 @@ class VCTKManifest(Dataset):
                             else config.STAGE2["max_seconds"])
         self.min_seconds = min_seconds
 
+        # ★ 帧数必须是 freq 的整数倍（契约 §7.1b）—— Stage 1 那边已经这么做了，
+        #   Stage 2 之前漏了，结果接上**真实 Stage 1 checkpoint** 时直接崩：
+        #       RuntimeError: x 与 x_adv 的帧数必须相等，实际 188 vs 192
+        #   原因：AutoVC 的解码器要求 T 是 freq 的整数倍（内部会 pad 到 32 的倍数），
+        #   而 Stage 2 裁出来的片段帧数是任意的 ⇒ 重建出来的 mel 比原 mel 长。
+        #   这里按 Stage 1 的同一套约定裁：
+        #       帧数 frames = int(max_seconds * sr / hop)，向下取整到 freq 的倍数
+        #       采样点数 N   = (frames - 1) * hop
+        #   ⇒ mel 帧数 = 1 + N // hop = frames（恰好是 freq 的整数倍）
+        preset = config.MEL_PRESETS[
+            config.STAGE1.get("mel_preset", config.DEFAULT_PRESET)]
+        self.hop = preset["hop_length"]
+        self.freq = config.CONTENT_DOWNSAMPLE
+        frames = int(self.max_seconds * self.sample_rate / self.hop)
+        self.crop_frames = max(self.freq, (frames // self.freq) * self.freq)
+        self.crop_samples = (self.crop_frames - 1) * self.hop
+
         manifest = self.data_root / f"{split}.txt"
         if not manifest.exists():
             raise FileNotFoundError(
@@ -101,23 +118,27 @@ class VCTKManifest(Dataset):
         return len(self.items)
 
     def _crop(self, wav: np.ndarray) -> np.ndarray:
-        """随机裁一段；太短就整条用。"""
-        target = int(self.max_seconds * self.sample_rate)
-        if len(wav) <= target:
-            return wav
-        start = random.randint(0, len(wav) - target)
-        return wav[start:start + target]
+        """随机裁一段，长度**恒等于** `self.crop_samples`。
+
+        ★ 长度必须恒定（不能"太短就整条用"）：
+          batch 里所有样本的帧数一致，x 与 x_adv 的形状不变式才成立；
+          而且 Stage 1 的解码器按 freq 抽样式降采样，长度不齐会直接报错。
+        """
+        if len(wav) <= self.crop_samples:
+            out = np.zeros(self.crop_samples, dtype=np.float32)
+            out[: len(wav)] = wav
+            return out
+        start = random.randint(0, len(wav) - self.crop_samples)
+        return wav[start: start + self.crop_samples]
 
     def __getitem__(self, index: int) -> tuple[torch.Tensor, int]:
         path, speaker_id = self.items[index]
         wav = audio_utils.load_audio(path, self.sample_rate)
         wav = self._crop(wav)
 
-        duration = len(wav) / self.sample_rate
-        if duration < self.min_seconds:
-            # 太短的句子：补零到 min_seconds，别让 batch 里出现空样本
-            padding = int(self.min_seconds * self.sample_rate) - len(wav)
-            wav = np.pad(wav, (0, max(padding, 0)))
+        # _crop 已经保证长度恒为 crop_samples（不够就补零），
+        # 所以这里不用再按 min_seconds 补一遍 —— 补了反而会破坏帧数不变式。
+        assert len(wav) == self.crop_samples, (len(wav), self.crop_samples)
 
         return torch.from_numpy(np.asarray(wav, dtype=np.float32)), speaker_id
 

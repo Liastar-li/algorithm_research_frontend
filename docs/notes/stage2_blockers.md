@@ -150,7 +150,7 @@ pip install Unidecode==1.3.2 inflect==5.3.0
 
 真正切断梯度的是 `torch.no_grad()` 与 `.detach()`，不是"冻结"。
 
-> 这条已经变成一条**会失败的断言**：`stage2/verify_gradients.py`（**19 项**，全通过；其中【6】段 7 项是成员 A 修的两个 bug 的回归测试）。
+> 这条已经变成一条**会失败的断言**：`stage2/verify_gradients.py`（**20 项**，全通过；其中【6】段 7 项是成员 A 修的两个 bug 的回归测试）。
 
 ### 6.2 torch 版 GE2E 与上游 numpy 版必须逐值一致
 
@@ -194,7 +194,7 @@ Stage 2 用的是自己写的 torch 版 GE2E（因为上游的 numpy 封装断�
 |---|---|
 | Stage 2 代码骨架（12 个模块） | ✅ 已写完 |
 | 训练机制跑通（`--stub`） | ✅ 已验证（5 步，L_de/per/mask/gan 全有值） |
-| 梯度通路自检 | ✅ **19/19** 通过（含成员 A 修的两个 bug 的回归断言，见契约 §4.5.3c） |
+| 梯度通路自检 | ✅ **20/20** 通过（含成员 A 修的两个 bug 的回归断言，见契约 §4.5.3c） |
 | torch GE2E 与上游数值对照 | ✅ 误差 2.3e-05，嵌入余弦 0.99999481 |
 | 心理声学掩蔽 θ_x | ✅ 已写完（MPEG-1 Model 1），自检 **20/20** 通过 |
 | 可求导声码器 | ✅ **已解决**（HiFi-GAN 16 kHz，HF `speechbrain/tts-hifigan-libritts-16kHz`，可导） |
