@@ -616,6 +616,52 @@ python algorithms/voiceprint_protection/scripts/prepare_data.py
 
 数据下载用 `scripts/download_vctk.py`（**纯标准库**，云机没装 Node 也能跑）。
 
+### 3i.5 ★ P3 的实测结果（绝对 WER）
+
+```
+python algorithms/voiceprint_protection/evaluate.py --mode none --split test        --limit-per-speaker 5 --wer --whisper-model <模型>        --transcript-dir <数据根>/raw/txt
+```
+
+| 变体 | 样本 | Sim_prot ↑ | Sim_clone ↓ | DSR(tau=0.3) | DSR(tau=0.4) | DSR(tau=0.5) | WER(保护后) ↓ | WER(原音·ASR 下限) |
+|---|---|---|---|---|---|---|---|---|
+| **无防御**（mode=none） | 100 | 0.8043 | 0.7080 | 0.00% | 0.00% | 0.00% | 5.81% | 3.30% |
+| 高斯噪声扰动（mode=random） | 100 | 0.8053 | 0.6995 | 0.00% | 0.00% | 0.00% | — | — |
+| **无防御 · 论文同款 Whisper**（`large-v3`） | — | — | — | — | — | — | — | — |
+
+**怎么读这两个 WER**：
+- 「WER(原音·ASR 下限)」= 原始录音被 Whisper 转写的错误率。**这是地板** ——
+  防御不可能比它更低，因为保护后语音是从原音派生的。
+- 「WER(保护后)」= 保护后语音的转写错误率（参考 = VCTK 自带的原始转写，**绝对 WER**）。
+- 两者之差 = **防御本身引入的转写损伤**。
+- 两个数的**中位数都是 0** —— 绝大多数句子被逐字转写对了，均值是被少数几句拉起来的。
+
+> ★★ **我们的 5.81% 和论文的 5.30% 数值上很接近，但成分完全不同，别当成「复现成功」**：
+>
+> | | ASR 下限（原始录音） | 防御引入的损伤 | 合计 |
+> |---|---|---|---|
+> | **我们（L1 路线）** | 3.30% | **2.51 个百分点** | 5.81% |
+> | 论文（Stage 1 路线） | 论文未单列（更低） | 5.30% 减去它自己的下限 | 5.30% |
+>
+> 我们的损伤**主要不是扰动带来的** —— L1 路线没有 Stage 1，
+> 保护后语音是 `clone(原句文本, h_adv)`，**整句重新合成**了一遍，
+> 所以这 2.51 个百分点里混着**「TTS 往返」的损失**（合成器念一遍 + ASR 再听一遍）。
+> 论文的 `x_adv = D(c, h_adv)` 是用 Stage 1 的解码器**重建原句**（只换音色），内容几乎不变，
+> 那一行里几乎没有「往返」这一项。
+>
+> **这正是 §3c 说的那条结构性问题**：Sim_prot 的 ~0.80 天花板、WER 的成分差异，
+> 都指向同一个结论 —— **要拿到论文那组数字，Stage 1 是绕不过去的**。
+
+> ★ **模型说明**：论文用 Whisper-large（= faster-whisper 的 `large-v3`）。
+> 本机到 HuggingFace 的 CDN 只有 ~350 KB/s，`large-v3` 的 `model.bin` 有 3.09 GB
+> （单连接 2.4 小时），所以先用 **`small`**（484 MB）跑通链路，
+> 再用 `scripts/parallel_download.py` 并发把 `large-v3` 拉下来跑同一组数字。
+> **前两行用的是 `small`（偏离论文设定），最后一行是论文同款的 `large-v3` —— 报告里要写明这一点。**
+> 云机上重跑：`bash scripts/cloud_train_stage1.sh --setup` 会把 Whisper 一起拉下来
+> （或 `VPP_WHISPER_MODEL=large-v3`），然后 `--whisper-model large-v3` 即可。
+
+**耗时**：保护链要在 CPU 上跑两遍克隆（保护后 + 未防御），**27 s/条**（实测 2,720 s / 100 条）；
+完整测试集 2,000 条 ≈ **15 小时**，本机跑不完 —— 所以上表是 **20 个测试说话人 x 5 句 = 100 条**
+的分层抽样，**样本量写在表里，不能当全集数字用**。
 ## 4. 待补充（未做的不要填数字）
 
 - [ ] **M1 验收**：成员 A 的 `infer.py` 就位后跑 `scripts/smoke_test.py`，
