@@ -579,7 +579,7 @@ Stage 2 也只在 `--stub`（替身 Stage 1 + 替身声码器）上跑过。
 > ★ **给成员 A 的数据复现配方**（源站已恢复，可直接照做）：
 >
 > ```bash
-> python scripts/download_vctk.py --out <数据根>/raw >        --include wav48_silence_trimmed --include txt --per-speaker 100
+> python scripts/download_vctk.py --out <数据根>/raw --include wav48_silence_trimmed --include txt --per-speaker 100
 > python algorithms/voiceprint_protection/scripts/prepare_data.py
 > ```
 >

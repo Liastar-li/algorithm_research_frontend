@@ -592,7 +592,7 @@ diff: []
 ⇒ **A 只要照下面的命令下，数据与 B 逐条一致**（源站已恢复，2026-11-20 夜实测 HTTP 200）：
 
 ```bash
-python scripts/download_vctk.py --out <数据根>/raw        --include wav48_silence_trimmed --include txt --per-speaker 100
+python scripts/download_vctk.py --out <数据根>/raw --include wav48_silence_trimmed --include txt --per-speaker 100
 python algorithms/voiceprint_protection/scripts/prepare_data.py
 ```
 
