@@ -179,6 +179,57 @@ node scripts/download_vctk.mjs --out D:\vpp\data\raw --per-speaker 0    # 全要
 
 > ⚠️ 节点内网/直连慢时，把 `--concurrency` 调到 64 或 96 还能再快一些。
 
+#### 2.2b ★★★ 别把 `txt` 和 `wav48_silence_trimmed` 放在**同一条命令**里（成员 A 实测，2026-11-20）
+
+> 这个坑会让**两个人下到不同的数据**，而清单对不上、指标没法比 —— 很难查。
+
+**原因**：下载脚本的"每说话人取 N 条"是按**说话人名**分桶的，
+而 `wav48_silence_trimmed/p225/*.flac` 与 `txt/p225/*.txt`
+**同名进同一个桶**。于是 N 个名额被两个目录分掉了：
+
+```
+实测（--per-speaker 100 --include wav48_silence_trimmed --include txt）：
+    每个说话人 = 66 个 flac + 34 个 txt = 100    ← A 当时的下载
+B 的下载（没加 --include txt）：
+    每个说话人 = 100 个 flac                     ← 不一样！
+```
+
+⇒ **两人的清单内容不同**（虽然划分相同），实验作废。
+
+**正确做法**：**分两条命令跑**
+
+```cmd
+:: ① 音频（必须与对方一字不差 —— 这是清单一致的前提）
+node scripts/download_vctk.mjs --out D:\vpp\data\raw --per-speaker 100 --concurrency 16 --include wav48_silence_trimmed
+
+:: ② 转写文本（只用于算绝对 WER，2 MB，不影响音频清单）
+::    ★ 一定要**单独一条命令**：否则它会占掉音频的名额
+node scripts/download_vctk.mjs --out D:\vpp\data\raw --per-speaker 0 --include txt
+```
+
+> ★ **`--include txt` 单独跑时 `--per-speaker 0` = 全要**（txt 总共才 2 MB）。
+
+#### 2.2c ★★ 并发 48 会被服务器限流（成员 A 实测，2026-11-20）
+
+```
+48 并发跑到 ~90% 时开始大量 HTTP 503（650 个文件失败）
+```
+
+⇒ **用 `--concurrency 16`**（实测 0 次失败，速度 ~750 KiB/s，与 48 并发同速）。
+断了直接**重跑同一条命令**即可 —— 脚本会跳过已落盘且大小正确的文件。
+
+#### 2.2d ⚠️ 关于 mic1 / mic2（两人数据一致，**不要改**）
+
+`wav48_silence_trimmed/<spk>/` 里每句有**两个**录音：
+`pXXX_001_mic1.flac`（领夹麦）与 `pXXX_001_mic2.flac`（头戴麦），
+**取样是按文件条目做的**，所以下到的 100 个文件里 mic1/mic2 是混着的。
+
+- 这**不是 bug**，而且**两人完全一致**（同样的脚本 + 同样的参数 ⇒ 同样的文件集合）；
+- VCTK 的 `wav/`（每句一个、已统一处理过的版本）**不在这个 zip 里**（包内只有
+  `wav48_silence_trimmed/` + `txt/`）；
+- ⇒ **要改的话两个人必须同时改**，否则清单就对不上了。
+  记录在此，**本轮不做改动**。
+
 ### 2.3 备选：整包下载（要全部 10.94 GiB 才用这个）
 
 ```bash
