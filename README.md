@@ -62,12 +62,12 @@
 |---|---|---|
 | GE2E 说话人编码器封装（波形 → 256 维嵌入，L2 归一化） | ✅ 已完成 | [`bridge_speaker.py`](algorithms/voiceprint_protection/bridge_speaker.py)；实测 `‖h‖ = 1.000000` |
 | VCTK 数据管道（转 16 kHz + 80/10/20 划分 + 三条硬要求自检） | ✅ 已完成 | [`scripts/prepare_data.py`](algorithms/voiceprint_protection/scripts/prepare_data.py) |
-| L1 推理链（体检 → 打疫苗 → 骗子行骗） | ✅ 已完成 | [`infer.py`](algorithms/voiceprint_protection/infer.py)；⏳ 本机复现差 `synthesizer.pt` + `vocoder.pt` |
-| 平台算法服务（FastAPI + CORS + 统一错误格式） | ✅ 已完成 | [`service.py`](algorithms/voiceprint_protection/service.py)；契约自测 **40/40** |
+| L1 推理链（体检 → 打疫苗 → 骗子行骗） | ✅ 已完成 | [`infer.py`](algorithms/voiceprint_protection/infer.py)；**已在本机用真权重跑通**（`encoder.pt` / `synthesizer.pt` / `vocoder.pt` 全部就位） |
+| 平台算法服务（FastAPI + CORS + 统一错误格式） | ✅ 已完成 | [`service.py`](algorithms/voiceprint_protection/service.py)；契约自测 **41/41**，另有可重复执行的端到端自检 `scripts/test_platform_e2e.py` |
 | 平台方法配置 + 索引登记 | ✅ 已完成 | [`public/methods/group_n005_voiceprint_protection.json`](public/methods/group_n005_voiceprint_protection.json) |
 | Stage 1（解耦-重建网络训练） | ⬜ 未完成 | 成员 A 主责；架构参考 AutoVC |
 | Stage 2（防御性扰动生成，**代码骨架已完成**） | 🟡 部分完成 | [`stage2/`](algorithms/voiceprint_protection/stage2/)；梯度通路自检 **20/20**，正式训练只缺 Stage 1 权重（★ 可求导声码器已就位：HiFi-GAN 16 kHz） |
-| 评测（Sim_prot / Sim_clone / DSR / WER） | 🟡 部分完成 | [`evaluate.py`](algorithms/voiceprint_protection/evaluate.py)；脚本已写好，⏳ 等权重 |
+| 评测（Sim_prot / Sim_clone / DSR / WER） | 🟡 部分完成 | [`evaluate.py`](algorithms/voiceprint_protection/evaluate.py)；**基线与绝对 WER 已出**（见 [`docs/experiments.md`](docs/experiments.md) §3i）—— ⏳ 但「Ours」那一行仍缺训练好的 Stage 2 |
 | 心理声学掩蔽 θ_x（MPEG-1 模型） | ✅ 已完成 | [`stage2/psychoacoustics.py`](algorithms/voiceprint_protection/stage2/psychoacoustics.py) |
 
 ### 3.2 相对 baseline 做了什么
@@ -219,7 +219,7 @@ python algorithms/voiceprint_protection/scripts/smoke_test.py
 | 测试 | 结果 |
 |---|---|
 | `npm test` / `npm run build` | ✅ 6/6 通过 / 构建通过 |
-| `scripts/test_service.py --mock` | ✅ **40/40** 通过（协议全项，不需要权重） |
+| `scripts/test_service.py --mock` | ✅ **41/41** 通过（协议全项，不需要权重） |
 | `scripts/test_service.py`（真权重） | ✅ **41/41** 通过（含真实推理 + 文件下载 + 空文本兜底） |
 | `stage2/verify_gradients.py` | ✅ **20/20** 通过（梯度确实穿过三层冻结组件回到 G；含 Stage 1 ↔ Stage 2 接口的 7 项回归断言） |
 | `stage2/verify_mel.py` | ✅ **4/4** 通过（torch 版 GE2E 与上游 mel 误差 2.3e-05，嵌入余弦 0.99999481） |
