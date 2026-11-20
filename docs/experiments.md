@@ -512,6 +512,106 @@ python algorithms/voiceprint_protection/scripts/test_platform_e2e.py
 | 方法 JSON 的 `adapter.endpoint` | `http://127.0.0.1:8000/process` —— 与 `service.py` 实际路由一致 ✓ |
 
 
+## 3i. ★★ 2026-11-20 夜：P2 基线复测 / P3 绝对 WER / P5 云机脚本（成员 B）
+
+### 3i.1 P2：基线复测（用成员 A 的 v0.5 新代码）
+
+§3c 的基线是 2026-11-18 测的，用的是**旧** mel 预设（`autovc`）。
+A 的 v0.5 把模型侧 mel 换成了 `hifigan16k`，基线得重测一遍，
+确认换预设没把基线带偏。
+
+```
+python algorithms/voiceprint_protection/evaluate.py --mode none --split test --limit-per-speaker 1
+```
+
+| 变体 | Sim_prot ↑ | Sim_clone ↓ | DSR(tau=0.3) | DSR(tau=0.4) | DSR(tau=0.5) |
+|---|---|---|---|---|---|
+| **无防御（v0.5 复测，n=20）** | **0.7994** | **0.6659** | **0.0%** | **0.0%** | **5.0%** |
+| 无防御（§3c，旧代码，n=40） | 0.8089 | 0.6967 | 0.0% | 0.0% | 0.0% |
+| 论文 · Original（无防御） | 0.91 | 0.91 | 0.0% | 0.0% | 0.0% |
+
+**结论**：基线**没有被 v0.5 带偏**（差异在 n=20/40 的抽样噪声范围内），
+§3c 的三个结论依然成立 —— 无防御 DSR=0 / 高斯噪声太弱 / Sim_prot 有 ~0.82 的结构性天花板。
+
+**耗时**（本机 CPU，12 逻辑核，torch 2.4.1+cpu）：**22 s/条**（克隆链要跑两遍：保护后 + 未防御）。
+→ 完整测试集 2,000 条 ≈ **12 小时**，本机跑不完。
+所以下面 §3i.5 的 WER 只在 20 条抽样上算，**样本量写在表里，别当全集数字用**。
+
+### 3i.2 ★★ P3：绝对 WER —— 链路上有两个「静默失效」的 bug
+
+要算**绝对** WER（对 VCTK 自带的原始转写），得有 VCTK 的 `txt/`。
+2026-11-20 夜源站恢复，用新写的 `scripts/download_vctk.py` 定向拉了
+测试集 20 个说话人的 8,000 个转写文件（**5.2 分钟，0 失败**）。
+
+拿到转写后才发现，**绝对 WER 之前根本算不出来** —— 有两个 bug 会让它
+**无声地**退化成「Whisper 转写原始语音当参考」的相对 WER：
+
+| # | bug | 后果 |
+|---|---|---|
+| 1 | `load_transcripts()` 用 `glob("*.txt")` 只扫顶层 | VCTK 的 `txt/` 是**按说话人分子目录**的（`txt/p225/p225_001.txt`）⇒ 一个都找不到 |
+| 2 | 拿 `path.stem` 查表 | 我们把两路麦克风都收了，转 16 kHz 时改名成 `p228_001_mic1.wav`，而 VCTK 的转写只有一路、叫 `p228_001.txt` ⇒ **永远查不到** |
+| 3 | ★★ `protect()` 念的是**固定的一句**，不是原句 | 默认念 `"The quick brown fox jumps over the lazy dog."`，却拿「原句的转写」当参考 ⇒ **WER 恒等于 ~100%，无论语音好坏**。改成：有原始转写时**保护时念同一句**，WER 才有意义、才能和论文的 5.30% 对得上 |
+| 4 | ★ `load_test_items()` 取清单里的**前 N 条** | 清单按文件名排序 ⇒ 每说话人拿到的都是 `pXXX_001`，而 VCTK 里 `pXXX_001` **恰好是同一句** "Please call Stella."。20 个说话人 20 条样本全是同一句话，WER 这类指标就没有代表性。改成在每说话人的全部语句里**均匀抽样** |
+
+两个 bug 都是**静默**的：查不到转写时 `evaluate.py` 会退化成
+「Whisper 转写原始语音」当参考，算出的是**相对 WER**，但**一个错都不报**。
+这类 bug 比崩溃更危险 —— 报告里会写着一个看起来正常的 WER 数字，来源却不对。
+
+**修法**：
+1. `rglob` 递归 + 新增 `transcript_key()`（去掉 `_mic1`/`_mic2` 后缀）；
+2. 保护时念**原句**（有原始转写时），WER 才有意义；
+3. `load_test_items()` 改成**均匀抽样**；
+4. 加 `transcript_miss` 计数，有缺失就醒目提示，不再默默算；
+5. 报告里把「WER(保护后)」与「**WER(原音·ASR 下限)**」分开列 ——
+   后者是 ASR 在原始语音上的错误率，**防御不可能比它更低**，是判断 WER 是否合理的标尺。
+
+**验证**：转写查表命中率 **20/20**（修之前是 0/20）。
+
+### 3i.3 ★ 数据可复现性：两个「同一份命令在两台机器上选出不同数据」的坑
+
+A 的行动项 (6) 要两边用同一份数据划分。查的时候发现下载器本身就埋了两个坑：
+
+| # | 坑 | 说明 |
+|---|---|---|
+| 1 | `.mjs` 用 `localeCompare` 排序 | 它依赖运行机器的 **locale 与 ICU 版本** —— 两台机器可能挑出**不同的**句子，数据就不可复现了。改成码点序（和 Python 的 `sorted` 一致） |
+| 2 | 每说话人的配额把 `wav48_silence_trimmed/log.txt` 也算进去了 | 它不是音频，不该占名额（`prepare_data` 也只认 `.flac`/`.wav`）。改成只按音频文件计配额 |
+
+**顺带查出 B 自己的数据也不干净**：p303 / p304 各多出 2 个"野文件"
+（早期分批下载的残留）⇒ 清单 11,004 条 ≠ 规则的 11,000 条。
+已删掉这 4 个并重跑 `prepare_data.py`（**0 条重转**，因为已转好的音频会被跳过），
+现在清单是 **train 8,000 / val 1,000 / test 2,000**，全部自检通过。
+
+**逐条对账**：把下载器的选择规则在 B 的本地数据上跑一遍 ——
+
+```
+selected: 11000 | local: 11000
+EXACT MATCH: True
+diff: []
+```
+
+⇒ **A 只要照下面的命令下，数据与 B 逐条一致**（源站已恢复，2026-11-20 夜实测 HTTP 200）：
+
+```bash
+python scripts/download_vctk.py --out <数据根>/raw        --include wav48_silence_trimmed --include txt --per-speaker 100
+python algorithms/voiceprint_protection/scripts/prepare_data.py
+```
+
+应得到 **11,000 条**（train 8,000 / val 1,000 / test 2,000）；
+说话人划分用 `scripts/split_speakers.py --check` 对账（名单见 `docs/notes/vctk_speakers.txt`）。
+
+### 3i.4 ★ P5：云机一键脚本
+
+新增 `scripts/cloud_train_stage1.sh`，把「配环境」和「烧钱训练」**拆成两条命令** ——
+云机按小时计费，别一开机就跑满：
+
+| 命令 | 做什么 |
+|---|---|
+| `--setup` | 建 venv、装 CUDA 版 torch + requirements、拉第三方组件（固定 commit）、定向下 VCTK 与四个上游权重、转 16 kHz 并生成 80/10/20 清单 |
+| `--start` | 在 tmux 里起 Stage 1 训练（没装 tmux 就退化成 nohup） |
+| `--status` / `--stop` | 看进度 / 停 |
+
+数据下载用 `scripts/download_vctk.py`（**纯标准库**，云机没装 Node 也能跑）。
+
 ## 4. 待补充（未做的不要填数字）
 
 - [ ] **M1 验收**：成员 A 的 `infer.py` 就位后跑 `scripts/smoke_test.py`，

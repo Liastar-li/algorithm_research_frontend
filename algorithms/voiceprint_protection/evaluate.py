@@ -153,6 +153,8 @@ def load_test_items(split: str = "test", limit_per_speaker: int | None = None,
     """读测试集清单，返回 [(音频路径, 说话人)]。
 
     `limit_per_speaker`：每个说话人取几条（论文是 100 条，课程作业可缩到 10）。
+    ★ 取法是**在每个说话人的全部语句里均匀抽样**，不是取清单里的前 N 条 ——
+      理由见下面代码处的注释（取前 N 条会全是同一句话）。
     """
     root = data_root or paths.data_root()
     manifest = root / f"{split}.txt"
@@ -162,8 +164,7 @@ def load_test_items(split: str = "test", limit_per_speaker: int | None = None,
             "请先跑：python algorithms/voiceprint_protection/scripts/prepare_data.py"
         )
 
-    items: list[tuple[Path, str]] = []
-    counts: dict[str, int] = {}
+    rows: list[tuple[Path, str]] = []
     for line in manifest.read_text(encoding="utf-8").splitlines():
         parts = line.split()
         if len(parts) < 2:
@@ -172,12 +173,29 @@ def load_test_items(split: str = "test", limit_per_speaker: int | None = None,
         speaker = parts[1]
         if not path.exists():
             continue
-        if limit_per_speaker is not None:
-            if counts.get(speaker, 0) >= limit_per_speaker:
-                continue
-            counts[speaker] = counts.get(speaker, 0) + 1
-        items.append((path, speaker))
-    return items
+        rows.append((path, speaker))
+
+    if limit_per_speaker is None:
+        return rows
+
+    # ★ 每说话人**均匀抽样**，不是取前 N 条。
+    #   清单是按文件名排序的，取前 N 条 => 每个说话人拿到的都是
+    #   `pXXX_001` —— 而 VCTK 里 pXXX_001 恰好是同一句
+    #   "Please call Stella."。20 个说话人 20 条样本全是一句话，
+    #   WER 这类指标就没有代表性了。均匀抽样能覆盖整句话表。
+    grouped: dict[str, list[tuple[Path, str]]] = {}
+    for path, speaker in rows:
+        grouped.setdefault(speaker, []).append((path, speaker))
+
+    picked: list[tuple[Path, str]] = []
+    for speaker in sorted(grouped):
+        entries = grouped[speaker]
+        if len(entries) <= limit_per_speaker:
+            picked.extend(entries)
+            continue
+        for i in range(limit_per_speaker):
+            picked.append(entries[(i * len(entries)) // limit_per_speaker])
+    return picked
 
 
 def load_transcripts(transcript_dir: Path | None) -> dict[str, str]:
@@ -227,7 +245,7 @@ def evaluate(args) -> dict:
     transcripts = load_transcripts(Path(args.transcript_dir) if args.transcript_dir else None)
     scorer = None
     if args.wer:
-        scorer = WhisperScorer(device=args.whisper_device)
+        scorer = WhisperScorer(model_name=args.whisper_model, device=args.whisper_device)
 
     print("=" * 68)
     print(f"  评测 · mode={args.mode}  split={args.split}  α={args.alpha}")
@@ -236,7 +254,7 @@ def evaluate(args) -> dict:
     print(f"  说话人        : {len({s for _, s in items})}")
     print(f"  DSR 阈值      : {args.taus}")
     if scorer is not None:
-        print(f"  WER 参考      : {'VCTK 原始转写' if transcripts else 'Whisper 转写原始语音（相对 WER）'}")
+        print(f"  WER 参考      : {'VCTK 原始转写（保护时念同一句 -> 绝对 WER）' if transcripts else 'Whisper 转写原始语音（相对 WER）'}")
     print()
 
     # -- 生成器（如果用训练好的）------------------------------------------
@@ -269,6 +287,7 @@ def evaluate(args) -> dict:
     sim_clone_values: list[float] = []
     sim_clone_baseline_values: list[float] = []
     wer_values: list[float] = []
+    wer_original_values: list[float] = []
     transcript_miss = 0
     per_speaker: dict[str, list[float]] = {}
 
@@ -287,11 +306,19 @@ def evaluate(args) -> dict:
                     tensor = torch.from_numpy(embedding).float()[None, :]
                     delta = generator(tensor).numpy()[0]
 
+            # ★ 先把参考文本取出来：**保护时念的就该是这一句**。
+            #   protect() 默认念固定的 "The quick brown fox jumps over the lazy dog."，
+            #   拿它跟「原句的转写」比，WER 恒等于 ~100%，一点意义都没有。
+            #   改成念原句，转写出来才能和论文的 WER 对得上。
+            vctk_reference = transcripts.get(transcript_key(path)) if transcripts else None
+            clone_text = vctk_reference or infer.DEFAULT_REFERENCE_TEXT
+
             result = protector.protect(
                 wav,
                 alpha=alpha,
                 delta=delta,
                 seed=args.seed,
+                text=clone_text,
                 attack_mode="clone",
                 verbose=False,
             )
@@ -321,12 +348,19 @@ def evaluate(args) -> dict:
 
         # -- WER ----------------------------------------------------------
         if scorer is not None:
-            reference = transcripts.get(transcript_key(path))
-            if reference is None:
+            hypothesis = scorer.transcribe(protected, sample_rate)
+            if vctk_reference is not None:
+                # 绝对 WER：参考 = VCTK 自带的原始转写
+                wer_values.append(word_error_rate(vctk_reference, hypothesis))
+                # 原音的 WER = ASR 在这段语音上的**下限**（不可能比它更低）
+                wer_original_values.append(
+                    word_error_rate(vctk_reference, scorer.transcribe(wav, sample_rate))
+                )
+            else:
+                # 没有原始转写 -> 只能用「Whisper 转写原音」当参考 = **相对** WER
                 transcript_miss += 1
                 reference = scorer.transcribe(wav, sample_rate)
-            hypothesis = scorer.transcribe(protected, sample_rate)
-            wer_values.append(word_error_rate(reference, hypothesis))
+                wer_values.append(word_error_rate(reference, hypothesis))
 
         if (index + 1) % 10 == 0 or index == len(items) - 1:
             print(f"  [{index + 1}/{len(items)}] "
@@ -355,6 +389,8 @@ def evaluate(args) -> dict:
     }
     if wer_values:
         report["wer"] = summarize(wer_values, "wer")
+    if wer_original_values:
+        report["wer_original"] = summarize(wer_original_values, "wer_original")
 
     print("\n" + "=" * 68)
     print(f"  结果（mode={args.mode}）")
@@ -369,8 +405,11 @@ def evaluate(args) -> dict:
         print(f"  DSR(τ={tau})          {report['dsr'][f'tau_{tau}'] * 100:.1f}%"
               f"  （论文 79.8 / 83.5 / 87.2）")
     if wer_values:
-        print(f"  WER                 {report['wer']['wer_mean'] * 100:.2f}%"
+        print(f"  WER(保护后)         {report['wer']['wer_mean'] * 100:.2f}%"
               f"  （论文 5.30%）")
+    if wer_original_values:
+        print(f"  WER(原音·ASR 下限)  {report['wer_original']['wer_original_mean'] * 100:.2f}%"
+              f"  （原始语音的转写错误率 —— 防御不可能比它更低）")
     print()
 
     if args.output:
@@ -417,6 +456,8 @@ def main() -> int:
     parser.add_argument("--generator-checkpoint", default=None)
     parser.add_argument("--wer", action="store_true", help="算 WER（需要 faster-whisper）")
     parser.add_argument("--whisper-device", default="cpu")
+    parser.add_argument("--whisper-model", default=None,
+                        help="Whisper 模型名（默认 config.EVAL['whisper_model']，即 large-v3）。CPU 上想省时间可换 small/medium，但要写明偏离了论文设定")
     parser.add_argument("--transcript-dir", default=None,
                         help="VCTK 转写文本目录（有它才能算绝对 WER）")
     parser.add_argument("--output", default=None, help="报告 JSON 的输出路径")
