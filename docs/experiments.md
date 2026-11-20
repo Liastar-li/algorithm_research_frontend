@@ -278,6 +278,78 @@ mu-law 采样），与"默认 vs 快速"的差异 **0.09279 同量级** → 差�
 
 ---
 
+## 3f. ★★ 2026-11-20：v0.5 合并后的复核（成员 B）
+
+### 3f.1 复核 A 的三处改动（成员 A 的 v0.5）
+
+| # | A 的改动 | B 的复核结论 |
+|---|---|---|
+| 1 | HiFi-GAN 16 kHz 权重与内置生成器 | ✅ **同意**。逐项核对：采样率 16000 / hop 256 / n_fft 1024 / 80 mels、HiFi-GAN v1 架构、参数量 13,936,130、`strict=True` 234/234 键全匹配。`hifigan.py` 是 `bshall/hifigan` 的 MIT 代码，已加署名 |
+| 2 | 模型侧 mel 改成 `hifigan16k`，删掉近似换算 | ✅ **同意**。实测支持 A 的结论：精确的 HiFi-GAN mel 说话人余弦 **0.9746**，AutoVC mel → 仿射换算只有 **0.6983**（两套 mel 的滤波器组不同，仿射补不回来） |
+| 3 | 修 Stage 1 ↔ Stage 2 的两个致命 bug | ✅ **修法正确**。B 逐行对照 `third_party/AutoVC/model_vc.py:181-202`（官方 `Generator.forward`），A 的 `decode()` 与官方语义**逐值一致**（实测最大差 **2.38e-06**） |
+
+> ★ 关于第 3 条要补一句：**这两个 bug 之所以能溜过去，
+> 是因为 `verify_gradients.py` 原来只验 `StubStage1`** ——
+> 而 `StubStage1.decode()` 的逻辑跟官方 `Generator` 根本不是一回事。
+> B 已把这一段补成**会失败的断言**（见 3f.2）。
+
+### 3f.2 新增的回归测试（`stage2/verify_gradients.py`【6】段，7 项）
+
+用 `TorchAutoVCStage1(random_init=True)` —— 权重随机、**指标无意义**，
+但验的是**接口**，**不依赖训练好的权重**，所以 Stage 1 还没训完也能验。
+
+| # | 断言 | 实测 |
+|---|---|---|
+| 1 | `content_code()` 返回**张量**（不是 list） | OK |
+| 2 | 形状 `(B, T', 64)` | `(2, 3, 64)`（T=96） |
+| 3 | `T' = T // 32` | 3 |
+| 4 | **h_adv 真的进了解码器**（`D(c,h)` 与 `D(c,h_adv)` 之差 > 0） | **0.051788**（修 bug 前是 0） |
+| 5 | **梯度能回到 h_adv** | OK |
+| 6 | **content 参数真的被用上**（换 content 后之差 > 0） | **0.005156**（修 bug 前是 0） |
+| 7 | `decode()` 与官方 `Generator.forward(x, c_org, c_trg)` **逐值一致** | 最大差 **2.38e-06** |
+
+> 第 7 条最硬：它把 `decode()` 的语义**钉死**在官方 AutoVC 上，
+> 以后谁改 `decode()` 改出偏差，这一条立刻会红。
+
+`verify_gradients.py` 现在 **19 项全通过**（原 12 项 + 新 7 项）。
+
+### 3f.3 ★ B 顺手修掉的三个自己的坑（都在共同区）
+
+| # | 坑 | 现象（实测） | 修法 |
+|---|---|---|---|
+| 1 | `paths.models_dir()` 硬返回 `<仓库根>/data/models`（**该目录不存在**），而四个上游权重实际在 `<数据根>/models/default/` | **`SpeakerBridge()` 直接抛"找不到 GE2E 的权重文件"** —— Stage 1 / Stage 2 训练、L1 推理链、平台服务**全部起不来**；而且报错会误导人"去重下一个已经下好的文件" | 改成候选目录列表 `paths.models_dirs()`（`$VPP_MODELS_DIR` → `<数据根>/models` → `<仓库根>/data/models`），逐个试 |
+| 2 | `stage2/pipeline.py::Stage2Pipeline.vocode()` 把归一化系数**写死**成 `hifigan16k` | 换了 `config.STAGE1["mel_preset"]` 就会送出**错的 mel** → 声码器出来是噪音，**而且不报错** | 改成跟着当前预设走，预设没有归一化系数时**显式报错** |
+| 3 | `audio_utils.MelSpec` 写死 `autovc_mel()` | `MelSpec("hifigan16k")` 也返回 **AutoVC 口径**的 mel —— 名字写着 A、算出来是 B | 改成走 `model_mel(wav, self.name)` |
+
+### 3f.4 本轮回归结果（2026-11-20，vpp 环境，CPU）
+
+| 脚本 | 结果 |
+|---|---|
+| `scripts/test_audio_utils.py` | ✅ 通过 |
+| `stage2/verify_mel.py` | ✅ 通过（mel 误差 2.3e-05，嵌入余弦 0.99999481） |
+| `stage2/verify_psychoacoustics.py` | ✅ **20/20** |
+| `stage2/verify_gradients.py` | ✅ **19/19**（含新增 7 项） |
+| `scripts/verify_rtc_mel.py` | ✅ 通过（与上游 WaveRNN 兼容，最佳 scale=4） |
+| `scripts/verify_hifigan.py` | ✅ 通过（余弦 **0.9745**、梯度可回传 absmax 0.8925） |
+| `scripts/test_stage1.py` | ✅ 通过 |
+| `scripts/test_service.py --mock` | ✅ **41/41** |
+| `scripts/split_speakers.py --check` | ✅ 与本机划分**完全一致**（110 人 / 80-10-20 / seed 42） |
+
+### 3f.5 ★ 数据划分对账（省掉对方再下一份 1.36 GiB）
+
+划分**只取决于「说话人名单 + 种子」**，与音频内容无关。因此：
+
+- B 把 110 人的名单**提交进仓库**：`docs/notes/vctk_speakers.txt`（含 `s5`）；
+- 新增 `scripts/split_speakers.py`：从名单 + 种子复现划分、写 `split_speakers.json`
+  与 `spk2id.txt`、或跟已有的划分**对账**。
+
+对方**不用再下一份 VCTK** 就能确认两边划分一致：
+
+```bash
+python algorithms/voiceprint_protection/scripts/split_speakers.py --check <数据根>/split_speakers.json
+```
+
+
 ## 4. 待补充（未做的不要填数字）
 
 - [ ] **M1 验收**：成员 A 的 `infer.py` 就位后跑 `scripts/smoke_test.py`，
@@ -321,7 +393,7 @@ mu-law 采样），与"默认 vs 快速"的差异 **0.09279 同量级** → 差�
 |---|---|
 | `stage2/` 12 个模块 | ✅ 代码写完（generator / discriminator / psychoacoustics / losses / models / pipeline / dataset / train + 3 个 verify 脚本） |
 | 训练机制跑通 | ✅ `--stub --steps 5` 正常训练（8004 条 / 80 说话人；L_de / L_per / L_mask / L_GAN 全有值） |
-| **梯度通路自检** | ✅ **12/12 通过**（`stage2/verify_gradients.py`） |
+| **梯度通路自检** | ✅ **19/19 通过**（`stage2/verify_gradients.py`；含成员 A 修的两个 bug 的 7 项回归断言） |
 | torch GE2E vs 上游数值对照 | ✅ mel 最大绝对误差 **2.3e-05**；嵌入余弦 **0.99999481**（`stage2/verify_mel.py`） |
 | **心理声学掩蔽自检** | ✅ **20/20 通过**（`stage2/verify_psychoacoustics.py`） |
 | 正式训练 | ⛔ **缺可求导声码器 + 缺 Stage 1 checkpoint** → 见 [notes/stage2_blockers.md](notes/stage2_blockers.md) |

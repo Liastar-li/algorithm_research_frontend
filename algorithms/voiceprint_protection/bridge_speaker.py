@@ -490,9 +490,12 @@ def find_weights(rtc_dir: Path, explicit: str | None = None) -> Path:
             raise SpeakerBridgeError(f"指定的权重文件不存在：{path}")
         return path
 
-    candidates = [
-        paths.models_dir() / "default" / "encoder.pt",   # download_encoder_weights.py 的输出
-        paths.models_dir() / "encoder.pt",
+    # ★ 逐个候选目录试（权重可能在 <数据根>/models 或 <仓库根>/data/models）
+    candidates: list[Path] = []
+    for root in paths.models_dirs():
+        candidates.append(root / "default" / "encoder.pt")   # download_encoder_weights.py 的输出
+        candidates.append(root / "encoder.pt")
+    candidates += [
         rtc_dir / "encoder.pt",
         rtc_dir / "saved_models" / "default" / "encoder.pt",
         rtc_dir / "pretrained.pt",                       # 旧版布局

@@ -66,7 +66,7 @@
 | 平台算法服务（FastAPI + CORS + 统一错误格式） | ✅ 已完成 | [`service.py`](algorithms/voiceprint_protection/service.py)；契约自测 **40/40** |
 | 平台方法配置 + 索引登记 | ✅ 已完成 | [`public/methods/group_n005_voiceprint_protection.json`](public/methods/group_n005_voiceprint_protection.json) |
 | Stage 1（解耦-重建网络训练） | ⬜ 未完成 | 成员 A 主责；架构参考 AutoVC |
-| Stage 2（防御性扰动生成，**代码骨架已完成**） | 🟡 部分完成 | [`stage2/`](algorithms/voiceprint_protection/stage2/)；梯度通路自检 12/12，正式训练缺声码器与 Stage 1 权重 |
+| Stage 2（防御性扰动生成，**代码骨架已完成**） | 🟡 部分完成 | [`stage2/`](algorithms/voiceprint_protection/stage2/)；梯度通路自检 **19/19**，正式训练只缺 Stage 1 权重（★ 可求导声码器已就位：HiFi-GAN 16 kHz） |
 | 评测（Sim_prot / Sim_clone / DSR / WER） | 🟡 部分完成 | [`evaluate.py`](algorithms/voiceprint_protection/evaluate.py)；脚本已写好，⏳ 等权重 |
 | 心理声学掩蔽 θ_x（MPEG-1 模型） | ✅ 已完成 | [`stage2/psychoacoustics.py`](algorithms/voiceprint_protection/stage2/psychoacoustics.py) |
 
@@ -221,7 +221,7 @@ python algorithms/voiceprint_protection/scripts/smoke_test.py
 | `npm test` / `npm run build` | ✅ 6/6 通过 / 构建通过 |
 | `scripts/test_service.py --mock` | ✅ **40/40** 通过（协议全项，不需要权重） |
 | `scripts/test_service.py`（真权重） | ✅ **41/41** 通过（含真实推理 + 文件下载 + 空文本兜底） |
-| `stage2/verify_gradients.py` | ✅ **12/12** 通过（梯度确实穿过三层冻结组件回到 G） |
+| `stage2/verify_gradients.py` | ✅ **19/19** 通过（梯度确实穿过三层冻结组件回到 G；含 Stage 1 ↔ Stage 2 接口的 7 项回归断言） |
 | `stage2/verify_mel.py` | ✅ **4/4** 通过（torch 版 GE2E 与上游 mel 误差 2.3e-05，嵌入余弦 0.99999481） |
 | `stage2/train.py --stub --steps 6` | ✅ 训练机制跑通（8004 条 / 80 说话人） |
 | `scripts/prepare_data.py` | ✅ 三条硬要求自检全通过 |

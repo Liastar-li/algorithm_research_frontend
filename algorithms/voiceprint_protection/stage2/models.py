@@ -266,7 +266,8 @@ class TorchAutoVCStage1(nn.Module):
     def __init__(self, checkpoint: str | Path | None = None,
                  device: str | None = None,
                  dim_neck: int | None = None, dim_emb: int | None = None,
-                 dim_pre: int | None = None, freq: int | None = None):
+                 dim_pre: int | None = None, freq: int | None = None,
+                 random_init: bool = False):
         super().__init__()
         paths.ensure_import_paths()
         from model_vc import Generator
@@ -285,6 +286,19 @@ class TorchAutoVCStage1(nn.Module):
         self.model.eval().to(self.device)
         for parameter in self.model.parameters():
             parameter.requires_grad_(False)
+
+        # ★ random_init=True：权重是**随机初始化**的，指标毫无意义。
+        #   它只用来验"Stage 1 <-> Stage 2 的接口对不对"：
+        #     · content_code 的形状是不是 (B, T', 64)
+        #     · h_adv 有没有真的进解码器（D(c,h) 与 D(c,h_adv) 要有差）
+        #     · content 有没有被真的用上
+        #     · 梯度能不能回到 h_adv
+        #   这几条**不依赖训练好的权重** ⇒ Stage 1 还没训完也能验。
+        #   （A 修的两个致命 bug 之所以能溜过去，就是因为当时只用 StubStage1 验，
+        #     而 StubStage1 的 decode 逻辑跟官方 Generator 根本不是一回事。）
+        if random_init:
+            self.checkpoint_path = None
+            return
 
         self.checkpoint_path = Path(checkpoint) if checkpoint else self._guess_checkpoint()
         if not self.checkpoint_path.exists():
@@ -402,59 +416,6 @@ class TorchAutoVCStage1(nn.Module):
 # ---------------------------------------------------------------------------
 # 3. 声码器（可求导）
 # ---------------------------------------------------------------------------
-class TorchHiFiGANVocoder(nn.Module):
-    """HiFi-GAN（论文用的就是这个，[15]），torch 版可求导。
-
-    ★ 2026-11-19（成员 A）改了两处：
-      1. **不再用 `torch.hub.load("NVIDIA/torch.hifi_gan", ...)`** ——
-         那个仓库**已整体下架**（2026-11-18 实测：GitHub API / codeload / raw /
-         release 附件全部 404），旧写法**必然失败**。
-         现在用 `algorithms/voiceprint_protection/hifigan.py` 里**内置**的生成器
-         （bshall/hifigan 的 HiFi-GAN v1，MIT）+ 本地权重
-         `data/models/default/hifigan_16k.ckpt`
-         （HuggingFace `speechbrain/tts-hifigan-libritts-16kHz`，
-           与 NVIDIA 的 `hifigan_melbins_16k` **架构与 mel 约定逐项相同**，
-           同样 13,936,130 参数，`strict=True` 加载 234/234 键全匹配）。
-      2. **mel 约定不再是问题**：Stage 1 的模型侧 mel 现在**直接就是**
-         HiFi-GAN 的约定（`config.STAGE1["mel_preset"] = "hifigan16k"`），
-         不需要任何近似换算。
-
-    ★ 实际上 `stage2/pipeline.py::HiFiGANVocoder` 已经是同样的东西了 ——
-      这个类是**重复实现**，保留是为了不破坏既有导入路径。
-    """
-
-    def __init__(self, device: str | None = None, model_name: str = "hifigan_melbins_16k",
-                 weights_path=None):
-        super().__init__()
-        import hifigan
-
-        self.device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
-        if weights_path is None:
-            from bridge_vocoder import VocoderBridge
-
-            weights_path = VocoderBridge._default_weights_path()
-        if not Path(weights_path).exists():
-            raise RuntimeError(
-                f"找不到 HiFi-GAN 权重：{weights_path}\n"
-                "先下载：python algorithms/voiceprint_protection/scripts/download_hifigan_weights.py")
-
-        # ★ strict=True：架构对不上立刻报错（实测 234/234 键全匹配）
-        self.model = hifigan.load_hifigan_weights(weights_path, device=self.device, strict=True)
-        self.model.eval().to(self.device)
-        for parameter in self.model.parameters():
-            parameter.requires_grad_(False)
-
-    def forward(self, mel: torch.Tensor) -> torch.Tensor:
-        """HiFi-GAN **原始**约定的 mel **(B, T, 80)**（时间在前，项目约定）-> 波形 (B, N)。
-
-        ⚠️ 输入要是原始 mel（不是归一化后的网络侧 mel）；
-        网络侧 mel 请先过 `audio_utils.hifigan_mel_unnorm()`，
-        或直接用 `stage2/pipeline.py::Stage2Pipeline.vocode()`（它会自动处理）。
-        """
-        # (B, T, 80) -> (B, 80, T)：HiFi-GAN 吃通道在前
-        return self.model(mel.transpose(1, 2).contiguous()).squeeze(1)
-
-
 class StubVocoder(nn.Module):
     """随机权重的替身声码器（**只用于离线冒烟测试**）。
 

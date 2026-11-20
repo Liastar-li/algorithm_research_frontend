@@ -160,11 +160,12 @@ def main() -> int:
     # 论文主线的三个权重（上游 RTC：encoder / synthesizer / vocoder）
     # 注意：download_* 脚本会把它们放到 <数据根>/models/default/ 下
     def _find_weight(name: str) -> Path | None:
-        for candidate in (
-            paths.models_dir() / "default" / name,
-            paths.models_dir() / name,
-            paths.RTC_DIR / name,
-        ):
+        candidates = []
+        for root in paths.models_dirs():
+            candidates.append(root / "default" / name)
+            candidates.append(root / name)
+        candidates.append(paths.RTC_DIR / name)
+        for candidate in candidates:
             if candidate.exists() and candidate.stat().st_size > 1024:
                 return candidate
         return None

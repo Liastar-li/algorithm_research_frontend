@@ -100,6 +100,13 @@ class Stage2Pipeline:
         self.n_fft = n_fft
         self.hop_length = hop_length
         self.sample_rate = sample_rate
+        # ★ 模型侧 mel 预设（契约字段 config.STAGE1["mel_preset"]）。
+        #   声码器要吃的是**原始量纲**的 mel，而网络侧喂模型的是**归一化后**的，
+        #   中间那个仿射变换的系数就来自这个预设 —— 所以这里必须跟着预设走，
+        #   绝不能写死 "hifigan16k"（写死的话，换了预设就会送出错的 mel，
+        #   声码器出来是噪音，**而且不报错**）。
+        self.mel_preset_name = config.STAGE1.get("mel_preset", config.DEFAULT_PRESET)
+        self.mel_preset = config.MEL_PRESETS[self.mel_preset_name]
 
     # -- 1. mel ----------------------------------------------------------
     def mel(self, waveforms: torch.Tensor) -> torch.Tensor:
@@ -123,8 +130,16 @@ class Stage2Pipeline:
             raise RuntimeError("没有装载声码器 —— 见文件头的说明。")
         if self.vocoder_convention == "raw":
             return self.vocoder(mel)
-        # 网络侧 mel (B, T, 80) -> 原始 HiFi-GAN mel (B, T, 80)
-        preset = config.MEL_PRESETS["hifigan16k"]
+        # 网络侧 mel (B, T, 80) -> 原始 mel (B, T, 80)
+        # ★ 用的是**当前模型侧预设**的归一化系数，不是写死的 "hifigan16k"。
+        preset = self.mel_preset
+        if "norm_scale" not in preset:
+            raise RuntimeError(
+                f"模型侧 mel 预设 {self.mel_preset_name!r} 没有归一化系数"
+                "（norm_scale / norm_offset），无法反变换成声码器的原始量纲。\n"
+                "要么把 config.STAGE1['mel_preset'] 改回 'hifigan16k'，"
+                "要么把 vocoder_convention 设成 'raw'。"
+            )
         raw = (mel - preset["norm_offset"]) / preset["norm_scale"]
         return self.vocoder(raw)
 
@@ -173,6 +188,7 @@ class Stage2Pipeline:
             f"  E_spk      : {type(self.speaker).__name__}\n"
             f"  Stage 1    : {type(self.stage1).__name__}\n"
             f"  声码器     : {vocoder_name}（mel 口径：{self.vocoder_convention}）\n"
+            f"  模型侧 mel : {self.mel_preset_name}\n"
             f"  采样率     : {self.sample_rate} Hz\n"
             f"  STFT       : n_fft={self.n_fft} hop={self.hop_length}"
         )
@@ -190,32 +206,31 @@ class HiFiGANVocoder(nn.Module):
          release 附件全部 404），所以旧写法**必然失败**。
          现在用 `algorithms/voiceprint_protection/hifigan.py` 里**内置**的生成器
          （bshall/hifigan 的 HiFi-GAN v1，MIT）+ 本地权重：
-             `data/models/default/hifigan_16k.ckpt`
+             `<数据根>/models/default/hifigan_16k.ckpt`
          权重来源：HuggingFace `speechbrain/tts-hifigan-libritts-16kHz`
          （与 NVIDIA 的 `hifigan_melbins_16k` **架构与 mel 约定逐项相同**，
            同样 13,936,130 参数，`strict=True` 加载 234/234 键全匹配）。
       2. mel 口径：Stage 1 现在直接产出 HiFi-GAN 约定的 mel，
          **不需要 `autovc_mel_to_hifigan()` 那个近似换算了**。
+
+    ★ 2026-11-20（成员 B）收口：内部改成包 `bridge_vocoder.VocoderBridge`
+      —— 契约 §4.5.3 指定的**唯一**权重加载入口。两边加载的是**同一个**
+      checkpoint，架构一致，不会出现"两份实现慢慢跑偏"。
+      （原先 `stage2/models.py::TorchHiFiGANVocoder` 是同一份逻辑的第二份拷贝，
+        全仓库没有任何地方 import 它 —— 已删除，只留这一个。）
     """
 
-    def __init__(self, device: str | None = None, model_name: str = "hifigan_melbins_16k",
-                 weights_path=None):
+    def __init__(self, device: str | None = None, weights_path=None):
         super().__init__()
-        import hifigan
+        from bridge_vocoder import VocoderBridge
 
-        self.device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
-        if weights_path is None:
-            from bridge_vocoder import VocoderBridge
-
-            weights_path = VocoderBridge._default_weights_path()
-        if not Path(weights_path).exists():
-            raise RuntimeError(
-                f"找不到 HiFi-GAN 权重：{weights_path}\n"
-                "先下载：python algorithms/voiceprint_protection/scripts/download_hifigan_weights.py")
-
-        # ★ strict=True：架构对不上立刻报错（实测 234/234 键全匹配）
-        self.model = hifigan.load_hifigan_weights(weights_path, device=self.device, strict=True)
-        self.model.eval().to(self.device)
+        # ★ 权重加载收敛到 bridge_vocoder（契约 §4.5.3 指定的唯一入口），
+        #   那边已经做过 strict=True 校验（234/234 键全匹配）与参数冻结。
+        self.bridge = VocoderBridge(weights_path=weights_path, device=device)
+        self.device = self.bridge.device
+        # 生成器挂成子模块：这样 .to(device) / state_dict() 都对得上
+        self.model = self.bridge.model
+        self.model.eval()
         for parameter in self.model.parameters():
             parameter.requires_grad_(False)
 
@@ -223,7 +238,8 @@ class HiFiGANVocoder(nn.Module):
         """HiFi-GAN 口径的 mel **(B, T, 80)**（时间在前，项目约定）→ 波形 (B, N)。
 
         ⚠️ 输入要是**原始** HiFi-GAN mel（不是归一化后的网络侧 mel）。
-        若拿的是网络侧 mel，请先 `audio_utils.hifigan_mel_unnorm()`。
+        若拿的是网络侧 mel，请先 `audio_utils.hifigan_mel_unnorm()`；
+        或直接用 `stage2/pipeline.py::Stage2Pipeline.vocode()`（它会自动反变换）。
         """
         # (B, T, 80) -> (B, 80, T)：HiFi-GAN 吃通道在前
         return self.model(mel.transpose(1, 2).contiguous()).squeeze(1)

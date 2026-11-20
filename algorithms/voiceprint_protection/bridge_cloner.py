@@ -56,7 +56,8 @@ class ClonerBridge:
         from bridge_speaker import SpeakerBridge, find_rtc_dir, find_weights
 
         self.rtc_dir = find_rtc_dir(str(rtc_dir) if rtc_dir else None)
-        self.models_dir = Path(models_dir) if models_dir else paths.models_dir()
+        # ★ 候选目录列表（权重可能在 <数据根>/models 或 <仓库根>/data/models）
+        self.models_dirs = [Path(models_dir)] if models_dir else paths.models_dirs()
         self.device = device
 
         # ★ 声码器的折叠块长（见 clone() 里的详细说明）。
@@ -85,11 +86,11 @@ class ClonerBridge:
 
     # -- 内部 ------------------------------------------------------------
     def _find_file(self, name: str) -> Path:
-        candidates = [
-            self.models_dir / "default" / name,
-            self.models_dir / name,
-            self.rtc_dir / name,
-        ]
+        candidates: list[Path] = []
+        for root in self.models_dirs:
+            candidates.append(root / "default" / name)
+            candidates.append(root / name)
+        candidates.append(self.rtc_dir / name)
         for candidate in candidates:
             if candidate.exists() and candidate.stat().st_size > 1024:
                 with candidate.open("rb") as handle:

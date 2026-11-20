@@ -112,20 +112,58 @@ def raw_root() -> Path:
     return data_root() / "raw"
 
 
-def models_dir() -> Path:
-    """外部预训练权重目录（GE2E 的 encoder.pt 等）。
+def models_dirs() -> list[Path]:
+    """候选的外部预训练权重目录（按优先级，去重保序）。
 
-    权重加起来有 1 GB 级别（Whisper 更大），放 D 盘更合适。
+    ★ **为什么是"候选列表"而不是一个固定路径**（2026-11-20 修，一个真 bug）
+    --------------------------------------------------------------------------
+    旧的 `models_dir()` 硬返回 `<仓库根>/data/models`。但我们的四个上游权重
+        encoder.pt / synthesizer.pt / vocoder.pt / hifigan_16k.ckpt
+    **实际都躺在 `<数据根>/models/default/`**（本机是 `D:\vpp\data\models\default`）——
+    三个 `download_*.py` 脚本都写到自己解析出来的 `models_dir()`，
+    而当时那个目录恰好指向数据盘。
 
-    ★ **默认不跟随 VPP_DATA_ROOT**：模型权重和数据是**两回事**。
-      把 VPP_DATA_ROOT 指到别处（冒烟测试的假数据、云机的数据盘）时，
-      预训练权重不应该跟着搬家 —— 否则 `find_weights` 会突然找不到 encoder.pt。
-      要换权重目录请用 `VPP_MODELS_DIR`。
+    后果（实测 2026-11-20）：
+        `bridge_speaker.find_weights()` 找不到 encoder.pt
+        -> `SpeakerBridge()` 抛"找不到 GE2E 的权重文件"
+        -> **Stage 1 / Stage 2 训练、L1 推理链、平台服务全部起不来**，
+           而且报的是"请先下载 encoder.pt" —— **误导你去下一个已经下好的文件**。
+
+    现在改成**候选列表**：找权重时逐个试，谁存在用谁。
+    两台机器只要 `VPP_DATA_ROOT` 一致（或显式设 `VPP_MODELS_DIR`）就能找到同一批权重。
+
+    优先级
+    | # | 目录 | 用途 |
+    |---|---|---|
+    | 1 | `$VPP_MODELS_DIR` | 显式覆盖（要跟数据分家时用它） |
+    | 2 | `<数据根>/models` | ★ **本项目的实际约定**（下载脚本的默认落点） |
+    | 3 | `<仓库根>/data/models` | 仓库内自带的（两台机器都有时用这个） |
     """
+    candidates: list[Path] = []
     env = os.environ.get("VPP_MODELS_DIR")
     if env:
-        return Path(env).expanduser()
-    return REPO_ROOT / "data" / "models"
+        candidates.append(Path(env).expanduser())
+    candidates.append(data_root() / "models")
+    candidates.append(REPO_ROOT / "data" / "models")
+
+    unique: list[Path] = []
+    for candidate in candidates:
+        if candidate not in unique:
+            unique.append(candidate)
+    return unique
+
+
+def models_dir() -> Path:
+    """外部预训练权重目录：**第一个已经存在的**候选（都不存在时返回首选）。
+
+    下载脚本往这里写（`models_dir()/"default"`），
+    查找脚本用 `models_dirs()` 逐个试 —— 两边不会各说各话。
+    """
+    candidates = models_dirs()
+    for candidate in candidates:
+        if candidate.is_dir():
+            return candidate
+    return candidates[0]
 
 
 def sample_dir(method_id: str) -> Path:
@@ -235,8 +273,7 @@ def describe() -> str:
     lines.append(f"  数据根      : {data_root()}"
                  + ("（来自 VPP_DATA_ROOT）" if os.environ.get("VPP_DATA_ROOT") else ""))
     lines.append(f"  原始数据    : {raw_root()}")
-    lines.append(f"  外部权重    : {models_dir()}"
-                 + ("（来自 VPP_MODELS_DIR）" if os.environ.get("VPP_MODELS_DIR") else ""))
+    lines.append("  外部权重    : " + " | ".join(str(d) for d in models_dirs()))
     lines.append(f"  第三方根    : {THIRD_PARTY_DIR}")
     lines.append(f"  RTC 仓库    : {RTC_DIR}")
     lines.append("")

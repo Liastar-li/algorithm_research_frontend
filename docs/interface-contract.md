@@ -301,6 +301,38 @@ content 被真正使用: ✅                                   ✅ 修 bug 前�
 > 但 `stage2/train.py` 要写 `content_codes[permutation]`（batch 内随机置换），
 > 对 list 索引是错的。
 
+#### 4.5.3c ★ 回归测试：Stage 1 <-> Stage 2 的接口（成员 B，2026-11-20）
+
+> A 修的两个 bug（§4.5.3b）之所以能溜过去，是因为 `stage2/verify_gradients.py`
+> **只验 `StubStage1`** —— 而 `StubStage1.decode()` 的逻辑跟官方 `Generator`
+> 根本不是一回事，验不到"目标嵌入有没有真的进解码器"。
+
+B 已把这段补成**会失败的断言**（`stage2/verify_gradients.py` 的【6】段，共 7 项）。
+它用 `TorchAutoVCStage1(random_init=True)` —— 权重是随机的，**指标毫无意义**，
+但验的是**接口**，**不依赖训练好的权重**，所以 Stage 1 还没训完也能验。
+
+| # | 断言 | 实测值（2026-11-20） |
+|---|---|---|
+| 1 | `content_code()` 返回**张量**（不是 list） | OK |
+| 2 | `content_code` 形状 `(B, T', 64)` | `(2, 3, 64)`（T=96） |
+| 3 | `T' = T // 32` | 3 |
+| 4 | **h_adv 真的进了解码器**：`D(c,h)` 与 `D(c,h_adv)` 的平均差 > 0 | **0.051788**（修 bug 前是 0） |
+| 5 | **梯度能回到 h_adv** | OK |
+| 6 | **content 参数真的被用上**：换 content 后输出之差 > 0 | **0.005156**（修 bug 前是 0） |
+| 7 | `decode()` 与官方 `Generator.forward(x, c_org, c_trg)` **逐值一致** | 最大差 **2.38e-06** |
+
+> 第 7 条是最硬的一条：它把 `decode()` 的语义**钉死**在官方 AutoVC 上 ——
+> 以后谁改 `decode()` 改出偏差，这一条立刻会红。
+
+**跑法**：`python algorithms/voiceprint_protection/stage2/verify_gradients.py`
+（现在共 **19 项**断言全通过）。
+
+> ★ 顺带修掉的三个 B 自己的坑（都在共同区）：
+> (1) `paths.models_dir()` 指向不存在的目录 => **权重找不到、整条链起不来**；
+> (2) `Stage2Pipeline.vocode()` 把 mel 预设写死；
+> (3) `audio_utils.MelSpec` 写死 `autovc_mel()`。
+> 详见 §9 成员 B 签字栏。
+
 #### 4.5.4 损失函数签名（论文式 7–13）
 ```python
 from stage2.losses import (
@@ -469,6 +501,7 @@ python algorithms/voiceprint_protection/stage1/train.py --stage model --iteratio
 | 2026-11-17 | **v0.2** | **按实际代码重写 §1/§3/§4**：预设改为 `model16k`（取消 22.05k）、AutoVC mel 改为自定义链、`AutoVCBridge` 的方法改为 `protect`/`reconstruct`、`VocoderBridge` 改为 `synthesize`、`infer` 改为 `Protector.protect(wav, ...)`；`bridge_speaker.py` 增补路线 B 的 `SpeakerBridge` | 成员 B（合并时核对） | ⬜ 待成员 A 确认 |
 | 2026-11-18 | **v0.4** | **成员 A 第二次签字（训练链路审计后）**：① §3.3 `bridge_vocoder.py` 重写为 `mel_to_wav/wav_to_mel`，内部改用**上游 WaveRNN**（HiFi-GAN 官方仓库已下架，实测 404）；② §3.4 新增**第二套模型侧 mel** `rtc16k`，`config.STAGE1["mel_preset"]` 默认改为 `rtc16k`，并新增 `audio_utils.model_mel()` 作为模型侧统一入口；③ §7.1 更新，新增 §7.1b **帧数必须是 `freq` 整数倍**的硬约定；④ §7.4 补上可执行的训练命令与 `--resume` | 成员 A | ✅ 成员 B 待确认 |
 | 2026-11-19 | **v0.5** | **成员 A 第三次签字（★ 找到了 16 kHz 的 HiFi-GAN 权重，v0.4 的方案作废）**：<br>① §3.3 `bridge_vocoder.py` **改用 HiFi-GAN**（论文 §2.3 的 V(·)，**可求导**），WaveRNN 降级为 `WaveRNNBridge`（对照用）；<br>② §3.4 新增**第三套模型侧 mel** `hifigan16k`，`config.STAGE1["mel_preset"]` 默认改为它；新增 `hifigan_mel_norm` / `hifigan_mel_unnorm`（可逆仿射归一化，**目的是让论文的 λ_cd/λ_dis 仍然有效**）；<br>③ §7.1 同步更新 | 成员 A | ✅ 成员 B 待确认 |
+| 2026-11-20 | **v0.5** | **成员 B 签字并收口**：(1) 新增 §4.5.3c「Stage 1 <-> Stage 2 接口」的**回归测试**（7 项断言，`stage2/verify_gradients.py`【6】段，共 19 项全过）；(2) §4.5.3 的声码器入口**收敛**为 `bridge_vocoder.VocoderBridge`（删掉重复实现 `stage2/models.py::TorchHiFiGANVocoder`）；(3) ★ 修 `paths.models_dir()` 指向不存在目录的 bug（**权重找不到 → 整条训练链起不来**，且报错误导人去重下已下好的文件）；(4) 修 `Stage2Pipeline.vocode()` 写死 mel 预设、`audio_utils.MelSpec` 写死 `autovc_mel()` | 成员 B | ✅ 成员 A 已于 v0.5 签字 |
 
 ---
 
@@ -479,15 +512,21 @@ python algorithms/voiceprint_protection/stage1/train.py --stage model --iteratio
 | 成员 A | 2026-11-18 | ✅ **已签字（v0.3）**。核对结果：<br>· §3.2 `bridge_autovc.py` 的 `protect`/`reconstruct` 签名一致（但 AutoVC 权重链 404，该路线降级为 Stage 1 架构参考）<br>· §3.3 `bridge_vocoder.py` 的 `synthesize` 签名一致（同上，WaveNet 权重不可得）<br>· §4 `infer.py` 已改为**模块级 `protect(wav_path, alpha, output_path)`**（B 的 `make_sample.py` 约定一），并保留 `Protector.protect(wav, ...)`<br>· §2 `c` 的形状**已更正**为 `(T//32, 64)`，`T' = T//2` 与官方代码不符<br>· 同意"只有 GE2E 内部的 40 维 mel 是例外" |
 | 成员 A | 2026-11-19 | ✅ **已签字（v0.5）★ 这条最重要，请 B 重点核对**：<br>· §3.3 `bridge_vocoder.py` **换成 HiFi-GAN**（论文 §2.3 的 V(·)）。**B 的 `stage2/models.py::TorchHiFiGANVocoder` 用的是 `torch.hub.load("NVIDIA/torch.hifi_gan", ...)`，那个仓库已下架 → 改成加载 `algorithms/voiceprint_protection/hifigan.py`（内置的生成器）+ `data/models/default/hifigan_16k.ckpt`（HF `speechbrain/tts-hifigan-libritts-16kHz`，**234/234 键 strict 加载通过**）<br>· §3.4 **模型侧 mel 改成 `hifigan16k`**。⇒ **B 的 `stage2/pipeline.py::autovc_mel_to_hifigan()` 可以删掉了** —— 实测那个近似换算会把重建音的说话人余弦从 **0.9746 掉到 0.6983**，不可接受<br>· ★ B 的 `stage2/dataset.py` 若直接调 `audio_utils.autovc_mel()`，请改成 `audio_utils.model_mel()`<br>· §7.1b 的帧数约定对 B 也有影响：**裁片段时必须用 `N = (crop_frames-1)*hop`** |
 | 成员 A | 2026-11-18 | ✅ **已签字（v0.4）**。训练链路审计后的第二次签字：<br>· §3.3 `bridge_vocoder.py` **签名变了**：`synthesize` → `mel_to_wav(mel)` / `wav_to_mel(wav)`，输入是 `rtc16k` 侧 mel（`[-1,1]`），内部是上游 WaveRNN<br>· §3.4 **模型侧 mel 改为 `rtc16k`**，理由：HiFi-GAN 官方仓库下架（实测 404），WaveRNN 只吃这套约定；**AutoVC 架构本身没变**<br>· 新增 `audio_utils.model_mel(wav)` 统一入口，请所有人**不要**再直接调 `autovc_mel`/`rtc_mel`<br>· §7.1b 的帧数约定对 B 也有影响：**如果 B 要写自己的评测脚本，裁片段时必须用 `N = (crop_frames-1)*hop`** |
-| 成员 B | | | |
+| 成员 B | 2026-11-20 | ✅ **已签字（v0.5）★ 请 A 重点核对下面三条**：<br>· **§3.3 / §4.5.3 声码器**：同意换成 HiFi-GAN。B 已把 `stage2/pipeline.py::HiFiGANVocoder` 改成**包 `bridge_vocoder.VocoderBridge`**（§4.5.3 指定的唯一权重加载入口），并**删掉** `stage2/models.py::TorchHiFiGANVocoder` —— 那是同一份逻辑的第二份拷贝、全仓库没有任何地方 import 它，留着只会让两份实现慢慢跑偏<br>· **§3.4 模型侧 mel = `hifigan16k`**：同意，已生效。B 的 `stage2/dataset.py` 与 `stage1/dataset.py` 都走 `audio_utils.model_mel()`（**不是** `autovc_mel()`）✅<br>· **§7.1b 帧数**：`N = (crop_frames-1)*hop` 已按约定实现，`stage1/dataset.py` 里有断言自检 ✅<br>· **§4.5.3b 两个致命 bug**：B 已逐行对照 `third_party/AutoVC/model_vc.py::Generator.forward` 复核 A 的修法 —— 语义与官方**逐值一致**（实测最大差 2.38e-06）✅；并已加成**会失败的断言**（`stage2/verify_gradients.py` 的【6】段，见 §4.5.3c）<br>· ★ **B 顺手修了三个自己的问题（都在共同区，本次一起提交）**：<br>　① `paths.models_dir()` 硬返回 `<仓库根>/data/models`（那个目录不存在），而四个上游权重实际在 `<数据根>/models/default/` ⇒ **GE2E 权重找不到 → 整条训练链起不来**，而且报错会误导人"去重下一个已经下好的文件"。已改成候选目录列表 `paths.models_dirs()`，逐个试<br>　② `stage2/pipeline.py::Stage2Pipeline.vocode()` 把归一化系数**写死**成 `hifigan16k` ⇒ 换了预设就会送出错的 mel（出来是噪音，**而且不报错**）。已改成跟着 `config.STAGE1['mel_preset']` 走<br>　③ `audio_utils.MelSpec` 写死 `autovc_mel()` ⇒ `MelSpec('hifigan16k')` 也返回 AutoVC 口径的 mel。已改成走 `model_mel(wav, self.name)` |
 
 > **签字前请重点核对：**
-> - [ ] A 的 `bridge_autovc.py` 签名与 §3.2 一致（`protect` / `reconstruct`）
-> - [ ] A 的 `bridge_vocoder.py` 签名与 §3.3 一致（`mel_to_wav` / `wav_to_mel`，**v0.5 换成 HiFi-GAN**）
-> - [ ] A 的 `infer.py` 签名与 §4 一致（`scripts/smoke_test.py` 与 `scripts/make_sample.py` 依赖它）
-> - [ ] `c` 的帧数确实是 `T // 32`（**不是** `T // 2`）
-> - [ ] 双方都同意"只有 GE2E 内部的 40 维 mel 是例外"这一条
-> - [ ] ~~**路线取舍**~~ → 已定：路线 B（论文的 GE2E），见 TASKS.md §0.8
-> - [ ] **（v0.5）** 同意模型侧 mel 默认用 `hifigan16k`（HiFi-GAN 那套）
-> - [ ] **（v0.5）** 同意删掉 `stage2/pipeline.py::autovc_mel_to_hifigan()` 那个近似换算
-> - [ ] **（v0.5）** `stage2/models.py::TorchHiFiGANVocoder` 改成加载内置生成器 + 本地 ckpt
+> - [x] A 的 `bridge_autovc.py` 签名与 §3.2 一致（`protect` / `reconstruct`）
+> - [x] A 的 `bridge_vocoder.py` 签名与 §3.3 一致（`mel_to_wav` / `wav_to_mel`，**v0.5 换成 HiFi-GAN**）
+> - [x] A 的 `infer.py` 签名与 §4 一致（`scripts/smoke_test.py` 与 `scripts/make_sample.py` 依赖它）
+> - [x] `c` 的帧数确实是 `T // 32`（**不是** `T // 2`）
+> - [x] 双方都同意"只有 GE2E 内部的 40 维 mel 是例外"这一条
+> - [x] ~~**路线取舍**~~ → 已定：路线 B（论文的 GE2E），见 TASKS.md §0.8
+> - [x] **（v0.5）** 同意模型侧 mel 默认用 `hifigan16k`（HiFi-GAN 那套）
+> - [x] **（v0.5）** 同意删掉 `stage2/pipeline.py::autovc_mel_to_hifigan()` 那个近似换算
+> - [x] **（v0.5）** `stage2/models.py::TorchHiFiGANVocoder` 改成加载内置生成器 + 本地 ckpt
+>       → ★ B 的处理：**这个类已删除**（它与 `stage2/pipeline.py::HiFiGANVocoder`
+>       是同一份逻辑的第二份拷贝，全仓库无人 import）。现在**只留一个**实现，
+>       它内部包 `bridge_vocoder.VocoderBridge`（§4.5.3 指定的唯一入口），
+>       两者加载**同一个** checkpoint ⇒ 不会出现"两份实现慢慢跑偏"。
+> - [x] **（v0.5）** 双方都同意：Stage 1 训练时，模型侧 mel 的入口统一是
+>       `audio_utils.model_mel()`（不要再直接调 `autovc_mel` / `rtc_mel` / `hifigan_mel`）

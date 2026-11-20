@@ -94,9 +94,11 @@ class VocoderBridge:
 
     @staticmethod
     def _default_weights_path() -> Path:
-        candidates = [
-            paths.models_dir() / "default" / "hifigan_16k.ckpt",
-            paths.models_dir() / "hifigan_16k.ckpt",
+        candidates: list[Path] = []
+        for root in paths.models_dirs():
+            candidates.append(root / "default" / "hifigan_16k.ckpt")
+            candidates.append(root / "hifigan_16k.ckpt")
+        candidates += [
             paths.WEIGHTS_DIR / "hifigan_16k.ckpt",
             paths.REPO_ROOT / "weights" / "hifigan_16k.ckpt",
         ]
@@ -193,7 +195,7 @@ class WaveRNNBridge:
         from bridge_speaker import find_rtc_dir
 
         self.rtc_dir = find_rtc_dir(str(rtc_dir) if rtc_dir else None)
-        self.models_dir = Path(models_dir) if models_dir else paths.models_dir()
+        self.models_dirs = [Path(models_dir)] if models_dir else paths.models_dirs()
         self.device = device
 
         if str(self.rtc_dir) not in sys.path:
@@ -209,8 +211,8 @@ class WaveRNNBridge:
 
     def _find_file(self, name: str) -> Path:
         candidates = [
-            self.models_dir / "default" / name,
-            self.models_dir / name,
+            *(root / "default" / name for root in self.models_dirs),
+            *(root / name for root in self.models_dirs),
             self.rtc_dir / name,
         ]
         for candidate in candidates:

@@ -501,9 +501,18 @@ def model_mel(wav: np.ndarray, preset_name: str | None = None) -> np.ndarray:
 
 
 class MelSpec:
-    """模型侧 mel 的可复用计算器（AutoVC 链）。    用法：
-        spec = MelSpec()
-        mel = spec.mel(wav)              # (samples,) -> (T, 80)，取值 [0,1]
+    """模型侧 mel 的可复用计算器。
+
+    用法：
+        spec = MelSpec()                  # 默认 config.DEFAULT_PRESET（AutoVC 链）
+        mel = spec.mel(wav)              # (samples,) -> (T, 80)
+
+    ★ **别再直接调 `autovc_mel`**（2026-11-20 修）——
+      这里原来写死了 `return autovc_mel(wav)`，于是 `MelSpec("hifigan16k")`
+      也会返回 AutoVC 口径的 mel：**名字写着 A、算出来是 B**，
+      而且**不报错**。现在统一走 `model_mel(wav, self.name)`。
+
+    ★ Stage 1 训练请用 `config.STAGE1["mel_preset"]`（契约 §7.1）。
     """
 
     def __init__(self, name: str | None = None):
@@ -519,7 +528,7 @@ class MelSpec:
 
     def mel(self, wav: np.ndarray) -> np.ndarray:
         """numpy 波形 -> 模型侧 mel，形状 (T, n_mels)。"""
-        return autovc_mel(wav)
+        return model_mel(wav, self.name)
 
     def mel_batch(self, waveforms: list[np.ndarray]) -> list[np.ndarray]:
         """批量计算。变长语音不 padding，直接返回 list（Stage 1 训练用）。"""

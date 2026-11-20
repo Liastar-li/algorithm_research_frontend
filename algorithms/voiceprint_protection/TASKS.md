@@ -45,6 +45,9 @@
 | `third_party/RTC`（GE2E） | ✅ 已克隆，commit `890f3a0`；权重 `encoder.pt` 已下载并校验 |
 | VCTK 数据 | ✅ 110 说话人 / 11,004 条，划分 80/10/20 已自检通过 —— ⚠️ **但只在成员 B 的机器上**；成员 A 这边**还没下载**（`data/` 只有 `models/`） |
 | Stage 1 代码 | ✅ 已实现，19 项自检全过（`scripts/test_stage1.py`） |
+| HiFi-GAN 16 kHz 声码器 | ✅ **权重就位**（HF `speechbrain/tts-hifigan-libritts-16kHz`，234/234 键 strict 通过，可求导） |
+| 接口契约 | ✅ **v0.5 双方已签字**（`docs/interface-contract.md` §9） |
+| Stage 2 回归 | ✅ `verify_gradients` **19/19**（含成员 A 修的两个 bug 的回归断言） |
 | **训练链路** | ✅ **2026-11-18 审计后全部打通**：AMP / 梯度累积 / 断点续训 / 验证回路 / 两种启动方式 / 帧数约定 —— 详见 **§0.10** |
 | **当前阶段** | **W2 收尾 → W3（平台打通）**；W4 的 Stage 1 训练**代码已就绪，等数据** |
 | **下一个里程碑** | **M2 平台打通**（W3：`service.py` + 方法 JSON + 平台端到端） |
@@ -509,6 +512,28 @@ content 被真正使用: ✅                       ✅ 修 bug 前是 0
 | 3 | 云端 GPU（论文量级训练） | 你 | ⚠️ **代金券能开 ECS(NVIDIA) 还是只有昇腾 ModelArts 仍未确认**（见 §8） |
 
 ---
+
+### 0.11 ★ 本轮进展（成员 B · 2026-11-20：review 成员 A 的 v0.5 + 修三个自坑）
+
+**背景**：成员 A 的 v0.5（契约）已合并（5 个提交），带来三处改动：
+(1) 16 kHz 的 HiFi-GAN 权重；(2) 模型侧 mel 改成 `hifigan16k`；
+(3) 修 Stage 1 <-> Stage 2 的两个致命 bug。B 按 A 的要求做了复核 + 补断言。
+
+| # | 事项 | 结论 | 产出 |
+|---|---|---|---|
+| 1 | 复核 A 的三处改动 | ✅ **全部同意**，详见 `docs/experiments.md` §3f.1 | 契约 §9 已签字（v0.5） |
+| 2 | ★ 把 A 修的两个 bug **加成会失败的断言** | ✅ `stage2/verify_gradients.py`【6】段 7 项（**不依赖训练好的权重**，`random_init=True` 即可验） | 现在共 **19 项**全通过 |
+| 3 | ★ 修 `paths.models_dir()` 指向不存在目录的 bug | ✅ 这是一个**真阻塞**：GE2E 权重找不到 ⇒ **Stage 1/2 训练 + L1 推理链 + 平台服务全部起不来** | `paths.models_dirs()` 候选目录列表 |
+| 4 | 修 `Stage2Pipeline.vocode()` 写死 mel 预设 | ✅ 换预设就会送出错的 mel（噪音且不报错） | 跟着 `config.STAGE1['mel_preset']` 走 |
+| 5 | 修 `audio_utils.MelSpec` 写死 `autovc_mel()` | ✅ `MelSpec('hifigan16k')` 也返回 AutoVC 口径 | 改走 `model_mel(wav, self.name)` |
+| 6 | 声码器实现去重 | ✅ 删掉 `stage2/models.py::TorchHiFiGANVocoder`（无人 import 的第二份拷贝），只留 `stage2/pipeline.py::HiFiGANVocoder`，内部包 `bridge_vocoder.VocoderBridge` | 契约 §4.5.3 收口 |
+| 7 | ★ **数据划分对账件**（A 的行动项 (6)） | ✅ 名单 + 种子就能复现划分 ⇒ **A 不用再下一份 1.36 GiB VCTK** | `docs/notes/vctk_speakers.txt`（110 人）+ `scripts/split_speakers.py` |
+| 8 | 契约签字 | ✅ `docs/interface-contract.md` §9 成员 B 已签 v0.5，新增 §4.5.3c | — |
+| 9 | 回归 | ✅ `verify_gradients` 19 / `verify_psychoacoustics` 20 / `test_service --mock` 41 / `verify_hifigan` / `verify_rtc_mel` / `test_stage1` / `test_audio_utils` / `verify_mel` 全绿 | `docs/experiments.md` §3f.4 |
+
+> ★ **本机环境提醒**：`vpp` 环境是 **torch 2.4.1+cpu**（无 GPU），
+> 上面所有自检都在 CPU 上跑（够用）；正式训练要另开 CUDA 环境或云机。
+
 
 ## 1. W2 详细分解：指南第 3 步 + 第 4 步
 

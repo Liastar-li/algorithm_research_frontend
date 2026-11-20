@@ -42,39 +42,30 @@ Stage 2 训不起来（静默失败，最坏的一种）。
 | **B. HiFi-GAN**（论文同款，[15]） | 论文用的就是它；torch 原生、可导 | ⚠️ **原来的 `NVIDIA/torch.hifi_gan` 仓库已经不存在了**（实测 404，网页和 API 都是 404） | ★ **推荐，但需要另找权重** |
 | **C. 上游 RTC 的 WaveRNN** | 权重已经有了 | 它的输入是**线性频谱**不是 mel，要多加一层转换；而且 `infer_waveform` 也是 numpy | 不推荐 |
 
-### ★ 2026-11-18 更新：HiFi-GAN 这条路的最新情况（实测）
+### ★★ 2026-11-20 结论：这条**已解决**（成员 B，v0.5）
 
-| 查的东西 | 结果 |
+| 项 | 结果 |
 |---|---|
-| `NVIDIA/torch.hifi_gan`（torch.hub 的老入口） | **404，仓库已不存在** |
-| `torch.hub.load('NVIDIA/torch.hifi_gan', 'hifigan_melbins_16k')` | 404（同一个原因） |
-| `bshall/hifigan` / `jik876/hifigan` | 是 soft-vc 变体，**没有 `hifigan_melbins_16k` 入口** |
-| HuggingFace 上的 hifigan 权重 | 多为 22/24 kHz 的 LJSpeech 声码器，**没有 16 kHz mel-bins 那套** |
-| `gitee.com/mirrors/*` | 网页返回 405（反爬），但 **git clone 可用** ✓ |
-| `toscode.gitee.com/s-water/softvc-hifigan` | ✅ **克隆成功**（MIT，`bshall/hifigan` 的镜像，HiFi-GAN v1 生成器代码） |
-| 当天 GitHub 直连 | **整体不可达**（hf-mirror / gitee / PyPI 镜像都通） |
+| NVIDIA 官方 `NVIDIA/torch.hifi_gan` | **仓库连同 release 一起被删**（GitHub API / codeload / raw / release 附件全部 404；`api.github.com/repos/pytorch/pytorch` 返回 200 ⇒ 不是墙） |
+| 替代品 | HuggingFace **`speechbrain/tts-hifigan-libritts-16kHz`** 的 `generator.ckpt`（55,828,077 B） |
+| 与 NVIDIA `hifigan_melbins_16k` 的等价性 | 采样率 16000 / hop 256 / n_fft 1024 / 80 mels、HiFi-GAN v1 架构、参数量同为 **13,936,130**、mel 约定相同，`strict=True` 加载 **234/234 键全匹配** |
+| 差别 | 只差训练数据（LibriTTS vs NVIDIA 的 16k 模型） |
+| 代码 | **内置**在 `algorithms/voiceprint_protection/hifigan.py`（`bshall/hifigan` 的 HiFi-GAN v1 生成器，MIT，已署名）—— 两台机器都不用再 clone `third_party` |
+| 下载 | `python algorithms/voiceprint_protection/scripts/download_hifigan_weights.py`（已下好并校验：sha256 前缀 `2d92a97446467ae5`） |
+| 落盘位置 | `<数据根>/models/default/hifigan_16k.ckpt`（即 `D:\vpp\data\models\default\`） |
 
-**已经做好的部分**：
-- `third_party/softvc-hifigan/` —— HiFi-GAN v1 的生成器代码（MIT）✓
-- `stage2/models.py::TorchHiFiGANVocoder` —— torch 原生的 HiFi-GAN 封装 ✓
-- `stage2/pipeline.py::autovc_mel_to_hifigan()` —— AutoVC mel → HiFi-GAN mel 的换算 ✓
+**mel 约定一并解决**（不用再做近似换算）：
 
-**还差的部分（需要能连 GitHub 的人补）**：
+- Stage 1 的模型侧 mel 预设改成 **`hifigan16k`**（`config.STAGE1["mel_preset"]`）；
+- `stage2/pipeline.py::autovc_mel_to_hifigan()` **已删除** ——
+  实测那个近似换算会把重建音的说话人余弦从 **0.9746 掉到 0.6983**；
+- 网络侧 mel 做一次**可逆的固定仿射变换**（`0.08686·s + 0.84`，值域 [-0.11, 0.92]，与 AutoVC 同量纲），
+  送声码器前反变换回去（实测误差 **4.8e-07**，零损失）——
+  不这么做的话 `L_rec` 会比论文大 100 倍，`λ_cd=1.0` 被稀释 40 倍，**论文的超参就失效了**。
 
-```bash
-# 16 kHz mel-bins 那套的权重（NVIDIA 原来的 release；仓库没了，release 附件可能还在）
-curl -L -o hifigan_melbins_16k.pt \
-  https://github.com/NVIDIA/torch.hifi_gan/releases/download/v0.1/hifigan_melbins_16k.pt
-```
-
-拿到后放进 `algorithms/voiceprint_protection/weights/`，
-`TorchHiFiGANVocoder` 就能直接用（加载逻辑已经写好）。
-
-> ★ **如果这个权重彻底拿不到**：退路是用 `bshall/hifigan` 的 22 kHz 权重
-> （它的 release 也在 GitHub 上，同样受网络影响），或者**自己训一个声码器**（成本太高，不推荐）。
-> 实在不行就**先做 Stage 1** —— Stage 1 的 AutoVC 解码器 + 上游 RTC 克隆机
-> 就能把 L1 的 Sim_prot 从 0.82 提到 0.9 以上（见 `docs/experiments.md` §3c），
-> Stage 2 的声码器问题往后放。
+**实测（本机，2026-11-20）**：`scripts/verify_hifigan.py` 全通过 ——
+重建音与原音的说话人余弦 **0.9745**、RMS 0.0539 → 0.0585、
+网络侧 mel ↔ 原始 mel 一致（最大差 2.56e-06）、**梯度能回传到 mel**（absmax 0.8925）。
 
 ---
 
@@ -105,17 +96,14 @@ algorithms/voiceprint_protection/weights/stage1.pt
 
 ---
 
-## 三、`third_party/AutoVC` 与 `third_party/wavenet_vocoder` 还没克隆
+## 三、~~`third_party/AutoVC` 与 `third_party/wavenet_vocoder` 还没克隆~~ ✅ 已解决
 
-`third_party/` 目前只有 `README.md`，三个组件一个都没拉下来（`RTC` 在 D 盘，通过 `VPP_RTC_DIR` 指过去）。
+`third_party/` 现在已有 `AutoVC`（commit `c1827a6`）、`wavenet_vocoder`（`d4333546`）、
+`softvc-hifigan`（MIT 镜像）；`RTC` 在 D 盘，通过 `VPP_RTC_DIR` 指过去。
 
-```bash
-bash scripts/setup_third_party.sh          # Linux / 云机
-powershell -ExecutionPolicy Bypass -File scripts/setup_third_party.ps1   # Windows
-```
-
-脚本会按 `config.THIRD_PARTY_COMPONENTS` 里钉死的 commit 浅拉取，保证两人版本一致。
-
+> ★ HiFi-GAN 的**生成器代码已内置**进 `algorithms/voiceprint_protection/hifigan.py`
+> （`bshall/hifigan` 的 HiFi-GAN v1，MIT，已署名），
+> 所以连 `softvc-hifigan` 都不是必需的了（保留作参考）。
 ---
 
 ## 四、`Unidecode` + `inflect` 还没装
@@ -162,7 +150,7 @@ pip install Unidecode==1.3.2 inflect==5.3.0
 
 真正切断梯度的是 `torch.no_grad()` 与 `.detach()`，不是"冻结"。
 
-> 这条已经变成一条**会失败的断言**：`stage2/verify_gradients.py`（12 项，全通过）。
+> 这条已经变成一条**会失败的断言**：`stage2/verify_gradients.py`（**19 项**，全通过；其中【6】段 7 项是成员 A 修的两个 bug 的回归测试）。
 
 ### 6.2 torch 版 GE2E 与上游 numpy 版必须逐值一致
 
@@ -206,10 +194,10 @@ Stage 2 用的是自己写的 torch 版 GE2E（因为上游的 numpy 封装断�
 |---|---|
 | Stage 2 代码骨架（12 个模块） | ✅ 已写完 |
 | 训练机制跑通（`--stub`） | ✅ 已验证（5 步，L_de/per/mask/gan 全有值） |
-| 梯度通路自检 | ✅ **12/12** 通过 |
+| 梯度通路自检 | ✅ **19/19** 通过（含成员 A 修的两个 bug 的回归断言，见契约 §4.5.3c） |
 | torch GE2E 与上游数值对照 | ✅ 误差 2.3e-05，嵌入余弦 0.99999481 |
 | 心理声学掩蔽 θ_x | ✅ 已写完（MPEG-1 Model 1），自检 **20/20** 通过 |
-| 可求导声码器 | ❌ **阻塞**（本文档第一节） |
+| 可求导声码器 | ✅ **已解决**（HiFi-GAN 16 kHz，HF `speechbrain/tts-hifigan-libritts-16kHz`，可导） |
 | Stage 1 checkpoint | ❌ **阻塞**（第二节，等成员 A） |
 | 正式训练 | ⛔ 等上面两个 |
 | `evaluate.py` | ✅ 已写好（跑起来同样等 `synthesizer.pt`/`vocoder.pt`） |

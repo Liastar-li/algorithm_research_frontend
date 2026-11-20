@@ -10,7 +10,7 @@
     · 单独对 L_de 反传，梯度也必须非零
       （这验证了梯度确实穿过了声码器、Stage 1 解码器、E_spk 三层冻结组件）
     · 关掉 λ_GAN 时，梯度依然非零
-
+    · ★ Stage 1 <-> Stage 2 的**接口**（成员 A 修的两个致命 bug 的回归测试）：\n      content_code 的形状、h_adv 有没有真的进解码器、content 有没有被用上、\n      梯度能不能回到 h_adv、decode() 与官方 AutoVC Generator 是否逐值一致\n
 用法：
     conda activate vpp
     python algorithms/voiceprint_protection/stage2/verify_gradients.py
@@ -37,7 +37,12 @@ from stage2 import losses as loss_module  # noqa: E402
 from stage2.common import perturb_embedding, set_seed  # noqa: E402
 from stage2.discriminator import MelDiscriminator  # noqa: E402
 from stage2.generator import PerturbationGenerator  # noqa: E402
-from stage2.models import StubStage1, TorchSpeakerEncoder, freeze  # noqa: E402
+from stage2.models import (  # noqa: E402
+    StubStage1,
+    TorchAutoVCStage1,
+    TorchSpeakerEncoder,
+    freeze,
+)
 from stage2.pipeline import Stage2Pipeline  # noqa: E402
 
 PASSED = 0
@@ -197,6 +202,74 @@ def main() -> int:
     check(grad_norm(generator) == 0.0,
           "判别器反传时 G 的梯度为 0（x_adv 已 detach）")
 
+    # -- 6. Stage 1 <-> Stage 2 的接口（★ 成员 A 修的两个致命 bug 的回归测试）----
+    #
+    # 【为什么必须有这一段】
+    # A 修的两个 bug 都在 `stage2/models.py::TorchAutoVCStage1`：
+    #   (1) `self.model(mel, embedding, embedding)` —— 官方 forward 的第三个参数
+    #       才是目标嵌入，两个都传 embedding，于是 h_adv 根本没进解码器；
+    #   (2) `decode()` 把 content 参数完全忽略 —— 论文的 "arbitrary content" 失效。
+    # 这两个 bug 的症状是"训练能跑、loss 在降，但防御机制根本没生效"，而且**不报错**。
+    #
+    # ★ 它们之所以能溜过去，正是因为本文件原来**只验 StubStage1** ——
+    #   而 StubStage1 的 decode 逻辑跟官方 Generator 根本不是一回事。
+    #   所以这里直接拿**官方 AutoVC 的 Generator** 来验接口。
+    #
+    # ★ 用 `random_init=True`：权重是随机的，**指标毫无意义**，
+    #   但这几条断言验的是**接口**（形状 / 有没有传对 / 梯度通不通），
+    #   它们**不依赖训练好的权重** —— Stage 1 还没训完也能验。
+    print("\n【6】★ Stage 1 <-> Stage 2 的接口（h_adv 进解码器 / content 被使用）")
+    stage1_real = TorchAutoVCStage1(device="cpu", random_init=True)
+    freeze(stage1_real)
+
+    torch.manual_seed(1)
+    test_mel = torch.randn(2, 96, config.FRAME_DIM)          # T = 96 = 3 x freq(32)
+    test_emb = torch.randn(2, config.SPEAKER_DIM)
+    test_emb_adv = torch.nn.functional.normalize(
+        test_emb + 0.1 * torch.randn(2, config.SPEAKER_DIM), dim=-1)
+
+    codes = stage1_real.content_code(test_mel, test_emb)
+    check(isinstance(codes, torch.Tensor),
+          "content_code 返回**张量**（不是 list）—— train.py 要写 content_codes[permutation]")
+    check(codes.dim() == 3 and codes.shape[0] == 2
+          and codes.shape[2] == config.CONTENT_ACTUAL_DIM,
+          f"content_code 形状 (B, T', 64) —— 实际 {tuple(codes.shape)}")
+    check(codes.shape[1] == test_mel.shape[1] // config.CONTENT_DOWNSAMPLE,
+          f"内容码帧数 T' = T // {config.CONTENT_DOWNSAMPLE} —— 实际 {codes.shape[1]}"
+          f"（T = {test_mel.shape[1]}）")
+
+    # (a) h_adv 真的进了解码器
+    out_h = stage1_real.decode(test_mel, test_emb, content=codes)
+    out_adv = stage1_real.decode(test_mel, test_emb_adv, content=codes)
+    embedding_difference = float((out_h - out_adv).abs().mean())
+    check(embedding_difference > 1e-6,
+          f"h_adv 真的进了解码器（D(c,h) 与 D(c,h_adv) 的平均差 = {embedding_difference:.6f}）",
+          "差为 0 —— 目标嵌入没传进解码器，整个防御机制等于没生效")
+
+    # (b) 梯度能回到 h_adv
+    test_emb_grad = test_emb_adv.clone().requires_grad_(True)
+    stage1_real.decode(test_mel, test_emb_grad, content=codes).abs().mean().backward()
+    gradient = test_emb_grad.grad
+    check(gradient is not None and float(gradient.abs().sum()) > 0,
+          "梯度能回到 h_adv",
+          "梯度是 0 —— h_adv 到解码器之间被 detach()/no_grad() 切断了")
+
+    # (c) content 真的被用上
+    out_other = stage1_real.decode(test_mel, test_emb, content=codes.flip(0))
+    content_difference = float((out_h - out_other).abs().mean())
+    check(content_difference > 1e-6,
+          f"content 参数真的被用上了（换内容后的平均差 = {content_difference:.6f}）",
+          "差为 0 —— content 被忽略了，论文的 'arbitrary content' 没生效")
+
+    # (d) decode() 与官方 AutoVC Generator 的语义**逐值一致**
+    with torch.no_grad():
+        official = stage1_real.model(test_mel, test_emb, test_emb_adv)[1].squeeze(1)
+    ours = stage1_real.decode(test_mel, test_emb_adv, content=codes)
+    official_difference = float((official - ours).abs().max())
+    check(official_difference < 1e-5,
+          f"decode() 与官方 Generator.forward(x, c_org, c_trg) 逐值一致"
+          f"（最大差 = {official_difference:.2e}）",
+          "不一致 —— decode() 手工复刻的摊开/解码逻辑与官方对不上了")
     print("\n" + "=" * 66)
     print(f"  通过 {PASSED} 项，失败 {FAILED} 项")
     print("=" * 66)
