@@ -181,13 +181,36 @@ def load_test_items(split: str = "test", limit_per_speaker: int | None = None,
 
 
 def load_transcripts(transcript_dir: Path | None) -> dict[str, str]:
-    """读 VCTK 的转写文本（`<spk>-<utt>.txt`）。"""
+    """读 VCTK 的转写文本（`<spk>-<utt>.txt`）。
+
+    ★ 用 rglob **递归**找：VCTK 的 txt/ 是**按说话人分子目录**的
+      （`txt/p225/p225_001.txt`），不是平铺在 txt/ 下面。
+      以前用 glob 只扫顶层，一个都找不到 -> 绝对 WER 会**静默退化成**
+      「Whisper 转写原始语音」的相对 WER，而且**不报错**。
+    """
     transcripts: dict[str, str] = {}
     if transcript_dir is None or not transcript_dir.exists():
         return transcripts
-    for path in transcript_dir.glob("*.txt"):
+    for path in transcript_dir.rglob("*.txt"):
         transcripts[path.stem] = path.read_text(encoding="utf-8", errors="ignore").strip()
     return transcripts
+
+
+def transcript_key(path: Path) -> str:
+    """音频文件名 -> VCTK 转写键。
+
+    ★ 为什么不能直接用 `path.stem`
+      我们把 VCTK 的**两路麦克风**都收进来了，转 16 kHz 时统一改名为
+      `<spk>_<utt>_mic1.wav` / `<spk>_<utt>_mic2.wav`（见 prepare_data.py），
+      而 VCTK 自带的转写只有**一路**，叫 `<spk>_<utt>.txt`。
+      直接拿 `path.stem` 去查 -> **永远查不到** -> 绝对 WER 静默退化成相对 WER。
+      所以要去掉 `_mic1` / `_mic2` 后缀（两路麦克风读的是同一句话，参考文本通用）。
+    """
+    stem = path.stem
+    for suffix in ("_mic1", "_mic2"):
+        if stem.endswith(suffix):
+            return stem[: -len(suffix)]
+    return stem
 
 
 # ---------------------------------------------------------------------------
@@ -246,6 +269,7 @@ def evaluate(args) -> dict:
     sim_clone_values: list[float] = []
     sim_clone_baseline_values: list[float] = []
     wer_values: list[float] = []
+    transcript_miss = 0
     per_speaker: dict[str, list[float]] = {}
 
     started = time.time()
@@ -297,8 +321,9 @@ def evaluate(args) -> dict:
 
         # -- WER ----------------------------------------------------------
         if scorer is not None:
-            reference = transcripts.get(path.stem)
+            reference = transcripts.get(transcript_key(path))
             if reference is None:
+                transcript_miss += 1
                 reference = scorer.transcribe(wav, sample_rate)
             hypothesis = scorer.transcribe(protected, sample_rate)
             wer_values.append(word_error_rate(reference, hypothesis))
@@ -308,6 +333,10 @@ def evaluate(args) -> dict:
                   f"Sim_prot={np.mean(sim_prot_values):.4f} "
                   f"Sim_clone={np.mean(sim_clone_values):.4f} "
                   f"[{time.time() - started:.0f}s]")
+
+    if scorer is not None and transcripts and transcript_miss:
+        print(f"  [注意] 有 {transcript_miss}/{len(items)} 条没找到 VCTK 原始转写，"
+              "这些改用「Whisper 转写原始语音」当参考 —— **不是绝对 WER**。")
 
     # -- 汇总 --------------------------------------------------------------
     report = {
