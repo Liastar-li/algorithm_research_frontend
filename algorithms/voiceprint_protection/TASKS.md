@@ -43,16 +43,18 @@
 | `config.py` / `audio_utils.py` | ✅ 已写好（★ 已按 AutoVC 官方实测对齐） |
 | `third_party/AutoVC` | ✅ 已克隆，commit `c1827a6` |
 | `third_party/RTC`（GE2E） | ✅ 已克隆，commit `890f3a0`；权重 `encoder.pt` 已下载并校验 |
-| VCTK 数据 | ✅ 110 说话人 / 11,000 条，划分 80/10/20 已自检通过 —— ⚠️ **但只在成员 B 的机器上**；成员 A 这边**还没下载**（`data/` 只有 `models/`）。★ **2026-11-20 夜源站恢复**，A 可直接自取（见 §0.13） |
+| VCTK 数据 | ✅ **两边已下好并逐条对齐**：110 说话人 × 100 句 = **11,000 条**（A 侧实测与 B 侧 `EXACT MATCH: True`，差集为空）；划分 80/10/20 已自检通过，`scripts/split_speakers.py --check` **对账完全一致** ✅ |
 | Stage 1 代码 | ✅ 已实现，19 项自检全过（`scripts/test_stage1.py`） |
+| Stage 1 训练 | ⏳ **2026-11-20 已开训**（`scripts/run_stage1.py` 一条龙：数据对账 → 训 W_s → 训解耦网络 → 验收 M3） |
 | HiFi-GAN 16 kHz 声码器 | ✅ **权重就位**（HF `speechbrain/tts-hifigan-libritts-16kHz`，234/234 键 strict 通过，可求导） |
 | 接口契约 | ✅ **v0.5 双方已签字**（`docs/interface-contract.md` §9） |
 | Stage 2 回归 | ✅ `verify_gradients` **20/20**（含成员 A 修的两个 bug 的回归断言） |
+| 平台端到端 | ✅ `scripts/test_platform_e2e.py` **29/29**（成员 B 的 P5） |
 | **训练链路** | ✅ **2026-11-18 审计后全部打通**：AMP / 梯度累积 / 断点续训 / 验证回路 / 两种启动方式 / 帧数约定 —— 详见 **§0.10** |
-| **当前阶段** | **W2 收尾 → W3（平台打通）**；W4 的 Stage 1 训练**代码已就绪，等数据** |
-| **下一个里程碑** | **M2 平台打通**（W3：`service.py` + 方法 JSON + 平台端到端） |
-| **开训的唯一阻塞** | **VCTK 数据还没下到成员 A 的机器上** —— 步骤见 §0.10.5；★ 源站已恢复，**不必等 B 打包**，A 可自取（§0.13） |
-| **待补依赖** | ✅ **已装齐**（实测 2026-11-20：`python-multipart` **0.0.20**（起服务必须）/ `scikit-learn` **1.5.2**（上游 GE2E 必需）/ `faster-whisper` 1.1.0）—— 服务与 GE2E 都已实测通过 |
+| **当前阶段** | **W4：Stage 1 训练中**（W3 平台已通） |
+| **下一个里程碑** | **M3 Stage 1 完成**（三条验收：checkpoint / 听感正常 / Sim_prot > 0.9） |
+| **仍待组内拍板** | **云端代金券的适用产品**（ECS/NVIDIA 还是只有昇腾 ModelArts）→ 决定 50 万步长训在哪跑 |
+| **待补依赖** | ✅ 依赖已装齐（实测 2026-11-20：`python-multipart` **0.0.20**（起服务必须）/ `scikit-learn` **1.5.2**（上游 GE2E 必需）/ `faster-whisper` 1.1.0）；⚠️ **`Unidecode` + `inflect`（上游 Tacotron 必需）B 那台还没装** |
 
 ### ★ 本周已取得的关键结论（2026-11-13 实测，详见 [docs/notes/autovc_alignment.md](docs/notes/autovc_alignment.md)）
 

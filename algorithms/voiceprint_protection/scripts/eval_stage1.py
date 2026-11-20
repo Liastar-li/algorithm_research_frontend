@@ -162,7 +162,9 @@ def main() -> int:
             mel_out, mel_postnet, codes = model(mel80, embedding, embedding)
 
             rec_loss = float(torch.nn.functional.mse_loss(mel_postnet, mel80))
-            rec_loss_sum += rec_loss
+            # ★ rec_loss 是**batch 均值**，累加时要乘 batch size ——
+            #   否则最后除以样本数，得到的数会小 batch_size 倍（看起来"重建很好"，其实没有）。
+            rec_loss_sum += rec_loss * mel80.shape[0]
 
             # 重建波形 -> 说话人嵌入
             if vocoder is not None:
