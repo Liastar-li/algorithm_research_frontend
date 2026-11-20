@@ -698,8 +698,8 @@ cut -d' ' -f2 data/train.txt | sort -u | wc -l
 | P1 | **B 主写 / A review** | 写 `public/methods/group_XX_voiceprint_protection.json` | W2 全部 | 方法配置 JSON | 通过 `npm test` 的契约校验（字段名、MIME、max_mb、参数范围） |
 | P2 | 任一人 | 追加 `public/methods/index.json` | P1 | 索引更新 | 方法能在"方法集合"搜到 |
 | P3 | **A 主写** | 写 `service.py`（FastAPI + CORS + 错误处理 + 临时文件清理） | P1 | `service.py` | `curl` 能打出 artifacts；错误路径返回 `{"error": "..."}` |
-| P4 | **B 主写** | 准备样例：`public/samples/<方法ID>/` 输入 + 输出（**必须是真实跑出来的**） | W2-D5 | 样例目录 | 输入输出确实对应，参数已记录 |
-| P5 | **共同** | 平台端到端：上传 → 处理 → 预览 → 下载 | P1–P4 | — | 全部成功 |
+| P4 | **B 主写** | 准备样例：`public/samples/<方法ID>/` 输入 + 输出（**必须是真实跑出来的**） | W2-D5 | 样例目录 | ✅ **已完成**（2026-11-18 真实产出：`input.wav` + `output.wav` + 两个克隆对比音） | **B 主写** | 准备样例：`public/samples/<方法ID>/` 输入 + 输出（**必须是真实跑出来的**） | W2-D5 | 样例目录 | 输入输出确实对应，参数已记录 |
+| P5 | **共同** | 平台端到端：上传 → 处理 → 预览 → 下载 | P1–P4 | — | ✅ **已完成**（2026-11-20，成员 B；`scripts/test_platform_e2e.py` **29 项全通过**，见 experiments.md §3h） | **共同** | 平台端到端：上传 → 处理 → 预览 → 下载 | P1–P4 | — | 全部成功 |
 | P6 | **共同** | `npm test` && `npm run build` | P5 | — | 全绿 |
 | P7 | **共同** | 建 `docs/experiments.md`，记录已跑通的步骤与结果 | P5 | 实验记录 | 有内容，且与代码同 commit |
 | P8 | **共同** | 过一遍 `docs/接入自查清单.md` | P6 | 勾选结果 | 逐项确认 |

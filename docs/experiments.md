@@ -441,6 +441,77 @@ stage2/train.py --vocoder hifigan --stage1-checkpoint <真 checkpoint> --steps 3
 这正好是任务板 §8「只在真正要训练时才开机」那条规则的依据。
 
 
+## 3h. ★★ P5 平台端到端联调（2026-11-20，成员 B）
+
+> 任务板 W3 的 P5「平台端到端：上传 -> 处理 -> 预览 -> 下载」原来是 ⏳，
+> 因为只**人工**点过一遍，没留下可重复执行的凭证。
+
+### 3h.1 新增 `scripts/test_platform_e2e.py`（可重复执行的自检）
+
+它验的是**前端真正会走的那条路**（照抄 `src/services/algorithms.js::runAlgorithm`）：
+
+```
+FormData: <文件字段> + method_id + parameters(JSON 字符串)
+   -> POST 方法 JSON 的 adapter.endpoint
+   -> { artifacts: [{kind,label,filename,url}], message }
+   -> 每个 url 用 safeUrl(url, endpoint) 解析后**下载**
+```
+
+★ **一切配置都从方法 JSON 读**（endpoint / 样例输入 / 参数）⇒
+改了方法 JSON，这个脚本自动跟着变，不会出现"脚本验的是一套、平台跑的是另一套"。
+
+**跑法**（服务要先起）：
+
+```bash
+conda activate vpp
+uvicorn algorithms.voiceprint_protection.service:app --host 127.0.0.1 --port 8000
+# 另一个终端
+python algorithms/voiceprint_protection/scripts/test_platform_e2e.py
+```
+
+### 3h.2 实测结果（本机，CPU，2026-11-20）
+
+```
+[通过] 方法 JSON 里登记的输出样例存在且非空
+[通过] GET /healthz 返回 200                model_loaded: true
+[通过] CORS 预检允许前端来源                 allow-origin='*'
+[通过] CORS 允许 POST                        methods='... POST ...'
+[通过] POST /process 返回 200                耗时 21.6s
+[通过] artifacts 是 1-20 个结果               实际 4
+[通过] 返回了可显示的 message                防御处理完成（用时 21.6 秒）
+[通过] 保护后语音              可下载 103,644 字节 / 3.24s @16kHz / RMS=0.0604
+[通过] 未防御时攻击者的克隆音   可下载  98,844 字节 / 3.09s @16kHz / RMS=0.0605
+[通过] 防御后攻击者的克隆音     可下载  79,644 字节 / 2.49s @16kHz / RMS=0.0632
+[通过] 评测报告                可下载 705 字节，合法 JSON
+[通过] 缺文件时返回 4xx        HTTP 422
+[通过] 错误体是 {'error': '...'}   请求参数不对 —— input_file：Field required
+```
+
+**29 项通过 / 0 项失败。**
+
+评测报告里的关键数字（这是**平台请求的真实产物**，不是脚本造的）：
+
+```json
+{ "alpha": 0.1, "seed": 42, "attack_mode": "clone",
+  "elapsed_seconds": 21.6,
+  "sim_embedding_perturbed": 0.995,
+  "sim_clone": 0.8644,
+  "sim_clone_threshold_0.5": false }
+```
+
+> `sim_clone = 0.8644` 看着很高，但这是**预期的**：现在是 L1 版本，
+> δ 是随机高斯噪声、Stage 2 的生成器 G 还没训练 ⇒ 防御基本没起作用。
+> 等 Stage 2 训完，这个数应该掉到 0.13 附近（论文报告值），DSR 才会上去。
+
+### 3h.3 前端侧同步确认
+
+| 项 | 结果 |
+|---|---|
+| `npm run build` | ✅ 通过（1589 modules，4.53s） |
+| `npm test` | ✅ **6/6** |
+| 方法 JSON 的 `adapter.endpoint` | `http://127.0.0.1:8000/process` —— 与 `service.py` 实际路由一致 ✓ |
+
+
 ## 4. 待补充（未做的不要填数字）
 
 - [ ] **M1 验收**：成员 A 的 `infer.py` 就位后跑 `scripts/smoke_test.py`，
