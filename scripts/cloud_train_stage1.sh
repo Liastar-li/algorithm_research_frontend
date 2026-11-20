@@ -105,7 +105,10 @@ setup_python() {
     echo "  [OK] torch 已就位（带 CUDA）"
   else
     echo "  安装 torch（CUDA 12.1）…"
-    "$PY" -m pip install torch==2.4.1 torchaudio==2.4.1 --index-url https://download.pytorch.org/whl/cu121
+    if ! "$PY" -m pip install torch==2.4.1 torchaudio==2.4.1 --index-url https://download.pytorch.org/whl/cu121; then
+      echo "  官方索引不行，退到 NJU 镜像（requirements.txt 里实测过的那条）…"
+      "$PY" -m pip install torch==2.4.1 torchaudio==2.4.1         -f https://mirror.nju.edu.cn/pytorch/whl/cu121/torch/         -f https://mirror.nju.edu.cn/pytorch/whl/cu121/torchaudio/         -i https://pypi.tuna.tsinghua.edu.cn/simple
+    fi
     "$PY" -c "import torch; print('  torch', torch.__version__, 'cuda', torch.cuda.is_available())"
   fi
 
@@ -163,6 +166,8 @@ prepare_data() {
   fi
 
   echo "  转 16 kHz 并生成清单（train/val/test = 80/10/20）…"
+  # ★ 这里的 --limit-per-speaker 只限制**转换**的条数（调试用，取清单里的前 N 条），
+  #   下载那边固定是 --per-speaker 100（数据契约）。正式训练留 0（= 全转）。
   "$PY" "$REPO_ROOT/algorithms/voiceprint_protection/scripts/prepare_data.py" --raw-root "$raw" --out-root "$DATA_ROOT" --limit-per-speaker "$PER_SPEAKER"
 }
 
