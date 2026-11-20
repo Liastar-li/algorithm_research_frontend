@@ -119,20 +119,38 @@ pip install Unidecode==1.3.2 inflect==5.3.0
 
 ---
 
-## 五、评测要算 WER，还缺 VCTK 的转写文本
+## 五、~~评测要算 WER，还缺 VCTK 的转写文本~~ ✅ 已解决（2026-11-20 夜，成员 B）
 
-### 现象
+### 怎么解决的
 
-`evaluate.py --wer` 需要每条语音的**标准转写**才能算绝对 WER。
-我们下载 VCTK 时**只取了 wav，没取 `txt/`**（转写文本约 2 MB，在同一个 zip 里）。
+源站 `datashare.ed.ac.uk` **恢复了**（此前 3 次尝试全部超时）。
+用新增的 `scripts/download_vctk.py`（纯标准库）把 `txt/` 拉下来 ——
+测试集 20 个说话人的 **8,000 个转写文件，5.2 分钟，0 失败**。
 
-### 三个办法
+```bash
+python scripts/download_vctk.py --out <数据根>/raw --include txt --per-speaker 100
+python algorithms/voiceprint_protection/evaluate.py --mode none --split test --limit-per-speaker 5 --wer --whisper-model <模型> --transcript-dir <数据根>/raw/txt
+```
 
-| 办法 | 说明 |
-|---|---|
-| **A. 补下 `txt/`**（推荐） | 用 `scripts/download_vctk.mjs` 再取一次那批条目，然后 `--transcript-dir` 指过去 → 算**绝对 WER**（和论文可比） |
-| B. 用 Whisper 转写原始语音当参考 | `evaluate.py` 已经实现了这个回退 → 算的是**相对 WER**（"保护让转写变差多少"），报告里要写清楚 |
-| C. 只报 Sim_prot / Sim_clone / DSR | 不算 WER，README 里如实说明 |
+### ★★ 但光把文件下下来还不够 —— 链路上有**三个静默失效**的 bug
+
+不报错，但算出来的 WER 根本没意义：
+
+| # | bug | 后果 |
+|---|---|---|
+| 1 | `load_transcripts()` 用 `glob("*.txt")` 只扫顶层 | VCTK 的 `txt/` 是**按说话人分子目录**的 ⇒ 一个都找不到 |
+| 2 | 拿 `path.stem` 查表 | 我们的音频叫 `p228_001_mic1.wav`（两路麦克风都收了），转写只有一路、叫 `p228_001.txt` ⇒ **永远查不到** |
+| 3 | `protect()` 念固定的一句 "The quick brown fox jumps over the lazy dog." | 拿它跟「原句的转写」比 ⇒ **WER 恒等于 ~100%** |
+
+前两个都会退化成「Whisper 转写原音当参考」的**相对 WER**（一个错都不报）；
+第三个让 WER 彻底失去意义。
+
+**修法**：`rglob` + `transcript_key()`（去掉 `_mic1`/`_mic2` 后缀）+
+**保护时念原句**（有原始转写时）+ 每说话人**均匀抽样**（取前 N 条的话，
+每个说话人拿到的都是 `pXXX_001`，而那恰好是同一句 "Please call Stella."）。
+另外加了 `transcript_miss` 计数，有缺失就醒目提示。
+
+**验证**：转写查表命中率 **20/20**（修之前 0/20）。
 
 ---
 
@@ -201,3 +219,5 @@ Stage 2 用的是自己写的 torch 版 GE2E（因为上游的 numpy 封装断�
 | Stage 1 checkpoint | ❌ **阻塞**（第二节，等成员 A） |
 | 正式训练 | ⛔ 等上面两个 |
 | `evaluate.py` | ✅ 已写好（跑起来同样等 `synthesizer.pt`/`vocoder.pt`） |
+| 绝对 WER | ✅ **已通**（转写已补齐；链路上三个静默失效的 bug 已修，见第五节） |
+| Whisper 权重 | ⚠️ 本机到 HF 的 CDN 只有 ~350 KB/s，`large-v3`（3.09 GB）要 ~2.4 h；本轮用 `small` 先跑通（**偏离论文设定，报告里写明**）。云机上 `--setup` 会一并拉下来 |
