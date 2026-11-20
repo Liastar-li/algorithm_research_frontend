@@ -571,8 +571,8 @@ Stage 2 也只在 `--stub`（替身 Stage 1 + 替身声码器）上跑过。
 | 5 | ★★ 抓到一个**静默失效**：`load_transcripts()` 只扫顶层 | VCTK 的 `txt/` 是**按说话人分子目录**的（`txt/p225/p225_001.txt`），`glob("*.txt")` 一个都找不到 ⇒ **绝对 WER 会无声退化成"Whisper 转写原音"的相对 WER，而且不报错**。改 `rglob` |
 | 6 | ★★ 抓到一个**静默失效**：转写键对不上 | 我们把两路麦克风都收了，转 16 kHz 时改名成 `p228_001_mic1.wav`，而 VCTK 的转写只有一路、叫 `p228_001.txt`。拿 `path.stem` 去查**永远查不到** ⇒ 同上，退化成相对 WER。新增 `transcript_key()` 去掉 `_mic1`/`_mic2` 后缀 |
 | 7 | ★ 让退化**可见** | 统计"没找到原始转写"的条数，有就用醒目提示打印出来，不再默默算 |
-| 8 | ★ P2 基线（用 v0.5 的新代码复测） | ✅ `mode=none`，20 条（测试集 20 个说话人各 1 条），**22 s/条**（CPU）。结果见 `docs/experiments.md` §3i |
-| 9 | ★ P3 绝对 WER | ✅ 补齐了 VCTK 的 `txt/`（8,000 个文件 / 5.2 分钟下完）；WER 计算链路上两个静默失效已修 |
+| 8 | ★ P2 基线（用 v0.5 的新代码复测） | ✅ **100 条分层抽样**（测试集 20 个说话人 x 5 句，均匀抽样）：无防御 Sim_prot **0.8043** / Sim_clone **0.7080** / DSR **0%·0%·0%**；高斯噪声 Sim_prot **0.8053** / Sim_clone **0.6995** / DSR **0%·0%·0%** ⇒ **高斯噪声与无防御无法区分**（与 §3c 的旧结论一致）。**27 s/条**（CPU） |
+| 9 | ★ P3 绝对 WER | ✅ 补齐了 VCTK 的 `txt/`（8,000 个文件 / 5.2 分钟下完）；链路上**三个静默失效**已修（转写查不到 0/20 → **20/20**、WER 恒 ~100%、样本全是同一句话）。**结果**：WER(保护后) **5.81%** / WER(原音·ASR 下限) **3.30%** ⇒ 防御引入 **2.51 个百分点**（含「TTS 往返」损失）。详见 `docs/experiments.md` §3i.5 |
 | 10 | ★ P5 云机一键脚本 | `scripts/cloud_train_stage1.sh`：`--setup` / `--start` / `--status` / `--stop`。**"配环境"和"烧钱训练"分成两条命令** —— 云机按小时计费，别一开机就跑满 |
 | 11 | 回归 | ✅ 7 个自检脚本全绿（`test_audio_utils` / `verify_mel` 4 / `verify_psychoacoustics` 20 / `verify_gradients` 20 / `verify_rtc_mel` / `verify_hifigan` / `test_stage1`） |
 | 12 | ★ 新增 `scripts/parallel_download.py` | ✅ HuggingFace 的 CDN 从国内**单连接只有 ~350 KB/s**，而 Whisper `large-v3` 的 `model.bin` 有 **3.09 GB**（单连接要 2.4 小时）。这个脚本并发拉取；实测 `large-v3` 用 24 路并发约 20 分钟下完。**三个坑**（都写在脚本注释里）：urllib 默认 UA 被 **403**；CDN 对 **HEAD** 不响应（会挂住）；hf-mirror 对**小文件**会忽略 `Range` ⇒ 必须先探，不支持就退回单流。**验证**：8 路并发下 HiFi-GAN 权重与本机已下的那份**逐字节一致**（sha256 `2d92a97446467ae5…`） |
