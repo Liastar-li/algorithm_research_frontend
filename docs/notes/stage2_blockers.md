@@ -76,10 +76,23 @@ Stage 2 训不起来（静默失败，最坏的一种）。
 `stage2/models.py::TorchAutoVCStage1` 需要一个 AutoVC 架构的 checkpoint：
 
 ```text
-algorithms/voiceprint_protection/weights/stage1.pt
+algorithms/voiceprint_protection/weights/stage1_model.pt
 ```
 
 格式：`{"model": state_dict}` 或裸 `state_dict`（与 AutoVC 官方一致）。
+
+### ★★ 2026-11-21 的状态更新（成员 B）
+
+| 项 | 状态 |
+|---|---|
+| 成员 A 的 Stage 1 训练 | 已训 500k 步（13.5 h，4060）：rec 0.00177 / cd 0.00007 / dis **−4.38134**（理论极限 −4.3820 的 99.98%）✅ |
+| **但 M3 的 Sim_prot 只有 0.459**（要 >0.9） | ❌ 诊断：MSE 把 mel 的峰值压平了，重建音 RMS 只有原音 1/18。A 说要改 `L_rec` 的形式重训 |
+| ⇒ **Stage 2 现在还不能开训** | Stage 1 换了权重，Stage 2 就得重训一遍 |
+| 本机有没有 A 的权重 | ❌ **没有**（本机只有 `stage1_smoke3steps_NOT_TRAINED.pt`，3 步的冒烟产物，代码会拒绝用它） |
+| **训练与推理的 E_spk 必须一致** | ★ 论文说 E_spk 在 Stage 1 里被微调过。Stage 2 训练时要用**同一个** —— 现在用 `--speaker-encoder {stage1,upstream}` 显式选，并写进 checkpoint |
+
+⇒ **给成员 A 的请求**：训完（Sim_prot > 0.9 之后）把 `stage1_model.pt` 给 B 一份，
+并说明「Stage 1 训的时候 GE2E 微调了没有」—— 这决定 Stage 2 用哪个 `--speaker-encoder`。
 
 ### 影响
 
@@ -211,13 +224,16 @@ Stage 2 用的是自己写的 torch 版 GE2E（因为上游的 numpy 封装断�
 | 项 | 状态 |
 |---|---|
 | Stage 2 代码骨架（12 个模块） | ✅ 已写完 |
-| 训练机制跑通（`--stub`） | ✅ 已验证（5 步，L_de/per/mask/gan 全有值） |
+| 训练机制跑通（`--stub`） | ✅ 已验证（L_de/per/mask/gan 全有值） |
+| **训练器（2026-11-21 补齐）** | ✅ **断点续训 / AMP / 梯度累积 / 梯度裁剪 / `--max-hours` / 吞吐 ETA** 全部就位；`[L_de 方向自检]` 自动跑 |
 | 梯度通路自检 | ✅ **20/20** 通过（含成员 A 修的两个 bug 的回归断言，见契约 §4.5.3c） |
 | torch GE2E 与上游数值对照 | ✅ 误差 2.3e-05，嵌入余弦 0.99999481 |
 | 心理声学掩蔽 θ_x | ✅ 已写完（MPEG-1 Model 1），自检 **20/20** 通过 |
 | 可求导声码器 | ✅ **已解决**（HiFi-GAN 16 kHz，HF `speechbrain/tts-hifigan-libritts-16kHz`，可导） |
-| Stage 1 checkpoint | ❌ **阻塞**（第二节，等成员 A） |
-| 正式训练 | ⛔ 等上面两个 |
+| **E_spk 用哪一个** | ✅ **已解决**（2026-11-21）：`--speaker-encoder {stage1,upstream}`，默认按 checkpoint 自动选，**并写进 checkpoint**，推理照着做 ⇒ 训练与推理不可能对不上 |
+| Stage 1 checkpoint | ❌ **仍然阻塞**（第二节）—— 成员 A 已训 500k 步，但 **Sim_prot 0.459 < 0.9**，要改 `L_rec` 重训 |
+| **算力** | ❌ **本机没有 NVIDIA GPU**（核显 + torch CPU 版）⇒ 论文量级必须上云机，方案见 [`cloud_ecs_stage2.md`](cloud_ecs_stage2.md) |
 | `evaluate.py` | ✅ 已写好（跑起来同样等 `synthesizer.pt`/`vocoder.pt`） |
+| `infer.py` 的 stage2 路线 | ✅ **已加**（`δ = G(h)`，训练好的生成器；CLI `--mode {clone,stage1,stage2,auto}`） |
 | 绝对 WER | ✅ **已通**（转写已补齐；链路上三个静默失效的 bug 已修，见第五节） |
 | Whisper 权重 | ⚠️ 本机到 HF 的 CDN 只有 ~350 KB/s，`large-v3`（3.09 GB）要 ~2.4 h；本轮用 `small` 先跑通（**偏离论文设定，报告里写明**）。云机上 `--setup` 会一并拉下来 |

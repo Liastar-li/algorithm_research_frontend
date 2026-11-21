@@ -66,7 +66,7 @@
 | 平台算法服务（FastAPI + CORS + 统一错误格式） | ✅ 已完成 | [`service.py`](algorithms/voiceprint_protection/service.py)；契约自测 **41/41**，另有可重复执行的端到端自检 `scripts/test_platform_e2e.py` |
 | 平台方法配置 + 索引登记 | ✅ 已完成 | [`public/methods/group_n005_voiceprint_protection.json`](public/methods/group_n005_voiceprint_protection.json) |
 | Stage 1（解耦-重建网络训练） | ⬜ 未完成 | 成员 A 主责；架构参考 AutoVC |
-| Stage 2（防御性扰动生成，**代码骨架已完成**） | 🟡 部分完成 | [`stage2/`](algorithms/voiceprint_protection/stage2/)；梯度通路自检 **20/20**，正式训练只缺 Stage 1 权重（★ 可求导声码器已就位：HiFi-GAN 16 kHz） |
+| Stage 2（防御性扰动生成，**代码 + 训练器已就绪**） | 🟡 部分完成 | [`stage2/`](algorithms/voiceprint_protection/stage2/)；梯度通路自检 **20/20**；训练器已补齐**断点续训 / AMP / 梯度累积 / 梯度裁剪 / `--max-hours` / 吞吐 ETA**（2026-11-21）；★ 正式训练只缺**成员 A 的 Stage 1 权重**（可求导声码器 HiFi-GAN 16 kHz 已就位）⇒ 云机方案见 [`docs/notes/cloud_ecs_stage2.md`](docs/notes/cloud_ecs_stage2.md) |
 | 评测（Sim_prot / Sim_clone / DSR / WER） | 🟡 部分完成 | [`evaluate.py`](algorithms/voiceprint_protection/evaluate.py)；**基线与绝对 WER 已出**（见 [`docs/experiments.md`](docs/experiments.md) §3i）—— ⏳ 但「Ours」那一行仍缺训练好的 Stage 2 |
 | 心理声学掩蔽 θ_x（MPEG-1 模型） | ✅ 已完成 | [`stage2/psychoacoustics.py`](algorithms/voiceprint_protection/stage2/psychoacoustics.py) |
 
@@ -223,7 +223,10 @@ python algorithms/voiceprint_protection/scripts/smoke_test.py
 | `scripts/test_service.py`（真权重） | ✅ **41/41** 通过（含真实推理 + 文件下载 + 空文本兜底） |
 | `stage2/verify_gradients.py` | ✅ **20/20** 通过（梯度确实穿过三层冻结组件回到 G；含 Stage 1 ↔ Stage 2 接口的 7 项回归断言） |
 | `stage2/verify_mel.py` | ✅ **4/4** 通过（torch 版 GE2E 与上游 mel 误差 2.3e-05，嵌入余弦 0.99999481） |
-| `stage2/train.py --stub --steps 6` | ✅ 训练机制跑通（8004 条 / 80 说话人） |
+| `stage2/train.py --stub --steps 6` | ✅ 训练机制跑通（8000 条 / 80 说话人） |
+| `stage2/train.py --stub --steps 9 --resume` | ✅ **断点续训**（"已从 stage2_last.pt 续训，起始 step = 6"，优化器 + 随机数状态都恢复） |
+| `stage2/train.py --stub --vocoder hifigan` | ✅ **真声码器**链路跑通（本机 CPU 0.42 it/s） |
+| `infer.py --mode stage2` | ✅ **Stage 2 路线**（δ = G(h)，训练好的生成器；CLI 另有 `--mode {clone,stage1,stage2,auto}`） |
 | `scripts/prepare_data.py` | ✅ 三条硬要求自检全通过 |
 
 ### 接口当前状态
@@ -248,12 +251,17 @@ python algorithms/voiceprint_protection/scripts/smoke_test.py
    重新合成本身就会改变音色/韵律 —— **与扰动强弱无关**。
    论文的 0.95 需要 Stage 1 的解码器**重建原句**（内容码 c 保证"说了什么"不变，只换音色）。
    **→ 做到论文那组数字绕不开 Stage 1。**
-3. **Stage 2 缺一个可求导的声码器**：现有的 `bridge_vocoder` 是 numpy 封装，梯度断在里面。
-   HiFi-GAN 的代码已克隆好，**只差 16 kHz 那套权重**（原仓库 `NVIDIA/torch.hifi_gan` 已不存在）。
+3. ~~**Stage 2 缺一个可求导的声码器**~~ → ✅ **已解决**（2026-11-19）：
+   `bridge_vocoder` 已换成 torch 版 HiFi-GAN（HF `speechbrain/tts-hifigan-libritts-16kHz`），
+   本身就可求导。剩下的阻塞只有**成员 A 的 Stage 1 权重**。
    详见 [`docs/notes/stage2_blockers.md`](docs/notes/stage2_blockers.md)。
-4. **MOS 听测未做**（论文 50 人）——【待填：实际人数】。
-5. **黑盒迁移未做**（论文的 Figure 2 跨系统实验，最难，放最后）。
-6. VCTK 每人只取了 **100 句**（均匀抽样），不是全部 ~400–800 句 —— 为把 10.94 GiB 的下载压到 1.36 GiB。
+4. **本机没有 NVIDIA GPU**（核显 + torch CPU 版）⇒ 论文量级必须上云机，
+   流程见 [`docs/notes/cloud_ecs_stage2.md`](docs/notes/cloud_ecs_stage2.md)
+   与 [`scripts/cloud_train_stage2.sh`](scripts/cloud_train_stage2.sh)。
+   ★ 华为云**代金券不适用于竞价实例** ⇒ 只能开**按需**，训完**立刻释放**。
+5. **MOS 听测未做**（论文 50 人）——【待填：实际人数】。
+6. **黑盒迁移未做**（论文的 Figure 2 跨系统实验，最难，放最后）。
+7. VCTK 每人只取了 **100 句**（均匀抽样），不是全部 ~400–800 句 —— 为把 10.94 GiB 的下载压到 1.36 GiB。
 
 ### 耗时与资源
 

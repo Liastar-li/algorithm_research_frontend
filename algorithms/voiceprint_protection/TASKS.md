@@ -590,6 +590,37 @@ Stage 2 也只在 `--stub`（替身 Stage 1 + 替身声码器）上跑过。
 > `scripts/split_speakers.py --check` 对账（名单见 `docs/notes/vctk_speakers.txt`）。
 > 逐条对账：B 侧 `EXACT MATCH: True`（11,000 == 11,000，差集为空）。
 
+### 0.14 ★ 本轮进展（成员 B · 2026-11-21：Stage 2 开训前的准备 + 云机方案）
+
+**背景**：A 的 Stage 1 训完 500k 步（rec 0.00177 / cd 0.00007 / dis −4.38134），
+但 **Sim_prot 只有 0.459**（要 >0.9），A 说要改 `L_rec` 的形式重训。
+⇒ **Stage 2 不能现在开训**（Stage 1 换了要重训一遍）。
+这一轮做的是：**把 Stage 2 的训练器做成"能真的跑完 20 万步"的样子**，
+并把云机这条路走通。
+
+| # | 事项 | 结论 |
+|---|---|---|
+| 1 | 拉 A 的 7 个 commit | ✅ `git pull --ff-only` 干净快进（0 ahead / 7 behind，代码零冲突） |
+| 2 | 合并后的回归 | ✅ **7 个自检脚本全绿**（verify_gradients 20/20、verify_psychoacoustics 20/20、verify_mel 4/4、verify_hifigan、verify_rtc_mel、test_stage1、test_audio_utils） |
+| 3 | ★★ **本机跑不了论文量级** | **本机只有 Intel Iris Xe 核显，没有 NVIDIA GPU**（torch 2.4.1+cpu），内存空闲仅 2.2 GB ⇒ Stage 2 ≈ 30 s/step，200k 步要**两个月** ⇒ 必须上 GPU |
+| 4 | ★★ **Stage 2 训练器补齐六件事** | 断点续训 `--resume` / AMP / 梯度累积 / 梯度裁剪 / `--max-hours` / 吞吐+ETA |
+| 5 | ★★ **`config.STAGE2` 三个键写了没人用** | `amp` / `accum_steps` / `clip_grad` —— 与 A 在 Stage 1 审计里发现的**同一类问题**（不报错、loss 照样降，只是慢/显存不够）。现已全部接上 |
+| 6 | ★ 加 **`[L_de 方向自检]`** | 训练结束自动比较前 10% / 后 10% 的 L_de，方向反了直接喊出来（A 的 `L_dis` 就是同一种坑，§0.10.4c） |
+| 7 | ★★ 抓到一个**隐藏前提** | **E_spk 必须是 Stage 1 微调过的那个**（论文 §3.1）。现在训练用上游 GE2E、推理用微调后的 ⇒ **两个嵌入空间不一样 ⇒ δ 退化成随机方向、防御静默失效**。已加 `--speaker-encoder {stage1,upstream}`，并把选择**写进 checkpoint**，推理照着做 |
+| 8 | ★ `stage2/dataset.py` 加 `persistent_workers` | Windows 上 DataLoader 的 worker 每个 epoch 重启一次（十几秒）—— A 在 Stage 1 上踩过同一个坑（§0.10.4b 第 1 条） |
+| 9 | ★ `infer.py` 加 **stage2 路线** | `δ = G(h)`（训练好的生成器）—— 这才是论文的防御。CLI 现在有 `--mode {clone,stage1,stage2,auto}`（之前根本没暴露 `mode`） |
+| 10 | ★★ **云机方案：华为云 ECS** | 完整指南 [`docs/notes/cloud_ecs_stage2.md`](../../docs/notes/cloud_ecs_stage2.md) + 脚本 [`scripts/cloud_train_stage2.sh`](../../scripts/cloud_train_stage2.sh) |
+| 11 | ★★ **推翻 §8.2 的一条旧结论** | 华为云官方《ECS · 计费说明》：**「代金券不适用于竞价计费型实例」** ⇒ 我们只有代金券 ⇒ **必须开按需，不能开竞价**（§8.2 已改） |
+| 12 | 本机实测 | `--stub` 0.50 it/s；`--stub --vocoder hifigan` **0.42 it/s**（batch 2 / 1 秒）；`--resume` 正常（"起始 step = 6" ✅） |
+
+> ★ **给成员 A 的两件事**：
+> ① **Stage 1 的正式 checkpoint 训完请给 B 一份**（`weights/stage1_model.pt`，约 358 MB）——
+>    Stage 2 训练**必须**有它（冻结的解码器 `D(c, h_adv)`）；
+>    也请把 `--speaker-encoder` 的选择对齐：若 Stage 1 训的是"上游 GE2E 不微调"，
+>    就显式用 `--speaker-encoder upstream`，两边必须一致。
+> ② Stage 1 改成新的 `L_rec` 之后，**Sim_prot 要 > 0.9** 再开 Stage 2
+>    —— 否则 Stage 2 学的是"怎么扰动一个坏掉的空间"。
+
 ## 1. W2 详细分解：指南第 3 步 + 第 4 步
 
 > **W2 目标（M1）**：不训练任何东西，用公开预训练组件把论文的推理路径走通，产出 `protected.wav`。
@@ -842,9 +873,9 @@ cut -d' ' -f2 data/train.txt | sort -u | wc -l
 |---|---|
 | **只在真正要训练时才开机** | 开发、调试、评测全在本地（推理单条 <1s，CPU 也够） |
 | **训练完立刻释放实例** | 按需实例"关机"仍收存储费，"释放"才彻底停收 |
-| **优先用竞价实例** | 便宜 50–80%；训练配 checkpoint 续训，被抢占也不怕 |
-| **先在小卡上跑通流程** | 别一上来就开 A100 烧钱 |
-| **VCTK 下载在本地做** | 数据 11 GB，别在云机上慢慢下 |
+| ~~**优先用竞价实例**~~ → **★ 改：不要用竞价** | **2026-11-21 实测（华为云官方《ECS · 计费说明》）：「代金券不适用于竞价计费型实例。」** 我们只有代金券，竞价实例用不上券（钱从余额扣）⇒ 只能开**按需** |
+| **先在小卡上跑通流程** | 别一上来就开 V100 烧钱（`pi2.2xlarge.4` T4 先跑通，`p2s.2xlarge.8` V100 再长训） |
+| **VCTK 下载在本地做** | 数据 11 GB，别在云机上慢慢下（**实测从本机 tar + scp 更稳**，见 `docs/notes/cloud_ecs_stage2.md`） |
 
 ### 8.2 花钱顺序（按这个来，别乱开）
 

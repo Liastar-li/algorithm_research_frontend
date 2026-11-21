@@ -174,7 +174,19 @@ def build_dataloader(split: str = "train", batch_size: int | None = None,
                      max_seconds: float | None = None,
                      num_workers: int = 2, shuffle: bool | None = None,
                      seed: int = config.SEED):
-    """造一个 DataLoader（默认值全从 config 来）。"""
+    """造一个 DataLoader（默认值全从 config 来）。
+
+    ★ `persistent_workers=True`（2026-11-21，成员 B）：
+      Windows 上 DataLoader 的 worker 是 **spawn** 出来的 ——
+      每开一个 epoch 就要重新 import 一次 torch，十几个秒。
+      我们 8000 条 / batch 8 = 1000 步一个 epoch，
+      **每 1000 步就重启一次 worker** —— 摊下来每步多花十几毫秒，
+      长时间训练里白白浪费几十分钟。
+
+      成员 A 在 Stage 1 上踩过同一个坑（任务板 §0.10.4b 的第 1 条），
+      那次是"每 2 步重启一次 worker"，平均 5.3 s/step → 0.3 s/step。
+      这里加同样的开关。
+    """
     from torch.utils.data import DataLoader
 
     dataset = VCTKManifest(split=split, max_seconds=max_seconds)
@@ -185,6 +197,8 @@ def build_dataloader(split: str = "train", batch_size: int | None = None,
         batch_size=batch_size,
         shuffle=(split == "train") if shuffle is None else shuffle,
         num_workers=num_workers,
+        # ★ worker 常驻，别每个 epoch 重启
+        persistent_workers=num_workers > 0,
         collate_fn=collate_waveforms,
         drop_last=True,
         generator=generator,

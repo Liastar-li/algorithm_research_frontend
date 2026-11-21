@@ -88,6 +88,52 @@ def perturb_embedding(embedding: np.ndarray, delta: np.ndarray,
     return advanced.astype(np.float32)
 
 
+def _infer_generator_config(state: dict) -> dict:
+    """从生成器的权重里**反推**它的结构参数。
+
+    为什么需要：早期的 Stage 2 checkpoint 没存 `generator_config`，
+    但生成器 G 的结构（隐层宽度、层数）必须与训练时**一模一样**，
+    否则 `load_state_dict` 会报形状不符 —— 那种错还算好，
+    怕的是结构相近但不同 silently 加载失败。
+
+    结构（见 stage2/generator.py）：
+        trunk = [Linear(dim→hidden), LayerNorm, GELU] × layers
+        head  = Linear(hidden→dim)
+        skip  = Linear(dim→dim)（可选）
+    """
+    # ★ 局部变量不能叫 `config` —— 会把模块级的 `import config` 遮掉，
+    #   右边的 `config.SPEAKER_DIM` 就成了"引用未赋值的局部变量"。
+    settings = {"dim": config.SPEAKER_DIM, "hidden": 512, "layers": 2}
+    if not isinstance(state, dict):
+        return settings
+
+    # 形状（别搞反）：
+    #   trunk.<i>.weight : (hidden, dim)   ← Linear
+    #   trunk.<i>.weight : (hidden,)       ← LayerNorm（1 维，靠这个区分）
+    #   head.weight      : (dim, hidden)
+    linear_indices = set()
+    for key, value in state.items():
+        if not (key.startswith("trunk.") and key.endswith(".weight")):
+            continue
+        if value.dim() != 2:
+            continue                      # LayerNorm 的权重是 1 维，跳过
+        index = int(key.split(".")[1])
+        linear_indices.add(index)
+        if index == 0:
+            settings["hidden"] = int(value.shape[0])
+            settings["dim"] = int(value.shape[1])
+    if linear_indices:
+        settings["layers"] = len(linear_indices)
+
+    for key, value in state.items():
+        if key.endswith("head.weight") and value.dim() == 2:
+            settings["dim"] = int(value.shape[0])
+            settings["hidden"] = int(value.shape[1])
+
+    settings["use_skip"] = any(key.startswith("skip.") for key in state)
+    return settings
+
+
 # ---------------------------------------------------------------------------
 # 主流程
 # ---------------------------------------------------------------------------
@@ -99,19 +145,27 @@ class Protector:
       · cloner   —— 骗子：(文本, 身份卡) -> 音频
       · stage1   —— ★ 可选：**论文原版**的重建器（成员 A 训的 Stage 1 + HiFi-GAN）
 
-    【两条路线，差别很大】
+    【三条路线，差别很大】
     | 路线 | 保护后语音怎么来的 | Sim_prot 上限 |
     |---|---|---|
     | "clone"（路线 B，默认） | `clone(text, h_adv)` —— 用克隆机**重新合成** | **≈0.82**（重新合成本身就改音色/韵律） |
     | "stage1"（★ 论文原版） | `D(c, h_adv)` —— **重建原句**，只换音色 | 论文 0.95 |
+    | "stage2"（★ 论文原版 + 训练过的 G） | 同上，但 **δ = G(h)** 而不是随机高斯 | 论文 0.95 + 防御真的生效 |
 
     成员 B 在 `docs/experiments.md §3c` 实测过：路线 B 的 Sim_prot 有 **0.82 的
-    结构性天花板**，与扰动强弱无关 —— 论文那组数字**必须走 stage1 路线**。
+    结构性天花板**，与扰动强弱无关 —— 论文那组数字**必须走 stage1/stage2 路线**。
+
+【★★★ stage1 与 stage2 的区别只有一处：δ 从哪来】
+    stage1 : δ = 随机高斯噪声（L1 占位，**没有防御效果**）
+    stage2 : δ = G(h) —— Stage 2 训练出来的生成器，**这才是论文的防御**
+    其余（内容码、重建、声码器、攻击者对比）**完全一样**。
     """
 
     def __init__(self, use_speaker_bridge: bool = True, device: str | None = None,
                  with_cloner: bool = True, stage1_checkpoint: str | Path | None = None,
-                 with_stage1: bool = True):
+                 with_stage1: bool = True,
+                 stage2_checkpoint: str | Path | None = None,
+                 with_stage2: bool = True):
         from bridge_speaker import SpeakerBridge
 
         self.device = device
@@ -129,6 +183,13 @@ class Protector:
         self.vocoder = None
         if with_stage1:
             self.load_stage1(stage1_checkpoint)
+
+        # ★ Stage 2 路线：训练好的生成器 G（δ = G(h)）
+        self.stage2_generator = None
+        self.stage2_checkpoint = None
+        self.stage2_speaker_encoder = "upstream"   # E_spk 用哪个，由 checkpoint 自己说
+        if with_stage2:
+            self.load_stage2(stage2_checkpoint)
 
         self.spec = audio_utils.MelSpec()
 
@@ -183,6 +244,182 @@ class Protector:
     @property
     def has_stage1(self) -> bool:
         return self.stage1 is not None
+
+    # -- Stage 2 路线（训练好的生成器 G）---------------------------------
+    def load_stage2(self, checkpoint: str | Path | None = None) -> bool:
+        """加载 Stage 2 训练好的生成器 **G**（δ = G(h)）。
+
+        返回是否成功（没有 checkpoint 时返回 False，调用方退回 stage1 路线）。
+
+        ★★ **checkpoint 自带契约**（这是最重要的一点）：
+        Stage 2 训练时用的 E_spk 与 G 的结构都写在 checkpoint 里
+        （`speaker_encoder` / `generator_config`），
+        这里**照着做** ⇒ 训练与推理不可能对不上。
+
+        对不上的后果是"不报错、但防御完全失效"：
+        G 学的是"怎么扰动**训练时那个** E_spk 的嵌入空间"，
+        推理时喂进去的却是另一个嵌入空间 ⇒ δ 退化成随机方向。
+        """
+        import torch
+
+        from stage2.generator import PerturbationGenerator
+
+        candidates = [Path(checkpoint)] if checkpoint else [
+            paths.WEIGHTS_DIR / "stage2" / "stage2_last.pt",
+            paths.WEIGHTS_DIR / "stage2_last.pt",
+        ]
+        path = next((p for p in candidates if p.exists()), candidates[0])
+        if not path.exists():
+            return False
+
+        try:
+            state = torch.load(path, map_location="cpu", weights_only=False)
+            generator_config = state.get("generator_config")
+            if generator_config is None:
+                # 早期 checkpoint 没存结构 ⇒ 从权重形状反推
+                generator_config = _infer_generator_config(state["generator"])
+            generator = PerturbationGenerator(**generator_config)
+            generator.load_state_dict(state["generator"])
+            generator.eval()
+            for parameter in generator.parameters():
+                parameter.requires_grad_(False)
+
+            self.stage2_generator = generator
+            self.stage2_checkpoint = path
+            self.stage2_speaker_encoder = state.get("speaker_encoder", "upstream")
+            print(f"  Stage 2 生成器 G：{path.name}"
+                  f"（E_spk = {self.stage2_speaker_encoder}）")
+            return True
+        except Exception as error:  # noqa: BLE001
+            print(f"  [警告] Stage 2 加载失败（{error}），退回随机扰动。")
+            self.stage2_generator = None
+            return False
+
+    @property
+    def has_stage2(self) -> bool:
+        return self.stage2_generator is not None
+
+    def _embed_for_stage2(self, wav: np.ndarray) -> np.ndarray:
+        """★ 用**训练时那个** E_spk 算嵌入 h。
+
+        checkpoint 说用哪个就用哪个 ——
+        见 `load_stage2` 里关于"对不上会静默失效"的说明。
+        """
+        if self.stage2_speaker_encoder == "stage1":
+            if self.stage1_speaker is None:
+                raise RuntimeError(
+                    "Stage 2 的 checkpoint 说是用 Stage 1 微调过的 E_spk 训的，"
+                    "但 Stage 1 权重没加载 —— 先 load_stage1()。"
+                )
+            return self.stage1_speaker.embed_numpy(wav)
+        if self.speaker is None:
+            raise RuntimeError("未加载说话人编码器，无法提取嵌入。")
+        return self.speaker.embed(wav, 16000)
+
+    def protect_stage2(self, wav: np.ndarray, alpha: float = config.STAGE2["alpha"],
+                       delta: np.ndarray | None = None,
+                       seed: int = config.SEED, verbose: bool = True) -> dict:
+        """★★ 论文原版 + **训练好的生成器**：δ = G(h)。
+
+        与 `protect_stage1` 的**唯一区别**是 δ 的来源：
+          stage1 : δ = 随机高斯噪声（L1 占位，**没有防御效果**）
+          stage2 : δ = G(h) —— Stage 2 训出来的方向，**这才是论文的防御**
+
+        其余步骤与论文 Figure 1 完全一致：
+          1. h      = E_spk(x)              身份卡
+          2. δ      = G(h)                  ★ 生成器
+          3. h_adv  = h + α·δ               打疫苗
+          4. x_adv  = D(c, h_adv)           重建原句，只换音色
+          5. protected = V(x_adv)           过声码器成波形
+          6. h_stolen = E_spk(protected)    攻击者从保护后语音重新提卡
+          7. cloned    = V(D(c, h_stolen))  攻击者用偷到的卡重建
+        """
+        import torch
+
+        if self.stage2_generator is None:
+            raise RuntimeError("Stage 2 生成器未加载 —— 先调 load_stage2()。")
+        if self.stage1 is None:
+            raise RuntimeError(
+                "Stage 2 路线需要 Stage 1 的重建器（D(c, h_adv)）—— 先调 load_stage1()。"
+            )
+
+        device = next(self.stage1.parameters()).device
+
+        # 1. 体检：波形 -> 身份卡 h（★ 用训练时那个 E_spk）
+        with torch.no_grad():
+            embedding = self._embed_for_stage2(wav)
+
+            # 2. 生成器出扰动（★ 这才是 Stage 2 训出来的东西）
+            embedding_tensor = torch.from_numpy(
+                np.asarray(embedding, dtype=np.float32)).unsqueeze(0).to(device)
+            delta_tensor = self.stage2_generator(embedding_tensor)
+            delta = delta_tensor[0].cpu().numpy()
+            # G 的输出是**单位长度**的方向，α 才是强度旋钮（见 stage2/generator.py）
+            embedding_adv = perturb_embedding(embedding, delta, alpha)
+
+            # 3. 内容码 + 重建
+            from stage1.model import pad_mel_to_freq
+
+            mel_np, original_frames = pad_mel_to_freq(audio_utils.model_mel(wav))
+            mel = torch.from_numpy(mel_np).unsqueeze(0).to(device)      # (1, T', 80)
+            h = torch.from_numpy(embedding).unsqueeze(0).to(device)
+            h_adv = torch.from_numpy(embedding_adv).unsqueeze(0).to(device)
+
+            _, protected_mel, codes = self.stage1(mel, h, h_adv)           # x_adv
+            content = torch.stack(codes, dim=1)                            # (1, T', 64)
+
+            # 4. 过声码器（先裁回原始帧数）
+            protected = self.vocoder.mel_to_wav(
+                protected_mel[0, :original_frames].cpu().numpy())
+
+            # 5. 攻击者重新提卡（★ 必须用同一个 E_spk，否则度量不可比）
+            stolen = self._embed_for_stage2(protected)
+
+            # 6. 攻击者用偷到的卡重建（同一份内容码，只换音色）
+            h_stolen = torch.from_numpy(stolen).unsqueeze(0).to(device)
+            _, cloned_mel, _ = self.stage1(mel, h_stolen, h_stolen)
+            cloned = self.vocoder.mel_to_wav(
+                cloned_mel[0, :original_frames].cpu().numpy())
+
+            # 对照：未防御的重建 D(c, h)
+            _, baseline_mel, _ = self.stage1(mel, h, h)
+            baseline = self.vocoder.mel_to_wav(
+                baseline_mel[0, :original_frames].cpu().numpy())
+
+        if verbose:
+            print(f"  [1] 身份卡 h        {tuple(embedding.shape)}  "
+                  f"L2 范数 {float(np.linalg.norm(embedding)):.4f}")
+            print(f"  [2] 生成器 G 的 δ   {tuple(delta.shape)}  "
+                  f"L2 范数 {float(np.linalg.norm(delta)):.4f}（应为 1）"
+                  f"  与原卡余弦 {float(np.dot(embedding, delta)):.4f}")
+            print(f"  [3] 扰动后身份卡    与原卡余弦 {float(np.dot(embedding, embedding_adv)):.4f}"
+                  f"（α={alpha}）")
+            print(f"  [4] 保护后语音      {tuple(protected.shape)}  "
+                  f"RMS {audio_utils.rms_energy(protected):.5f}")
+            print(f"  [5] 攻击者重新提的卡 与原卡余弦 {float(np.dot(embedding, stolen)):.4f}"
+                  f"（越小 -> 防御越有效；论文用 Sim_clone 衡量）")
+            print(f"  [6] 未防御重建 D(c,h) {tuple(baseline.shape)}  "
+                  f"RMS {audio_utils.rms_energy(baseline):.5f}")
+            print(f"  [7] 防御后重建      {tuple(cloned.shape)}  "
+                  f"RMS {audio_utils.rms_energy(cloned):.5f}")
+
+        return {
+            "embedding": embedding,
+            "embedding_adv": embedding_adv,
+            "delta": delta,
+            "stolen_embedding": stolen,
+            "protected_waveform": protected,
+            "clone_baseline_waveform": baseline,
+            "clone_protected_waveform": cloned,
+            "shapes": {
+                "embedding": list(embedding.shape),
+                "embedding_adv": list(embedding_adv.shape),
+                "delta": list(delta.shape),
+                "stolen_embedding": list(stolen.shape),
+                "protected_waveform": list(protected.shape),
+            },
+            "route": "stage2",
+        }
 
     def protect_stage1(self, wav: np.ndarray, alpha: float = config.STAGE2["alpha"],
                        delta: np.ndarray | None = None,
@@ -316,13 +553,22 @@ class Protector:
         attack_mode : "clone" 时额外产出攻击者克隆音；"none" 只产出保护后语音
         mode        : ★ 路线选择
                      "clone"  —— 用克隆机重新合成（默认；Sim_prot 上限 ≈0.82）
-                     "stage1" —— ★ 论文原版 D(c, h_adv) → HiFi-GAN
-                     "auto"   —— 有 Stage 1 权重就用 stage1，否则退回 clone
+                     "stage1" —— ★ 论文原版 D(c, h_adv) → HiFi-GAN（δ 是随机噪声）
+                     "stage2" —— ★★ 论文原版 + **训练好的 G**（δ = G(h)，这才是防御）
+                     "auto"   —— 有 Stage 2 权重就用 stage2，其次 stage1，最后 clone
 
         返回 dict，含中间每一步，便于逐步核对形状。
         """
         if mode == "auto":
-            mode = "stage1" if self.has_stage1 else "clone"
+            if self.has_stage2:
+                mode = "stage2"
+            elif self.has_stage1:
+                mode = "stage1"
+            else:
+                mode = "clone"
+        if mode == "stage2":
+            return self.protect_stage2(wav, alpha=alpha, delta=delta,
+                                       seed=seed, verbose=verbose)
         if mode == "stage1":
             return self.protect_stage1(wav, alpha=alpha, delta=delta,
                                        seed=seed, verbose=verbose)
@@ -393,7 +639,9 @@ def protect(wav_path: str | Path, alpha: float = config.STAGE2["alpha"],
             attack_mode: str = "clone",
             seed: int = config.SEED,
             sample_rate: int = 16000,
-            mode: str = "clone") -> dict:
+            mode: str = "clone",
+            stage1_checkpoint: str | Path | None = None,
+            stage2_checkpoint: str | Path | None = None) -> dict:
     """一站式保护：读音频 -> 保护 -> 写音频。
 
     参数
@@ -403,7 +651,10 @@ def protect(wav_path: str | Path, alpha: float = config.STAGE2["alpha"],
     output_path : 保护后音频的输出路径（None 时不写文件）
     text        : 攻击者要念的参考文本
     attack_mode : "clone" 时额外把攻击者克隆音写到同目录
-    mode        : ★ 路线选择 —— "clone"（默认）/ "stage1"（论文原版）/ "auto"
+    mode        : ★ 路线选择 —— "clone"（默认）/ "stage1"（论文原版，δ 随机）
+                  / "stage2"（论文原版 + 训练好的 G）/ "auto"
+    stage1_checkpoint : Stage 1 的权重（stage1 / stage2 路线需要）
+    stage2_checkpoint : Stage 2 的权重（stage2 路线需要）
 
     返回
     ----
@@ -413,7 +664,8 @@ def protect(wav_path: str | Path, alpha: float = config.STAGE2["alpha"],
     sample_rate = sample_rate or config.MEL_PRESETS[config.DEFAULT_PRESET]["sample_rate"]
     wav = audio_utils.load_audio(wav_path, sample_rate)
 
-    protector = Protector()
+    protector = Protector(stage1_checkpoint=stage1_checkpoint,
+                          stage2_checkpoint=stage2_checkpoint)
     result = protector.protect(
         wav, alpha=alpha, seed=seed, text=text, attack_mode=attack_mode,
         verbose=False, mode=mode,
@@ -447,7 +699,8 @@ def protect(wav_path: str | Path, alpha: float = config.STAGE2["alpha"],
 def main() -> int:
     import argparse
 
-    parser = argparse.ArgumentParser(description="声纹保护推理（L1：随机扰动占位，未训练生成器 G）")
+    parser = argparse.ArgumentParser(
+        description="声纹保护推理（clone=克隆机路线 / stage1=论文原版 / stage2=论文原版+训练好的 G）")
     parser.add_argument("audio", help="输入音频路径（wav）")
     parser.add_argument("--alpha", type=float, default=config.STAGE2["alpha"],
                         help=f"扰动强度 α，默认 {config.STAGE2['alpha']}")
@@ -456,10 +709,16 @@ def main() -> int:
     parser.add_argument("--output", default=None, help="输出 wav 路径")
     parser.add_argument("--report", default=None, help="输出 JSON 报告路径")
     parser.add_argument("--no-clone", action="store_true", help="不产出攻击者克隆音")
+    parser.add_argument("--mode", choices=("clone", "stage1", "stage2", "auto"), default="clone",
+                        help="推理路线（默认 clone；stage2 需要 Stage 1 + Stage 2 两份权重）")
+    parser.add_argument("--stage1-checkpoint", default=None,
+                        help="Stage 1 权重路径（stage1 / stage2 路线需要）")
+    parser.add_argument("--stage2-checkpoint", default=None,
+                        help="Stage 2 权重路径（stage2 路线需要；默认 weights/stage2/stage2_last.pt）")
     args = parser.parse_args()
 
     print("=" * 66)
-    print("  声纹保护推理 · L1（随机扰动占位，未训练生成器 G）")
+    print(f"  声纹保护推理 · 路线 {args.mode}")
     print("=" * 66)
     print(paths.describe())
     print()
@@ -469,11 +728,13 @@ def main() -> int:
     print(f"参考文本: {args.text}")
     print()
 
-    protector = Protector()
+    protector = Protector(stage1_checkpoint=args.stage1_checkpoint,
+                          stage2_checkpoint=args.stage2_checkpoint)
     print("【推理链】")
     result = protector.protect(
         wav, alpha=args.alpha, seed=args.seed, text=args.text,
         attack_mode="none" if args.no_clone else "clone",
+        mode=args.mode,
     )
 
     output = Path(args.output) if args.output else Path(args.audio).with_name(

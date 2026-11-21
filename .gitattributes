@@ -1,0 +1,33 @@
+# 换行符约定（2026-11-21 加，成员 B）
+#
+# ★ 为什么必须有这个文件
+#   本机（Windows）的 git 全局配置是 `core.autocrlf=true` ——
+#   于是 **Windows 上 clone 出来的 `*.sh` 会是 CRLF**，
+#   传到 Linux 云机上跑就会报：
+#       /usr/bin/env: 'bash\r': No such file or directory
+#       $'\r': command not found
+#   （而且报错信息完全看不出是换行符的问题，很容易卡半天。）
+#
+#   我们的云机脚本（scripts/cloud_train_stage*.sh）**必须**在 Linux 上跑，
+#   所以把 `*.sh` 钉死成 LF —— 不管在哪个系统上 checkout 都不会变形。
+#
+#   仓库里存的一律是 LF（git 的标准做法），这一条只管"工作区里长什么样"。
+
+# shell 脚本：必须是 LF
+*.sh text eol=lf
+
+# 其余文本文件：跟着各平台的默认行为（Windows 上 CRLF，Linux 上 LF）
+*.py    text
+*.mjs   text
+*.js    text
+*.json  text
+*.md    text
+
+# 二进制：不要做任何换行符转换
+*.wav   binary
+*.flac  binary
+*.png   binary
+*.jpg   binary
+*.pt    binary
+*.pth   binary
+*.ckpt  binary

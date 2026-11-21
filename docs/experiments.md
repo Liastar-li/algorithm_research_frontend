@@ -821,9 +821,159 @@ M3 要求 `Sim_prot > 0.9`，第一次测只有 **0.385**。逐层排查：
 
 ---
 
+## 4d. ★★ 2026-11-21：Stage 2 开训前的准备（成员 B）—— 训练器补齐 + 一个"隐藏前提"
+
+### 4d.1 先说清楚：**本机跑不了论文量级**
+
+| 项 | 实测值 |
+|---|---|
+| 显卡 | **Intel Iris Xe 核显，没有 NVIDIA GPU**（`nvidia-smi` 不存在，torch `cuda.is_available()=False`） |
+| torch | 2.4.1**+cpu** |
+| 内存 | 16 GB，**空闲只剩 2.2 GB** |
+| 后果 | Stage 2 用真 Stage 1 + 真 HiFi-GAN ≈ **30 s/step**（§0.12 的数）⇒ 200k 步要跑**两个月** |
+
+⇒ 本机的定位只能是**验证链路 + 测耗时**，正式训练必须上 GPU。
+（成员 A 的 4060 那台能跑 Stage 1 到 500k，我们的云机方案见 §4d.5。）
+
+### 4d.2 合并成员 A 的 7 个 commit 之后的回归
+
+`git pull --ff-only`（A 已经 rebase 过，本地 0 ahead / 7 behind，干净快进）⇒ **7 个自检脚本全绿**：
+
+```
+verify_gradients 20/20 · verify_psychoacoustics 20/20 · verify_mel 4/4
+verify_hifigan ✅ · verify_rtc_mel ✅ · test_stage1 ✅ · test_audio_utils ✅
+```
+
+### 4d.3 ★★ Stage 2 训练器补齐六件事（把 A 在 Stage 1 上的审计照搬过来）
+
+A 2026-11-18 做过一次"训练到底能不能跑起来"的审计（§0.10.1），
+当时 Stage 2 **一件都没有**。这次补齐：
+
+| # | 缺什么 | 不补的后果 |
+|---|--------|-----------|
+| 1 | **断点续训 `--resume`** | 200k 步在竞价实例上被抢占 = 白跑 |
+| 2 | **AMP** | `config.STAGE2["amp"]` 写了但**代码里一个字都没用** ⇒ 8 GB 显存会 OOM |
+| 3 | **梯度累积** | `config.STAGE2["accum_steps"]` 同上 ⇒ 想用大 batch 又不 OOM 就没辙 |
+| 4 | **梯度裁剪** | `config.STAGE2["clip_grad"]` 同上 ⇒ L_de 的梯度穿过声码器，容易炸 |
+| 5 | **`--max-hours`** | 云机按小时计费，忘了关就一直烧钱 |
+| 6 | **吞吐 / ETA 打印** | 不知道要跑多久，就不敢决定开不开 |
+
+> ★ **"写在 config 里却没人用"是审计里最难发现的一类问题**：
+> 不报错、loss 照样降，只是跑得比应该的慢好几倍 / 显存不够。
+> 这三个键在 `config.STAGE2` 里躺了很久，谁都没注意。
+
+另外加了一个 **`[L_de 方向自检]`**：训练结束自动比较前 10% 与后 10% 的 L_de，
+方向不对直接喊出来 —— A 的 `L_dis` 就是同一种"不报错但方向反了"的坑（§4c.2）。
+
+**实测**（本机 CPU）：
+
+```
+--stub --steps 6                → 0.50 it/s，loss 在动 ✅
+--stub --steps 9 --resume       → "已从 stage2_last.pt 续训，起始 step = 6" ✅
+--stub --vocoder hifigan        → 0.42 it/s（batch 2 / 1 秒片段）✅ 真声码器链路通
+```
+
+### 4d.3b ★★★ **全真链路已跑通**（只差权重质量）
+
+用成员 A 的 **3 步冒烟 checkpoint**（当"Stage 1 权重"用），
+把 **真 Stage 1 架构 + 真 HiFi-GAN 声码器 + 真微调 E_spk + 真 VCTK** 全接上：
+
+```
+$ python algorithms/voiceprint_protection/stage2/train.py \
+      --vocoder hifigan --stage1-checkpoint <A 的冒烟权重> \
+      --speaker-encoder stage1 --steps 2 --batch-size 2 --max-seconds 1.0
+
+  E_spk      : Stage1SpeakerEncoder      ← 随 Stage 1 微调过的那个（1,423,618 参数）
+  Stage 1    : TorchAutoVCStage1         ← 官方 AutoVC Generator（28,422,464 参数）✅ 权重加载成功
+  声码器     : HiFiGANVocoder            ← 真 HiFi-GAN 16 kHz ✅
+  模型侧 mel : hifigan16k
+       步      total      gan       de       per       mel     mask  sim_clone    it/s
+       1     9.0417   0.9946   0.6750    0.3115    0.1255   1.8599     0.6750    0.18
+       2    16.2494   0.9780   0.6846    0.7899    0.1438   6.4609     0.6846    0.26
+```
+
+⇒ **Stage 2 的整条链（真 Stage 1 + 真声码器 + 真数据 + 微调过的 E_spk）已经通了**，
+差的只有 Stage 1 权重的**质量**（A 那份 Sim_prot 0.459）。
+等 A 的正式权重到位，命令就是：
+
+```bash
+python algorithms/voiceprint_protection/stage2/train.py \
+    --vocoder hifigan --stage1-checkpoint <A 的 stage1_model.pt> --steps 200000
+```
+
+（本机 CPU 3.8 s/step ⇒ 200k 步要跑 8.7 个月 ⇒ 必须上 GPU，见 §4d.5）
+
+### 4d.4 ★★★ 抓到一个"隐藏前提"：**E_spk 必须是 Stage 1 微调过的那个**
+
+论文 §3.1：*"...fine-tuned end-to-end during Stage 1 training"* ——
+**Stage 2 用的 E_spk 必须是 Stage 1 微调完的那一个**。
+
+而现在的代码：
+
+| 地方 | 用的是哪个 E_spk |
+|---|---|
+| `stage2/train.py`（训练） | 上游 GE2E（`TorchSpeakerEncoder`，**没微调过**） |
+| `infer.py`（推理） | 随 Stage 1 微调过的那个（`TrainableSpeakerEncoder`） |
+
+⇒ **两个嵌入空间不一样**。后果：G 学的是"怎么扰动**上游** GE2E 的嵌入空间"，
+推理时喂进去的却是**微调后**的嵌入 ⇒ **δ 退化成随机方向，防御完全失效，而且不报错**。
+
+**处理**（2026-11-21）：
+
+1. `stage2/models.py` 新增 `Stage1SpeakerEncoder` —— 直接复用 A 的
+   `TrainableSpeakerEncoder`（**不重新实现**，保证逐字一致），
+   从 Stage 1 checkpoint 的 `speaker_encoder` 段加载微调后的权重；
+2. `stage2/train.py` 加 `--speaker-encoder {stage1,upstream}`，
+   默认按 checkpoint 内容自动选；
+3. ★ **这个选择被写进 Stage 2 的 checkpoint**（`speaker_encoder` / `generator_config`），
+   `infer.py` 的 stage2 模式**照着做** ⇒ 训练与推理不可能对不上。
+
+> 这也是为什么 `infer.py` 的 stage2 模式必须先读 checkpoint 的元数据，
+> 而不是"猜"用哪个编码器。
+
+### 4d.5 ★ 云机方案：华为云 ECS（含一条**推翻旧结论**的官方规则）
+
+完整指南见 **[`docs/notes/cloud_ecs_stage2.md`](notes/cloud_ecs_stage2.md)**，
+脚本 [`scripts/cloud_train_stage2.sh`](../../scripts/cloud_train_stage2.sh)（与 Stage 1 版对称）。
+
+**★ 推翻任务板 §8.2 的一条**：那里写「**优先用竞价实例**（便宜 50–80%）」，
+但华为云官方《弹性云服务器 ECS · 计费说明》明确写着：
+
+> 「**代金券不适用于竞价计费型实例。**」
+
+⇒ 我们只有 500 元**代金券**，竞价实例**用不上券**（钱从余额扣，余额里没有）。
+⇒ **必须开"按需计费"**，并靠"训完立刻释放实例"来省钱。
+
+其余要点：
+
+| 项 | 结论 |
+|---|---|
+| 规格 | `p2s.2xlarge.8`（V100 32 GB）正式训练；`pi2.2xlarge.4`（T4 16 GB）先跑通流程 |
+| 镜像 | **用干净的 Ubuntu 22.04**，自己装 torch cu121 —— 不要用镜像市场的深度学习镜像（版本对不上） |
+| 数据 | **从本机 tar + scp**（1.36 GiB），不要在云机上重下 Edinburgh（国内 30–400 KB/s） |
+| 省钱 | 训练完 **释放实例 + 删数据盘 + 释放 EIP**（关机只停算力费，**硬盘和 IP 照收**） |
+| 断线 | tmux + `--resume`（优化器状态、随机数状态都在 checkpoint 里） |
+
+### 4d.6 `infer.py` 加了 **stage2 路线**
+
+| 路线 | δ 的来源 | 防御是否生效 |
+|---|---|---|
+| `clone` | —（用克隆机重新合成） | ❌ 且 Sim_prot 有 0.82 的结构性天花板（§3c） |
+| `stage1` | 随机高斯噪声 | ❌（L1 占位） |
+| **`stage2`** | **G(h) —— 训练好的生成器** | ✅ **这才是论文的防御** |
+
+`stage1` 与 `stage2` 的**唯一区别就是 δ 从哪来**，其余（内容码、重建、声码器、
+攻击者对比）完全一样。CLI 现在可以 `--mode {clone,stage1,stage2,auto}` 了
+（之前 `main()` 里根本没暴露 `mode`，只能跑 clone）。
+
+---
+
 ## 5. 已知坑（组内共享，别重复踩）
 | 坑 | 现象 | 出处 |
 |---|---|---|
+| **训练与推理的 E_spk 必须一致** | 论文说 E_spk 在 Stage 1 里被微调过。训练用**上游** GE2E、推理用**微调后**的那个 ⇒ 两个嵌入空间不同 ⇒ 生成器 G 的输出**离分布** ⇒ **防御静默失效**（不报错，只是指标全错）。现在把选择写进 checkpoint，推理照着做 | stage2/models.py + stage2/train.py + infer.py（2026-11-21） |
+| **局部变量别叫 `config`** | 在 `infer.py` 里写 `config = {...}` 会把模块级的 `import config` 遮掉 ⇒ 右边 `config.SPEAKER_DIM` 变成"引用未赋值的局部变量" ⇒ `UnboundLocalError`。而且它**被 try/except 吞掉了**，只打印一句"加载失败" | infer.py::_infer_generator_config（2026-11-21） |
+| **Linear 权重的形状方向** | `trunk.<i>.weight` 是 **(hidden, dim)**，`head.weight` 是 **(dim, hidden)** —— 两个不一样。反了会 size mismatch（好）；若用 LayerNorm 的 1 维权重去数层数，会数出 4 而不是 2（**不好，要靠形状区分**） | infer.py::_infer_generator_config（2026-11-21） |
 | **L_dis 的符号方向** | `Σ p log p` **本身就是 −H**；实现里再加一个负号 → 最小化它 = **让分类器更确定** ⇒ 解耦**反了**。现象：训练时 `dis` 停在 0.0016（= H≈0，分类器完全确定）。**loss 照样降、不报错**，只能靠看 `dis` 的数值与方向发现 | stage1/losses.py（2026-11-20 修） |
 | **mel 口径的近似换算** | AutoVC mel → HiFi-GAN mel 的仿射换算**不可接受**：两套滤波器组不同，仿射补不回来。实测重建音的说话人余弦从 **0.9746 掉到 0.6983** | TASKS.md §0.10.4c |
 | **mel 量纲会毁掉论文的 λ** | HiFi-GAN 原始 mel 值域 [-11.5, 0]，直接用会让 `L_rec` 比论文大 **100 倍**，`λ_cd=1.0` 被稀释 40 倍 ⇒ **论文的超参失效**。解法：可逆的固定仿射归一化（送声码器前反变换回去，误差 4.8e-07） | TASKS.md §0.10.4c |

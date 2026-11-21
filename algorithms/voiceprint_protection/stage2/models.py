@@ -245,6 +245,83 @@ class TorchSpeakerEncoder(nn.Module):
 
 
 # ---------------------------------------------------------------------------
+# 1b. E_spk 的另一种来源：随 Stage 1 一起微调过的 GE2E
+# ---------------------------------------------------------------------------
+class Stage1SpeakerEncoder(nn.Module):
+    """E_spk = **随 Stage 1 一起微调过**的 GE2E（论文 §3.1 的原意）。
+
+    【★ 为什么需要这一个类 —— 这是 Stage 2 的"隐藏前提"】
+    论文 §3.1 原文：
+        *"Speaker embeddings are extracted using a GE2E model initialized from
+          pretrained weights and **fine-tuned end-to-end during Stage 1 training**."*
+
+    也就是说，**Stage 2 用的 E_spk 必须是 Stage 1 微调完的那一个**。
+    如果 Stage 2 拿**上游没微调过的** GE2E 去算嵌入：
+      · 训练时算的 `L_de` 与推理时算的 `Sim_clone` **不是同一个度量**；
+      · 生成器 G 学到的是"怎么扰动**上游** GE2E 的嵌入空间"，
+        而推理时喂给 G 的是**微调后**的嵌入 ⇒ **G 的输出是离分布的**，
+        扰动基本等于随机噪声，**而且不报错**。
+
+    ⇒ 所以 Stage 2 训练时必须显式选一个 E_spk，并且**把这个选择写进 checkpoint**，
+      推理时照着做 —— 两边不可能对不上。
+
+    【算法必须与推理时逐字一致】
+    这里**直接复用** `stage1/speaker_encoder.py::TrainableSpeakerEncoder`
+    （成员 A 写的），**不重新实现一遍** ——
+    同一个类、同一个权重，才谈得上"一致"。
+    注意它与上面 `TorchSpeakerEncoder` 的差别：
+      · `TorchSpeakerEncoder`：上游 `embed_utterance` 的做法（分 160 帧的段、
+        50% 重叠、各段嵌入取平均）+ 音量归一化；
+      · `TrainableSpeakerEncoder`：整段 mel 一次过 LSTM（成员 A 训 Stage 1 用的就是这个）。
+    两个都能用，但**训练与推理必须用同一个**。
+    """
+
+    def __init__(self, checkpoint: str | Path, device: str | None = None):
+        super().__init__()
+        from stage1.speaker_encoder import TrainableSpeakerEncoder
+
+        self.device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
+        path = Path(checkpoint)
+        if not path.exists():
+            raise FileNotFoundError(f"找不到 Stage 1 checkpoint：{path}")
+
+        state = torch.load(path, map_location="cpu", weights_only=False)
+        if not isinstance(state, dict) or "speaker_encoder" not in state:
+            raise KeyError(
+                f"{path.name} 里没有 'speaker_encoder' 这一段。\n"
+                "⇒ 这个 checkpoint 不是本项目 stage1/train.py 训出来的"
+                "（或当时没开 GE2E 微调），不能当作 Stage 2 的 E_spk。\n"
+                "可以用 --speaker-encoder upstream 退回上游的 GE2E。"
+            )
+
+        self.encoder = TrainableSpeakerEncoder(device=str(self.device), fine_tune=False)
+        self.encoder.model.load_state_dict(state["speaker_encoder"])
+        self.encoder.model.eval().to(self.device)
+        for parameter in self.encoder.parameters():
+            parameter.requires_grad_(False)
+        self.checkpoint_path = path
+
+    def forward(self, waveform: torch.Tensor,
+                lengths: torch.Tensor | None = None) -> torch.Tensor:
+        """波形 (B, N) -> 嵌入 (B, 256)（已 L2 归一化）。"""
+        import audio_utils
+
+        if waveform.dim() != 2:
+            raise ValueError(f"期望 (B, N) 的波形，收到 {tuple(waveform.shape)}")
+        batch = waveform.shape[0]
+        if lengths is None:
+            lengths = torch.full((batch,), waveform.shape[1],
+                                 device=waveform.device, dtype=torch.int64)
+
+        rows = []
+        for index in range(batch):
+            wav = waveform[index, : int(lengths[index])].detach().cpu().numpy()
+            mel = audio_utils.ge2e_mel(wav)
+            rows.append(self.encoder(torch.from_numpy(mel).unsqueeze(0).to(self.device))[0])
+        return torch.stack(rows, dim=0)
+
+
+# ---------------------------------------------------------------------------
 # 2. Stage 1（AutoVC 架构）的 torch 版
 # ---------------------------------------------------------------------------
 class TorchAutoVCStage1(nn.Module):
