@@ -968,9 +968,98 @@ python algorithms/voiceprint_protection/stage2/train.py \
 
 ---
 
+## 4e. ★★★ 2026-11-21：M3 的 Sim_prot 到底是多少 —— 一个"空间错配"引发的假象（成员 A）
+
+> **与上面 §4d 第 7 条是同一个坑，两边独立发现、结论一致。**
+> 这一节记**排查过程**，因为它同时暴露了
+> ① 一个评估口径的坑（**B 的 `evaluate.py` 也会踩**）
+> ② 一条"我们其实已经达标了"的结论。
+
+### 4e.1 现象
+
+500,000 步训完后，`scripts/eval_stage1.py` 报：
+
+```
+平均 Sim_prot : 0.459     ← 远低于 M3 要求的 0.9（论文 0.95）
+平均 L_rec    : 0.0438
+重建音 RMS    : 原音的 1/10（0.0028 vs 0.0551）
+```
+
+**五层排查全部指向"重建质量差"**：
+
+| 诊断 | 结果 | 当时的结论 |
+|---|---|---|
+| 纯声码器往返（原 mel → HiFi-GAN → 波形） | 0.9856 | 声码器无损 ✅ |
+| 已见说话人（train）vs 未见（test） | 0.387 vs 0.381 | **不是过拟合** |
+| 给模型 mel 加 σ=0.02 噪声 | Sim_prot 掉到 0.35 | 误差不是关键，差异是结构性的 |
+| 原始 mel std vs 模型 mel std | 0.2065 vs **0.1841** | **过度平滑**：峰值被压平 |
+| 过拟合 8 个样本 3000 步 | L_rec 1.306→0.258 仍在降 | **实现没问题，是训练量不够** |
+
+⇒ 一度以为是 "MSE 把 mel 峰值压平了"，并为此准备改 `L_rec`
+（加梯度项 / 换 L1 / 换 STFT 损失）。
+
+### 4e.2 ★ 真正的根因：**评测用了「不是训练时那个」的说话人编码器**
+
+Stage 1 训练时：
+
+```python
+embedding = speaker_encoder(mel40)     # ★ fine_tune=True，E_spk **正在被微调**
+```
+
+而 checkpoint 里**存了微调后的 E_spk**（`"speaker_encoder"` 键）。
+但评测脚本当时用的是 `TrainableSpeakerEncoder(fine_tune=False)` ——
+**上游预训练**的 E_spk，没装 checkpoint 里的权重。
+
+⇒ **两者的嵌入不在同一个空间里**，于是：
+- 解码器收到的是「微调空间的 h」，而我们拿「预训练空间的 E_spk」去评判 ⇒ 全部指标偏低
+- 逐帧能量包络看起来被"压平"，其实只是**两个空间的 h 对不上**产生的假象
+
+### 4e.3 装上微调 E_spk 之后（只改评测，**模型一个字没动**）
+
+| E_spk | L_rec | Sim_prot | RMS 比 |
+|---|---|---|---|
+| 上游预训练（**之前用的**） | 0.04390 | 0.4367 | 0.101 |
+| ★ checkpoint 里的微调 | **0.01928** | **0.999996** | **0.707** |
+
+**⇒ Sim_prot = 0.999996，M3 通过。**
+
+### 4e.4 ⚠️ 这个坑的三个要点（**B 的 `evaluate.py` 也要注意**）
+
+1. **微调后的 E_spk 与上游预训练 E_spk 的嵌入空间差异极大** ——
+   同一段原音在两者下的嵌入**只相关 0.518**。
+   ⇒ **任何比较都必须在同一个 E_spk 下做**。
+2. **论文的 E_spk 是"微调后"那个**（§3.1 "initialized from pretrained weights and
+   fine-tuned end-to-end during Stage 1 training"）⇒
+   **Sim_prot / Sim_clone 应该全线统一用微调后的 E_spk**。
+3. **但说话人分类器 W_s 是例外** —— 我们的 W_s 是在**预训练** E_spk 的空间里训的
+   （第 1 步 `fine_tune=False`），所以问它"这是谁"时也必须用**预训练** E_spk 的嵌入。
+   （`eval_stage1.py` 现在两个编码器各司其职：微调 E_spk 算 Sim_prot，预训练 E_spk 喂 W_s。）
+
+> ⭐ 附带的一个**有意思的推论**：因为微调把 E_spk 的空间挪走了，
+> **上游那个"没微调过的"说话人识别器认不出重建出来的语音**
+> （预训练 E_spk 下，原音 vs 重建音只有 0.60）⇒
+> 对攻击者而言，这本身就是一种"防御"。报告里要如实写清楚这是哪一部分的效果。
+
+### 4e.5 另一个教训：**13.5 小时的训练成果被一次冒烟测试覆盖了**
+
+排查过程中跑了一次 20 步的 `--smoke` 训练，它结束时把
+`weights/stage1_model.pt` 覆盖了 —— 500,000 步的权重没了
+（`stage1_last_ckpt.pt` 因为只在每 2000 步写，侥幸保住了 6000 步那份，
+但也不是 500k 那份）。
+
+⇒ `stage1/train.py` 已加固（2026-11-21）：
+- **冒烟/未跑满的步数不再覆盖正式权重**，另存为 `stage1_partial_step{N}.pt`；
+- 新增 **`stage1_best.pt`**：每次验证时若 `val total` 更低就更新
+  （轻量，不含优化器，115 MB）—— **最优不一定在最后一步**，而且以后不会再被覆盖；
+- `stage1_last_ckpt.pt` 仍是含优化器的完整断点（358 MB），用于 `--resume`。
+
+---
+
 ## 5. 已知坑（组内共享，别重复踩）
 | 坑 | 现象 | 出处 |
 |---|---|---|
+| ★★ **E_spk 的「空间错配」** | Stage 1 会**微调** E_spk（论文 §3.1 明写 "fine-tuned end-to-end"），checkpoint 里存了微调后的权重。**评测时若用上游预训练 E_spk**，两者嵌入只相关 **0.518** ⇒ Sim_prot 0.44（装上后是 **0.999996**）、RMS 差 10 倍。**不报错，只是数字偏低** | experiments.md §4e |
+| **冒烟训练覆盖正式权重** | `--smoke` 结束时把 `stage1_model.pt` 覆盖了 ⇒ 13.5 小时成果全丢。已加固：未跑满不覆盖 + 另存 `stage1_best.pt` | experiments.md §4e.5 |
 | **训练与推理的 E_spk 必须一致** | 论文说 E_spk 在 Stage 1 里被微调过。训练用**上游** GE2E、推理用**微调后**的那个 ⇒ 两个嵌入空间不同 ⇒ 生成器 G 的输出**离分布** ⇒ **防御静默失效**（不报错，只是指标全错）。现在把选择写进 checkpoint，推理照着做 | stage2/models.py + stage2/train.py + infer.py（2026-11-21） |
 | **局部变量别叫 `config`** | 在 `infer.py` 里写 `config = {...}` 会把模块级的 `import config` 遮掉 ⇒ 右边 `config.SPEAKER_DIM` 变成"引用未赋值的局部变量" ⇒ `UnboundLocalError`。而且它**被 try/except 吞掉了**，只打印一句"加载失败" | infer.py::_infer_generator_config（2026-11-21） |
 | **Linear 权重的形状方向** | `trunk.<i>.weight` 是 **(hidden, dim)**，`head.weight` 是 **(dim, hidden)** —— 两个不一样。反了会 size mismatch（好）；若用 LayerNorm 的 1 维权重去数层数，会数出 4 而不是 2（**不好，要靠形状区分**） | infer.py::_infer_generator_config（2026-11-21） |

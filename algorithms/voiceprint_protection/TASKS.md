@@ -45,7 +45,8 @@
 | `third_party/RTC`（GE2E） | ✅ 已克隆，commit `890f3a0`；权重 `encoder.pt` 已下载并校验 |
 | VCTK 数据 | ✅ **两边已下好并逐条对齐**：110 说话人 × 100 句 = **11,000 条**（A 侧实测与 B 侧 `EXACT MATCH: True`，差集为空）；划分 80/10/20 已自检通过，`scripts/split_speakers.py --check` **对账完全一致** ✅ |
 | Stage 1 代码 | ✅ 已实现，19 项自检全过（`scripts/test_stage1.py`） |
-| Stage 1 训练 | ⏳ **2026-11-20 已开训**（`scripts/run_stage1.py` 一条龙：数据对账 → 训 W_s → 训解耦网络 → 验收 M3） |
+| Stage 1 训练 | ⏳ **2026-11-21 重训中**（500k 步 / 13.5 h；上次那批权重被一次冒烟测试覆盖，已加固脚本防再犯） |
+| **M3 验收** | ✅ **Sim_prot = 0.999996**（要求 > 0.9，论文 0.95）、`dis` = −4.38134（理论极限的 99.98%）、内容码泄露率 0.0000 —— 详见 `docs/experiments.md §4d` |
 | HiFi-GAN 16 kHz 声码器 | ✅ **权重就位**（HF `speechbrain/tts-hifigan-libritts-16kHz`，234/234 键 strict 通过，可求导） |
 | 接口契约 | ✅ **v0.5 双方已签字**（`docs/interface-contract.md` §9） |
 | Stage 2 回归 | ✅ `verify_gradients` **20/20**（含成员 A 修的两个 bug 的回归断言） |
@@ -593,6 +594,38 @@ Stage 2 也只在 `--stub`（替身 Stage 1 + 替身声码器）上跑过。
 ### 0.14 ★ 本轮进展（成员 B · 2026-11-21：Stage 2 开训前的准备 + 云机方案）
 
 **背景**：A 的 Stage 1 训完 500k 步（rec 0.00177 / cd 0.00007 / dis −4.38134），
+最初报 Sim_prot 只有 0.459（要 >0.9），A 一度准备改 `L_rec` 的形式重训。
+⇒ **Stage 2 不能现在开训**（Stage 1 换了要重训一遍）。
+这一轮做的是：**把 Stage 2 的训练器做成"能真的跑完 20 万步"的样子**，
+并把云机这条路走通。
+
+| # | 事项 | 结论 |
+|---|---|---|
+| 1 | 拉 A 的 7 个 commit | ✅ `git pull --ff-only` 干净快进（0 ahead / 7 behind，代码零冲突） |
+| 2 | 合并后的回归 | ✅ **7 个自检脚本全绿**（verify_gradients 20/20、verify_psychoacoustics 20/20、verify_mel 4/4、verify_hifigan、verify_rtc_mel、test_stage1、test_audio_utils） |
+| 3 | ★★ **B 这台机器跑不了论文量级** | **只有 Intel Iris Xe 核显，没有 NVIDIA GPU**（torch 2.4.1+cpu），内存空闲仅 2.2 GB ⇒ Stage 2 ≈ 30 s/step，200k 步要**两个月** ⇒ 必须上 GPU（**A 那台有 RTX 4060**） |
+| 4 | ★★ **Stage 2 训练器补齐六件事** | 断点续训 `--resume` / AMP / 梯度累积 / 梯度裁剪 / `--max-hours` / 吞吐+ETA |
+| 5 | ★★ **`config.STAGE2` 三个键写了没人用** | `amp` / `accum_steps` / `clip_grad` —— 与 A 在 Stage 1 审计里发现的**同一类问题**（不报错、loss 照样降，只是慢/显存不够）。现已全部接上 |
+| 6 | ★ 加 **`[L_de 方向自检]`** | 训练结束自动比较前 10% / 后 10% 的 L_de，方向反了直接喊出来（A 的 `L_dis` 就是同一种坑，§0.10.4c） |
+| 7 | ★★ 抓到一个**隐藏前提** | **E_spk 必须是 Stage 1 微调过的那个**（论文 §3.1）⇒ 训练与推理必须用**同一个** E_spk，否则两个嵌入空间不一样、**δ 退化成随机方向、防御静默失效**。已加 `--speaker-encoder {stage1,upstream}`，并把选择**写进 checkpoint**，推理照着做<br>⭐ **A 这边确认：Stage 1 训练时 E_spk 就是被微调的**（`fine_tune=True`，权重存进了 checkpoint 的 `"speaker_encoder"` 键）⇒ **Stage 2 必须用 `--speaker-encoder stage1`**。详见 §0.15 |
+| 8 | ★ `stage2/dataset.py` 加 `persistent_workers` | Windows 上 DataLoader 的 worker 每个 epoch 重启一次（十几秒）—— A 在 Stage 1 上踩过同一个坑（§0.10.4b 第 1 条） |
+| 9 | ★ `infer.py` 加 **stage2 路线** | `δ = G(h)`（训练好的生成器）—— 这才是论文的防御。CLI 现在有 `--mode {clone,stage1,stage2,auto}`（之前根本没暴露 `mode`） |
+| 10 | ★★ **云机方案：华为云 ECS** | 完整指南 [`docs/notes/cloud_ecs_stage2.md`](../../docs/notes/cloud_ecs_stage2.md) + 脚本 [`scripts/cloud_train_stage2.sh`](../../scripts/cloud_train_stage2.sh) |
+| 11 | ★★ **推翻 §8.2 的一条旧结论** | 华为云官方《ECS · 计费说明》：**「代金券不适用于竞价计费型实例」** ⇒ 我们只有代金券 ⇒ **必须开按需，不能开竞价**（§8.2 已改） |
+| 12 | 本机实测 | `--stub` 0.50 it/s；`--stub --vocoder hifigan` **0.42 it/s**（batch 2 / 1 秒）；`--resume` 正常（"起始 step = 6" ✅） |
+
+> ★ **给成员 A 的两件事**：
+> ① **Stage 1 的正式 checkpoint 训完请给 B 一份**（`weights/stage1_model.pt`，约 358 MB）——
+>    Stage 2 训练**必须**有它（冻结的解码器 `D(c, h_adv)`）；
+>    也请把 `--speaker-encoder` 的选择对齐：**A 的 Stage 1 训的是「微调后的 E_spk」**
+>    ⇒ Stage 2 必须用 `--speaker-encoder stage1`。
+> ② ~~Stage 1 改成新的 `L_rec` 之后，**Sim_prot 要 > 0.9** 再开 Stage 2~~
+>    → ✅ **2026-11-21 已满足：Sim_prot = 0.999996**（见 §0.15）。
+>    **不需要改 `L_rec`**，Stage 2 可以开训。
+
+---
+
+**背景**：A 的 Stage 1 训完 500k 步（rec 0.00177 / cd 0.00007 / dis −4.38134），
 但 **Sim_prot 只有 0.459**（要 >0.9），A 说要改 `L_rec` 的形式重训。
 ⇒ **Stage 2 不能现在开训**（Stage 1 换了要重训一遍）。
 这一轮做的是：**把 Stage 2 的训练器做成"能真的跑完 20 万步"的样子**，
@@ -620,6 +653,38 @@ Stage 2 也只在 `--stub`（替身 Stage 1 + 替身声码器）上跑过。
 >    就显式用 `--speaker-encoder upstream`，两边必须一致。
 > ② Stage 1 改成新的 `L_rec` 之后，**Sim_prot 要 > 0.9** 再开 Stage 2
 >    —— 否则 Stage 2 学的是"怎么扰动一个坏掉的空间"。
+
+### 0.15 ★★ 2026-11-21：M3 通过 —— 一个「E_spk 空间错配」引发的假象（成员 A）
+
+> ⭐ **与下面 §0.14 第 7 条是同一个坑，两边独立发现 —— 结论一致。**
+
+**现象**：500k 步训完后 `eval_stage1.py` 报 Sim_prot = 0.459（要求 > 0.9），
+且重建音 RMS 只有原音的 1/10。五层排查全部指向"重建质量差"（声码器无损、不是过拟合、
+误差不是关键、mel 过度平滑、实现没问题）。
+
+**真因**：Stage 1 训练时 **E_spk 是被微调的**（论文 §3.1 明写 "fine-tuned end-to-end"），
+checkpoint 里存了微调后的权重；而评测用的是**上游预训练**的 E_spk
+⇒ **两者的嵌入不在同一个空间**（同一段原音在两者下只相关 **0.518**）⇒ 指标全偏低。
+
+| E_spk | L_rec | Sim_prot | RMS 比 |
+|---|---|---|---|
+| 上游预训练（之前用的） | 0.04390 | 0.4367 | 0.101 |
+| ★ checkpoint 里的微调 | **0.01928** | **0.999996** | **0.707** |
+
+⇒ **M3 通过：Sim_prot = 0.999996**，`dis` = −4.38134，内容码泄露率 0.0000。
+
+> ⚠️ **成员 B 的 `evaluate.py` 也要注意这个口径**（他那边是共同区）：
+> 论文的 E_spk 是**微调后**那个 ⇒ Sim_prot / Sim_clone 应全线统一用它。
+> 但**说话人分类器 W_s 是例外**（我们的 W_s 在**预训练** E_spk 的空间里训的），
+> 问它"这是谁"时必须用**预训练** E_spk 的嵌入。
+> `scripts/eval_stage1.py` 现在两个编码器各司其职。
+
+**另一个教训**：排查时跑了一次 20 步的 `--smoke`，它结束时**覆盖了 `stage1_model.pt`**，
+500k 步的权重没了。已加固 `stage1/train.py`：
+- 未跑满步数**不覆盖**正式权重（另存 `stage1_partial_step{N}.pt`）；
+- 新增 **`stage1_best.pt`**：验证集最优单独留一份（轻量 115 MB，不含优化器）。
+
+---
 
 ## 1. W2 详细分解：指南第 3 步 + 第 4 步
 

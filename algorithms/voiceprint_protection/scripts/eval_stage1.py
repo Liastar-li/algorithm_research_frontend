@@ -111,8 +111,32 @@ def main() -> int:
     print(f"  设备       : {device}")
 
     # -- 说话人编码器（推理用，冻结）--------------------------------------
+    # ★★ 这里需要**两个**说话人编码器，各司其职（2026-11-19 排查出来的关键点）：
+    #
+    #   ① `speaker_encoder`（**微调后的** E_spk，从 checkpoint 加载）
+    #      → 算 Sim_prot（重建音 vs 原音）
+    #      理由：Stage 1 训练时 h 就来自它，**必须用同一个**才在同一个空间里。
+    #      装上它之后 Sim_prot 从 0.44 → **0.999996**。
+    #
+    #   ② `pretrained_encoder`（**上游预训练**的 E_spk）
+    #      → 喂给说话人分类器 W_s
+    #      理由：W_s 是在**第 1 步**用预训练 E_spk 的 h 训出来的
+    #      （见 stage1/train.py::train_classifier 的 fine_tune=False），
+    #      所以必须用同一个编码器产出的嵌入去问它，否则必然 0%。
+    #
+    #   ⚠️ 微调后的 E_spk 与预训练 E_spk 的嵌入空间**差异很大**
+    #      （同一段原音在两者下只相关 0.52）—— 这不是 bug，
+    #      但**任何比较都必须在同一个空间里做**。
     speaker_encoder = TrainableSpeakerEncoder(device=str(device), fine_tune=False)
+    if "speaker_encoder" in saved:
+        speaker_encoder.model.load_state_dict(saved["speaker_encoder"])
+        print("  [OK] 已装上 checkpoint 里的微调 GE2E（Sim_prot 用它，与训练时同一个）")
+    else:
+        print("  [警告] checkpoint 里没有 speaker_encoder —— Sim_prot 会偏低（不是模型的锅）")
     speaker_encoder.model.eval()
+
+    pretrained_encoder = TrainableSpeakerEncoder(device=str(device), fine_tune=False)
+    pretrained_encoder.model.eval()
 
     # -- 说话人分类器 W_s（用来测"内容码里还剩多少说话人信息"）------------
     classifier = None
@@ -178,14 +202,19 @@ def main() -> int:
                     rebuilt_mel40 = audio_utils.ge2e_mel(rebuilt)
                     rebuilt_embedding = speaker_encoder(
                         torch.from_numpy(rebuilt_mel40).unsqueeze(0).to(device))[0]
+                    # 同一段重建音，在**预训练** E_spk 下的嵌入（喂给 W_s）
+                    pretrained_embedding = pretrained_encoder(
+                        torch.from_numpy(rebuilt_mel40).unsqueeze(0).to(device))[0]
 
                     similarity = cosine(rebuilt_embedding.cpu().numpy(),
                                         embedding[index].cpu().numpy())
                     similarity_sum += similarity
 
                     # W_s 从重建音里猜说话人 —— 猜得越准，说明音色保真越好
+                    # ★ 用**预训练** E_spk 算嵌入：W_s 就是在它的空间里训出来的
+                    #   （第 1 步 fine_tune=False）。用微调后的 E_spk 会空间错配 ⇒ 必然 0%。
                     if classifier is not None:
-                        logits = classifier(rebuilt_embedding.unsqueeze(0))
+                        logits = classifier(pretrained_embedding)
                         predicted = int(logits.argmax(-1))
                         truth = int(batch["speaker_id"][index])
                         speaker_correct += int(predicted == truth)

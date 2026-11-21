@@ -240,12 +240,16 @@ def train_classifier(args) -> int:
 # 第 2 步：训练解耦-重建网络
 # ---------------------------------------------------------------------------
 def _save_model_checkpoint(model, speaker_encoder, optimizer, scaler, step: int,
-                           history: list[dict], path: Path) -> None:
-    torch.save({
+                           history: list[dict], path: Path,
+                           with_optimizer: bool = True) -> None:
+    """保存 checkpoint。
+
+    ★ `with_optimizer=False` 时**不存优化器状态** —— 文件从 358 MB 降到 ~115 MB。
+      用于「每个验证点留一份快照」与「验证最优」：前者要的是权重，后者还要能续训。
+    """
+    payload = {
         "model": model.state_dict(),
         "speaker_encoder": speaker_encoder.model.state_dict(),
-        "optimizer": optimizer.state_dict(),
-        "scaler": scaler.state_dict(),
         "step": step,
         "history": history,
         "config": {
@@ -255,12 +259,18 @@ def _save_model_checkpoint(model, speaker_encoder, optimizer, scaler, step: int,
             "freq": model.freq,
             "mel_preset": config.STAGE1.get("mel_preset", config.DEFAULT_PRESET),
         },
-    }, path)
+    }
+    if with_optimizer:
+        payload["optimizer"] = optimizer.state_dict()
+        payload["scaler"] = scaler.state_dict()
+    torch.save(payload, path)
 
 
 @torch.no_grad()
 def evaluate(model, speaker_encoder, classifier, loader, device, use_amp: bool,
-             max_batches: int = 20) -> dict:
+             max_batches: int = 20,
+             lambda_cd: float | None = None,
+             lambda_dis: float | None = None) -> dict:
     """在验证集上算平均损失（论文说超参是在验证集上网格搜索选出来的）。"""
     model.eval()
     speaker_encoder.eval()
@@ -279,7 +289,8 @@ def evaluate(model, speaker_encoder, classifier, loader, device, use_amp: bool,
             codes_out = model.content_codes(mel_out, embedding)
             codes_postnet = model.content_codes(mel_postnet, embedding)
             _, parts = stage1_losses.stage1_loss(
-                mel80, mel_out, mel_postnet, codes, codes_out, codes_postnet, classifier)
+                mel80, mel_out, mel_postnet, codes, codes_out, codes_postnet, classifier,
+                lambda_cd=lambda_cd, lambda_dis=lambda_dis)
 
         for key in sums:
             sums[key] += parts[key]
@@ -339,6 +350,9 @@ def train_model(args) -> int:
     # -- 断点续训 ---------------------------------------------------------
     start_step = 0
     history: list[dict] = []
+    # 验证集最优（2026-11-19 加）：最优不一定在最后一步，要单独留一份
+    best_total = float("inf")
+    best_step = 0
     if args.resume:
         checkpoint = _find_latest_checkpoint()
         if checkpoint is None:
@@ -384,7 +398,8 @@ def train_model(args) -> int:
                 codes_postnet = model.content_codes(mel_postnet, embedding)
 
                 total, parts = stage1_losses.stage1_loss(
-                    mel80, mel_out, mel_postnet, codes, codes_out, codes_postnet, classifier)
+                    mel80, mel_out, mel_postnet, codes, codes_out, codes_postnet, classifier,
+                    lambda_cd=args.lambda_cd, lambda_dis=args.lambda_dis)
 
             # 梯度累积：把若干个 micro batch 的损失除以累积步数再回传
             scaler.scale(total / args.accum_steps).backward()
@@ -416,7 +431,9 @@ def train_model(args) -> int:
 
                 if args.val_every and val_loader is not None and step % args.val_every == 0:
                     metrics = evaluate(model, speaker_encoder, classifier, val_loader,
-                                       device, use_amp)
+                                       device, use_amp,
+                                       lambda_cd=args.lambda_cd,
+                                       lambda_dis=args.lambda_dis)
                     if metrics:
                         print(f"    [验证] rec {metrics['loss_rec']:.4f}  "
                               f"cd {metrics['loss_cd']:.4f}  "
@@ -427,15 +444,41 @@ def train_model(args) -> int:
                                 writer.add_scalar(f"stage1/val/{key}", value, step)
                         history.append({"step": step, "val": True, **metrics})
 
+                        # ★★ 留下「验证集最优」的权重（2026-11-19 加）
+                        #   为什么要：训练可能过拟合，**最优不一定在最后一步**；
+                        #   而且万一后续实验覆盖了 final，还能从这里捞回来。
+                        if metrics["total"] < best_total:
+                            best_total = metrics["total"]
+                            best_step = step
+                            ensure_weights_dir()
+                            _save_model_checkpoint(
+                                model, speaker_encoder, optimizer, scaler, step, history,
+                                WEIGHTS_DIR / "stage1_best.pt", with_optimizer=False)
+                            print(f"    [新最优] stage1_best.pt（step {step}，"
+                                  f"val total {best_total:.5f}）")
+
             if args.smoke and step >= args.iterations:
                 break
         if stopped_early:
             break
 
     ensure_weights_dir()
+    # ★★ 只有**真的跑完全部步数**才写 final —— 冒烟测试（--smoke / 步数很少）
+    #   绝不能覆盖正式权重。2026-11-19 就因为一次 20 步的冒烟把 500k 步的
+    #   `stage1_model.pt` 覆盖掉了，13.5 小时的训练成果全丢。
     target = WEIGHTS_DIR / "stage1_model.pt"
-    _save_model_checkpoint(model, speaker_encoder, optimizer, scaler, step, history, target)
-    print(f"\n  已保存模型：{target}")
+    if args.smoke or step < args.iterations:
+        backup = WEIGHTS_DIR / f"stage1_partial_step{step}.pt"
+        _save_model_checkpoint(model, speaker_encoder, optimizer, scaler, step, history,
+                               backup, with_optimizer=False)
+        print(f"\n  [未跑完全部步数] 正式权重没被覆盖，"
+              f"这次的权重另存为 {backup.name}")
+        print(f"  （要出正式权重请把 --iterations 跑满）")
+    else:
+        _save_model_checkpoint(model, speaker_encoder, optimizer, scaler, step, history, target)
+        print(f"\n  已保存模型：{target}")
+    if best_step:
+        print(f"  验证集最优：stage1_best.pt（step {best_step}，val total {best_total:.5f}）")
 
     history_path = WEIGHTS_DIR / "stage1_history.json"
     history_path.write_text(json.dumps(history, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -480,6 +523,10 @@ def main() -> int:
                         help="梯度累积步数（默认用 config.STAGE1）")
     parser.add_argument("--lr-classifier", type=float, default=1e-3,
                         help="第 1 步分类器的学习率")
+    parser.add_argument("--lambda-cd", type=float, default=None,
+                        help="覆盖 λ_cd（默认 config.STAGE1；论文 1.0）")
+    parser.add_argument("--lambda-dis", type=float, default=None,
+                        help="覆盖 λ_dis（默认 config.STAGE1；论文 0.01）")
     parser.add_argument("--max-hours", type=float, default=0.0,
                         help="最长训练小时数（0 = 不限）。云上建议设 3~4 小时一轮")
     parser.add_argument("--resume", action="store_true",
@@ -497,6 +544,10 @@ def main() -> int:
         args.accum_steps = config.STAGE1.get("accum_steps", 1)
     if args.amp is None:
         args.amp = config.STAGE1.get("amp", True)
+    if args.lambda_cd is None:
+        args.lambda_cd = config.STAGE1.get("lambda_cd", 1.0)
+    if args.lambda_dis is None:
+        args.lambda_dis = config.STAGE1.get("lambda_dis", 0.01)
 
     print("\n路径解析：")
     for line in paths.describe().splitlines():
