@@ -21,6 +21,8 @@
 #   --batch-size N    批大小（默认用 config 里的值）
 #   --iterations N    训练步数（默认用 config 里的值）
 #   --stage NAME      classifier | model（默认 model）
+#   --max-hours N     时长上限（小时）—— 到点自动存盘退出（★保命）
+#   --resume-ckpt PATH 从这个断点续训（默认 weights/stage1_last_ckpt.pt）
 #   --session NAME    tmux 会话名（默认 vpp-train）
 #
 # 【环境变量】
@@ -44,6 +46,8 @@ ITERATIONS=""
 BATCH_SIZE=""
 PER_SPEAKER=0
 ARCHIVE=""
+MAX_HOURS=""
+RESUME_CKPT=""
 SKIP_DATA=0
 ACTION=""
 
@@ -62,6 +66,8 @@ while [ $# -gt 0 ]; do
     --batch-size) BATCH_SIZE="$2"; shift ;;
     --iterations) ITERATIONS="$2"; shift ;;
     --stage) STAGE="$2"; shift ;;
+    --max-hours) MAX_HOURS="$2"; shift ;;
+    --resume-ckpt) RESUME_CKPT="$2"; shift ;;
     --session) SESSION="$2"; shift ;;
     --skip-data) SKIP_DATA=1 ;;
     -h|--help)
@@ -160,11 +166,20 @@ prepare_data() {
 
   local raw="$DATA_ROOT/raw"
   if [ ! -d "$raw/wav48_silence_trimmed" ]; then
-    echo "  下载 VCTK（只取 wav48_silence_trimmed + txt）…"
+    echo "  下载 VCTK（只取 wav48_silence_trimmed）…"
     # ★ --per-speaker 100 是**数据契约**：每人均匀取 100 条 = 11,000 条，
     #   与 B 侧逐条一致（差集为空）。不给它会下全部 88,328 个 flac（10.9 GiB），
     #   而且数据跟 B 的那份对不上。
-    "$PY" "$REPO_ROOT/scripts/download_vctk.py" --out "$raw" --include wav48_silence_trimmed --include txt --per-speaker 100 --concurrency 32
+    #
+    # ★★ 2026-11-22（成员 A 修）：**txt 必须单独一条命令**！
+    #   下载器按**说话人名**分桶，而 `wav48_silence_trimmed/p225/*.flac` 与
+    #   `txt/p225/*.txt` 同名进同一个桶 ⇒ 写在一起时，每说话人只拿到
+    #   **66 个 flac + 34 个 txt**（而不是 100 个 flac），
+    #   **清单内容就与另一台机器对不上了**（实测差 4 千条）。
+    #   详见 docs/notes/download_vctk.md §2.2b。
+    "$PY" "$REPO_ROOT/scripts/download_vctk.py" --out "$raw" --include wav48_silence_trimmed --per-speaker 100 --concurrency 16
+    # txt 只用于算绝对 WER，**不占音频名额**，单独跑、全要（总共才 2 MB）
+    "$PY" "$REPO_ROOT/scripts/download_vctk.py" --out "$raw" --include txt --per-speaker 0 --concurrency 16
   else
     echo "  [跳过] 已有 $raw/wav48_silence_trimmed"
   fi
@@ -173,6 +188,17 @@ prepare_data() {
   # ★ 这里的 --limit-per-speaker 只限制**转换**的条数（调试用，取清单里的前 N 条），
   #   下载那边固定是 --per-speaker 100（数据契约）。正式训练留 0（= 全转）。
   "$PY" "$REPO_ROOT/algorithms/voiceprint_protection/scripts/prepare_data.py" --raw-root "$raw" --out-root "$DATA_ROOT" --limit-per-speaker "$PER_SPEAKER"
+
+}
+
+check_split() {
+  say "划分对账（★ 必须与另一台机器一致）"
+  if [ ! -f "$DATA_ROOT/split_speakers.json" ]; then
+    echo "  [失败] 找不到 $DATA_ROOT/split_speakers.json"
+    echo "         数据没传对，或还没跑 prepare_data.py。"
+    exit 1
+  fi
+  "$PY" "$REPO_ROOT/algorithms/voiceprint_protection/scripts/split_speakers.py" --check "$DATA_ROOT/split_speakers.json"
 }
 
 start_training() {
@@ -181,9 +207,31 @@ start_training() {
     echo "  [失败] 虚拟环境不存在：$VENV_DIR（先跑 --setup）"
     exit 1
   fi
+  if [ ! -f "$DATA_ROOT/train.txt" ]; then
+    echo "  [失败] 找不到 $DATA_ROOT/train.txt"
+    echo "         要么先跑 --setup（会下+转数据），要么用 --skip-data 并自己把"
+    echo "         audio16k/ 与 train.txt 传上来。"
+    exit 1
+  fi
+
   local train_args=(--stage "$STAGE" --device cuda)
   if [ -n "$ITERATIONS" ]; then train_args+=(--iterations "$ITERATIONS"); fi
   if [ -n "$BATCH_SIZE" ]; then train_args+=(--batch-size "$BATCH_SIZE"); fi
+  # ★ --max-hours 是**保命的**：云机按小时计费，忘了关就一直烧钱（只有 500 元券）。
+  #   到点自动存盘退出 ⇒ 哪怕忘了看，损失也有上限。
+  if [ -n "$MAX_HOURS" ]; then train_args+=(--max-hours "$MAX_HOURS"); fi
+  # 每 5000 步存一次断点 + 跑一次验证（验证会更新 stage1_best.pt）
+  train_args+=(--save-every 5000 --val-every 5000)
+
+  # ★ --resume：断线/被抢占后接着跑（优化器状态、随机数状态都在 checkpoint 里）
+  local ckpt="$RESUME_CKPT"
+  if [ -z "$ckpt" ]; then
+    ckpt="$REPO_ROOT/algorithms/voiceprint_protection/weights/stage1_last_ckpt.pt"
+  fi
+  if [ -f "$ckpt" ]; then
+    train_args+=(--resume)
+    echo "  从断点续训：$ckpt"
+  fi
 
   local log_dir="$REPO_ROOT/logs"
   mkdir -p "$log_dir"
@@ -225,6 +273,7 @@ case "$ACTION" in
     setup_third_party
     fetch_weights
     prepare_data
+    check_split
     say "环境就绪（还没开始训练）"
     echo "  自检："
     echo "    source $VENV_DIR/bin/activate"
