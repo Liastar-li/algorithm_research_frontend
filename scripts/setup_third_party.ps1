@@ -37,7 +37,9 @@ $components = @(
     @{
         Name = "Real-Time-Voice-Cloning"
         Url  = "https://github.com/CorentinJ/Real-Time-Voice-Cloning.git"
-        Sha  = ""      # 用默认分支（master）
+        # ★ 2026-11-22（成员 A）补钉 commit：原来留空 => 脚本会「删掉重拉」，
+        #   而云机常常连不上 GitHub（实测 22 端口直接超时）=> 那一删就没救了。
+        Sha  = "890f3a03187195b9829db2079b75c2ba2ab0405c"
         Note = "GE2E 说话人编码器（论文脚注引用），最终系统使用"
     }
 )
@@ -77,8 +79,13 @@ foreach ($component in $components) {
         continue
     }
 
+    # ★ 2026-11-22（成员 A）：**断网时不删**。
+    #   先备份，拉成功再换；拉失败就**保留原有的**并继续。
+    $backup = ""
     if (Test-Path $path) {
-        Write-Host "    版本不符，删除后重新拉取..."
+        Write-Host "    版本不符，尝试拉取目标版本（失败则保留现有副本）..."
+        $backup = "$path.bak.$([DateTimeOffset]::Now.ToUnixTimeSeconds())"
+        Copy-Item -Recurse -Force $path $backup
         Remove-Item -Recurse -Force $path
     }
 
@@ -93,9 +100,15 @@ foreach ($component in $components) {
     }
 
     if ($LASTEXITCODE -ne 0) {
-        Write-Host "    [失败] 拉取失败。若在国内网络，请开启代理后重试。" -ForegroundColor Red
-        exit 1
+        Write-Host "    [警告] 拉取失败（网络不通？）" -ForegroundColor Yellow
+        if ($backup -and (Test-Path $backup)) {
+            Write-Host "    [保留] 恢复原有副本：$backup"
+            Move-Item -Force $backup $path
+        }
+        Write-Host "    [跳过] $name（用现有副本继续）" -ForegroundColor Yellow
+        continue
     }
+    if ($backup -and (Test-Path $backup)) { Remove-Item -Recurse -Force $backup }
     Write-Host "    [OK] 已就绪  $(Get-CurrentSha $path)" -ForegroundColor Green
 }
 

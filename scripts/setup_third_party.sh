@@ -20,7 +20,7 @@ THIRD_PARTY="$REPO_ROOT/third_party"
 COMPONENTS=(
   "AutoVC|https://github.com/auspicious3000/autovc.git|c1827a60e83e6d26030b8953843b2f7cf2bd36db"
   "wavenet_vocoder|https://github.com/r9y9/wavenet_vocoder.git|d4333546eccd3b681b7092e4f52160ad7e62dcc9"
-  "Real-Time-Voice-Cloning|https://github.com/CorentinJ/Real-Time-Voice-Cloning.git|"
+  "Real-Time-Voice-Cloning|https://github.com/CorentinJ/Real-Time-Voice-Cloning.git|890f3a03187195b9829db2079b75c2ba2ab0405c"
 )
 
 echo "=============================================================="
@@ -45,19 +45,34 @@ for entry in "${COMPONENTS[@]}"; do
       echo "    [跳过] 已是目标版本"
       continue
     fi
-    echo "    版本不符，删除后重新拉取..."
+    # ★ 2026-11-22（成员 A）：**断网时不删**。
+    #   云机常常连不上 GitHub（实测 22 端口直接超时），
+    #   原来「先 rm -rf 再 clone」=> 拉不到就把已有的也弄没了。
+    #   现在先备份，拉成功再换；拉失败就**保留原来的**并继续。
+    echo "    版本不符，尝试拉取目标版本（失败则保留现有副本）..."
+    backup="${path}.bak.$(date +%s)"
+    cp -a "$path" "$backup"
     rm -rf "$path"
   fi
 
-  if [ -n "$sha" ]; then
-    # 按 SHA 浅拉取：不需要完整历史
-    git init -q "$path"
-    git -C "$path" remote add origin "$url"
-    git -C "$path" fetch -q --depth 1 origin "$sha"
-    git -C "$path" checkout -q FETCH_HEAD
-  else
-    git clone -q --depth 1 "$url" "$path"
+  if ! { if [ -n "$sha" ]; then
+      # 按 SHA 浅拉取：不需要完整历史
+      git init -q "$path"
+      git -C "$path" remote add origin "$url"
+      git -C "$path" fetch -q --depth 1 origin "$sha"
+      git -C "$path" checkout -q FETCH_HEAD
+    else
+      git clone -q --depth 1 "$url" "$path"
+    fi; }; then
+    echo "    [警告] 拉取失败（网络不通？）"
+    if [ -n "${backup:-}" ] && [ -d "$backup" ]; then
+      echo "    [保留] 恢复原有副本：$backup"
+      mv "$backup" "$path"
+    fi
+    echo "    [跳过] $name（用现有副本继续）"
+    continue
   fi
+  [ -n "${backup:-}" ] && rm -rf "$backup"
   echo "    [OK] 已就绪  $(git -C "$path" rev-parse HEAD)"
 done
 
