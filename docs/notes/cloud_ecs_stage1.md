@@ -131,7 +131,31 @@ ssh -i vpp_key.pem root@<EIP地址>
 
 ## 3. 把代码、数据、权重弄上去
 
-### 3.1 代码 —— git clone（最省事）
+### 3.0 ★ 先分清两台机器
+
+| | 是什么 | 你的文件放哪 |
+|---|---|---|
+| **CloudShell**（控制台右上角那个终端） | 华为云**托管的另一台容器**，和你的 ECS **完全独立** | `~/`（持久化，但**和 ECS 不通**） |
+| **你的 ECS**（V100 那台） | 真正跑训练的机器 | `/root/` |
+
+> ⚠️⭐ **在 CloudShell 里 `mkdir` 的文件不会出现在 ECS 上** —— 必须走 `scp`。
+> CloudShell 的真正用途是**当跳板**：本机连不上 ECS 时，在 CloudShell 里
+> `ssh root@<EIP>`（实例默认密码登录，输密码即可）就能进去。
+
+### 3.0b ★ 各样东西多大（别传错）
+
+| 要传/要下的 | 大小 | 怎么来 |
+|---|---|---|
+| **代码仓库** | `.git` 只有 **5.4 MB** | ✅ **在 ECS 上 `git clone`**（不要 scp 整个仓库！） |
+| `algorithms/` 里的 812 MB | 812 MB | ⚠️ **全是 checkpoint**（`stage1_last_ckpt.pt` 358 MB + `stage1_model.pt` 358 MB + `stage1_best.pt` 119 MB），`.gitignore` 已排除 ⇒ **git clone 不会带** |
+| `node_modules/` | 69 MB | ❌ 不用（云机上不跑前端） |
+| `third_party/` | 21 MB | ❌ 不用（`setup_third_party.sh` 会按 commit 拉） |
+| **VCTK 数据** `data/audio16k` | **1.2 GB** | 见 §3.2（scp 或云机直下） |
+| **Stage 1 断点** `stage1_last_ckpt.pt` | **358 MB** | 从本机 scp（传了就从 step 20,000 接着跑） |
+| 上游权重 ×4 | 480 MB | `--setup` 自动下 |
+| Whisper large-v3 | 3.09 GB | ⚠️ **先别下**（不算 WER 用不着） |
+
+### 3.1 代码 —— git clone（最省事，只要 5.4 MB）
 
 ```bash
 # 云机上
@@ -142,8 +166,12 @@ git checkout group_N005_submission
 
 > ⚠️ **私有仓库**要在云机上加 SSH key：
 > ```bash
-> ssh-keygen -t ed25519 -C "cloud-vpp"
+> ssh-keygen -t ed25519 -C "ecs-vpp"
 > cat ~/.ssh/id_ed25519.pub        # 复制输出，贴到 GitHub → Settings → SSH keys
+> ```
+> ⭐ 顺带把数据目录建好（脚本默认用这个路径）：
+> ```bash
+> mkdir -p /root/vpp/data
 > ```
 
 ### 3.2 数据 —— ★ **从本机传，不要在云机上重下**
@@ -171,6 +199,13 @@ export VPP_DATA_ROOT=/root/vpp/data
 ls /root/vpp/data/audio16k | wc -l      # 应该是 110（说话人目录）
 wc -l /root/vpp/data/train.txt           # 应该是 8000
 ```
+
+> ⭐ **不想传？让云机自己下**（带宽好的话 10–20 分钟）：
+> ```bash
+> bash scripts/cloud_train_stage1.sh --setup     # 不加 --skip-data，它会下+转
+> ```
+> 源站在国内实测只有 30–420 KB/s（家里），云机通常快得多。
+> **先试这个**，慢就 Ctrl+C 改用 scp。
 
 > ⚠️ **数据是"数据契约"**：110 说话人 × 100 句。
 > 传错的话，两人训出来的模型对不上、指标没法比。
@@ -204,6 +239,9 @@ scp /d/0github/algorithm_research_frontend/algorithms/voiceprint_protection/weig
 > 💡 **建议选 A**：358 MB 上传在云服务器上通常几分钟，而它保证**云机上的曲线和本机的是同一条**
 > —— 后面报告里画曲线、对比时不会有人说"你俩的图对不上"。
 > 脚本会自动检测到断点并 `--resume`（不用手动加参数）。
+>
+> ⚠️ **别 scp 整个仓库**：`algorithms/` 里有 812 MB 全是 checkpoint，
+> 而 `.gitignore` 已经把它们排除 ⇒ `git clone` 根本不会带。
 
 ---
 
