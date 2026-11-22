@@ -54,7 +54,11 @@ THIRD_PARTY_COMPONENTS = [
     {
         "name": "Real-Time-Voice-Cloning",
         "url": "https://github.com/CorentinJ/Real-Time-Voice-Cloning.git",
-        "sha": "",     # 用默认分支
+        # ★ 2026-11-22（成员 A）补钉 commit：原来这里是空字符串，
+        #   而 `setup_third_party.sh` 的逻辑是「sha 为空 ⇒ 版本对不上就删掉重新 clone」。
+        #   云机常常连不上 GitHub（实测 22 端口直接超时）⇒ 那一删就没救了。
+        #   钉上之后，只要本地/云机上已有这个版本，脚本会直接「[跳过] 已是目标版本」。
+        "sha": "890f3a03187195b9829db2079b75c2ba2ab0405c",
         "license": "MIT",
         "usage": "GE2E 说话人编码器（论文脚注引用），最终系统使用",
     },
