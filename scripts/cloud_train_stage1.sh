@@ -130,9 +130,14 @@ setup_third_party() {
 fetch_weights() {
   say "下载上游权重"
   local pkg="$REPO_ROOT/algorithms/voiceprint_protection/scripts"
-  "$PY" "$pkg/download_encoder_weights.py"
-  "$PY" "$pkg/download_rtc_weights.py"
-  "$PY" "$pkg/download_hifigan_weights.py"
+  # ★ 2026-11-22（成员 A）：**断网时不中断整个 setup**。
+  #   云机常常连不上 huggingface.co / github.com（实测 GitHub 22 端口直接超时）。
+  #   某个权重下不到就跳过并提示 —— 缺哪个会在自检/训练时明确报出来，
+  #   比整个 --setup 挂掉好。
+  #   ★ 三个脚本**都会跳过已存在的文件**（不联网），所以从本机传上来的权重不会重下。
+  "$PY" "$pkg/download_encoder_weights.py" || echo "  [警告] encoder.pt 没下好（★ Stage 1 训练必需）"
+  "$PY" "$pkg/download_rtc_weights.py"    || echo "  [警告] synthesizer/vocoder 没下好（训练用不到；平台服务才需要）"
+  "$PY" "$pkg/download_hifigan_weights.py" || echo "  [警告] hifigan_16k.ckpt 没下好（★ 验收 M3 要用）"
   echo "  权重目录：$DATA_ROOT/models/default"
   echo "  HF_ENDPOINT=$HF_ENDPOINT"
 
