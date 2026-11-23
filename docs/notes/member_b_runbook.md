@@ -1,27 +1,34 @@
 # 成员 B 的逐步操作手册（Stage 2 → 交付）
 
 > **什么时候用这本手册**：成员 A 的**正式 Stage 1 checkpoint** 到手之后。
-> **开始条件（三条都要满足）**：
+> **开始条件**：
 > 1. A 交来的 `stage1_model.pt` 里 `step >= 1000`（3 步的冒烟产物会被代码直接拒绝）；
-> 2. A 说清楚了「Stage 1 训的时候 GE2E 微调了没有」→ 决定 `--speaker-encoder` 用哪个；
-> 3. A 的 `Sim_prot > 0.9`（M3 的验收线）。**不满足就先别开训** ——
->    Stage 1 一换，Stage 2 就得重训一遍。
+> 2. ~~E_spk 用哪个？~~ → **已经有答案了**（2026-11-21 A 查明）：
+>    Stage 1 的 E_spk **是被微调的**，checkpoint 里有微调权重 ⇒
+>    **Stage 2 用 `--speaker-encoder stage1`**（本仓库的默认值就是它，见 §1.4）；
+> 3. ~~Sim_prot > 0.9？~~ → **已经达标**：
+>    之前那个 **0.459 是「E_spk 空间错配」造成的假象** ——
+>    评测用了**上游预训练**的 E_spk，而模型是拿**微调后**的 E_spk 训的
+>    （两者嵌入只相关 0.518）。装上 checkpoint 里的微调 E2E 后
+>    **Sim_prot = 0.999996，**M3 已通过（见 `docs/experiments.md` §4e）。
+>    ⇒ **Stage 1 不用重训，Stage 2 可以开训。**
 >
 > **手册的用法**：从上往下按顺序做。每一步都有「**看什么数**」和「**不对怎么办**」。
 > 全程约 **3–4 天**（云机按小时计费，别让实例空开着）。
 >
 > 相关文档：
-> · 华为云 ECS 开台细节 → [`cloud_ecs_stage2.md`](cloud_ecs_stage2.md)
+> · 华为云 ECS 开台细节（**Stage 2 版**）→ [`cloud_ecs_stage2.md`](cloud_ecs_stage2.md)
+> · 华为云 ECS 开台细节（**成员 A 写的 Stage 1 版，更详细**）→ [`cloud_ecs_stage1.md`](cloud_ecs_stage1.md)
 > · Stage 2 的阻塞项 → [`stage2_blockers.md`](stage2_blockers.md)
 > · 实验记录（数字都写在这里）→ [`../../docs/experiments.md`](../../docs/experiments.md)
 
 ## TL;DR · A 交权重那一刻，先做这三件事
 
-1. **问 A 两句话**：①「Stage 1 训的时候 GE2E 微调了没有？」
-   （决定 `--speaker-encoder stage1` 还是 `upstream`）
-   ②「新的 `Sim_prot` 是多少？」（**必须 > 0.9**，否则别开训）
-2. **验权重**：`weights/stage1_model.pt`，`step >= 1000`、有 `model` 段、
-   有 `speaker_encoder` 段（§1.4 有一条命令一次验完）。
+1. **拿权重**：`stage1_model.pt`（含优化器，358 MB，**能 `--resume`**）
+   或 `stage1_best.pt`（验证集最优，115 MB，**不含优化器、更轻**）——
+   Stage 2 只要模型权重，**用哪个都行**；要能续训就用前者。
+2. **验权重**：`step >= 1000`、有 `model` 段、有 `speaker_encoder` 段
+   （§1.4 有一条命令一次验完）。
 3. **本机跑 3 步冒烟**：`stage2/train.py --vocoder hifigan --stage1-checkpoint <ckpt> --steps 3`
    ⇒ 通了再开云机。（本机 CPU 约 4 s/step，3 步一分钟。）
 
@@ -120,6 +127,15 @@ wc -l D:/vpp/data/train.txt D:/vpp/data/val.txt D:/vpp/data/test.txt
 algorithms/voiceprint_protection/weights/stage1_model.pt
 ```
 
+> ★ **A 有两个权重，Stage 2 用哪个都行**：
+> | 文件 | 大小 | 内容 | Stage 2 用它做什么 |
+> |---|---|---|---|
+> | `stage1_model.pt` | 358 MB | 模型 + 优化器 + 随机数状态 | 训练 Stage 2 的解码器；**能 `--resume`** |
+> | `stage1_best.pt` | 115 MB | 验证集最优的模型（不含优化器） | 同样能用，**传起来更轻** |
+>
+> ⚠️ **别把 3 步冒烟的 `stage1_partial_step{N}.pt` 当正式权重** ——
+> 代码会按 `step` 拦截（< 1000 直接拒绝），但别去动它。
+
 **验真（★ 三条都要过）**：
 
 ```bash
@@ -129,30 +145,45 @@ python -c "import torch; d=torch.load('algorithms/voiceprint_protection/weights/
 | 看什么 | 什么算对 | 不对怎么办 |
 |---|---|---|
 | `step` | **≥ 1000**（A 那个是 500,000） | 是个小数字 → 是冒烟产物，**找 A 重给** |
-| `speaker_encoder` 段 | **存在** ⇒ Stage 1 微调过 GE2E ⇒ Stage 2 用 `--speaker-encoder stage1` | 不存在 ⇒ 用 `--speaker-encoder upstream`（并在文档里写明偏离了论文） |
+| `speaker_encoder` 段 | **存在** ⇒ Stage 1 微调过 GE2E ⇒ Stage 2 用 `--speaker-encoder stage1`（**本仓库的默认值就是它**） | 不存在 ⇒ 用 `--speaker-encoder upstream`（并在文档里写明偏离了论文） |
 | `model` 段 | 存在 | 不存在 ⇒ 格式不对，找 A |
 
-> ★ **为什么要在这一步问清楚 E_spk**：论文说 E_spk 在 Stage 1 里被微调过。
-> 训练用**上游** GE2E、推理用**微调后**的那个 ⇒ 两个嵌入空间不同 ⇒
-> 生成器 G 的输入离分布 ⇒ **δ 退化成随机方向、防御完全失效，而且不报错**。
-> （Stage 2 的 checkpoint 里记着用了哪个，推理会照着做 —— 但**训练时也得选对**。）
+> ★★ **为什么 E_spk 这件事这么关键（两边独立踩过同一个坑）**：
+>
+> | | 用**上游预训练** E_spk | 用**checkpoint 里微调**的 E_spk |
+> |---|---|---|
+> | Stage 1 的 Sim_prot | 0.4367 ❌ | **0.999996** ✅ |
+>
+> ★ 同一段原音在两个 E_spk 下的嵌入余弦**只有 0.518** —— 两个空间根本不是一回事。
+>
+> · A 在 **Stage 1 评测**上踩过（2026-11-21，`docs/experiments.md` §4e）；
+> · B 在 **Stage 2 训练/推理**上独立发现（§0.14 第 7 条）：
+>   训练用上游、推理用微调后的 ⇒ 生成器 G 的输入**离分布** ⇒
+>   **δ 退化成随机方向、防御完全失效，而且不报错**。
+>
+> ⇒ **Stage 2 训练用 `--speaker-encoder stage1`（= checkpoint 里的微调 E2E）**，
+> 而且这个选择会被**写进 Stage 2 的 checkpoint**，推理时自动照着做 ——
+> 两边不可能对不上。
 
 ---
 
 ## 2. 开云机（华为云 ECS）
 
-**详细步骤见 [`cloud_ecs_stage2.md`](cloud_ecs_stage2.md)**（规格、镜像、存储、网络、登录、计费、常见坑）。
+**详细步骤见 [`cloud_ecs_stage2.md`](cloud_ecs_stage2.md)**（Stage 2 版），
+或成员 A 写的 [`cloud_ecs_stage1.md`](cloud_ecs_stage1.md)（**更详细**：单价、每步耗时估算、
+「出问题就撤」的兜底方案）—— 两份结论一致，可以对着看。
 
 要点复述（别踩这几个）：
 
 | # | 要点 |
 |---|---|
 | 1 | **计费方式选「按需」，不要选「竞价」** —— 官方《ECS · 计费说明》：「代金券不适用于竞价计费型实例」 |
-| 2 | 规格：先用 `pi2.2xlarge.4`（T4 16 GB）跑通流程，正式长训用 `p2s.2xlarge.8`（V100 32 GB） |
+| 2 | 规格：★ **先用 `pi2.2xlarge.4`（T4 16 GB，约 3–5 元/h）**。Stage 2 要冻结 Stage 1 + HiFi-GAN + GE2E，前向跑 3 次，batch 8 / 3 秒片段 ⇒ **显存约 8–12 GB（fp32）/ 4–6 GB（开 AMP）**，T4 的 16 GB 够用。想更快再换 `p2s.2xlarge.8`（V100 32 GB） |
 | 3 | 镜像用**干净的 Ubuntu 22.04**，自己装 torch cu121（脚本里已经写了，还带 NJU 镜像兜底） |
 | 4 | 数据**从本机 tar + scp**（1.36 GiB），不要在云机上重下 Edinburgh |
 | 5 | 安全组放行 **22**；**绑 EIP**；用**密钥对**登录 |
-| 6 | 训完**释放实例 + 删数据盘 + 释放 EIP** —— 关机只停算力费，硬盘和 IP 照收 |
+| 6 | **GPU 配额是按区域分配的** —— 下拉框里看不到 GPU 规格 = 这个区域没配额 ⇒ 换区域 |
+| 7 | 训完**释放实例 + 删数据盘 + 释放 EIP** —— 关机只停算力费，硬盘和 IP 照收 |
 
 传东西（本机执行）：
 
@@ -161,7 +192,7 @@ python -c "import torch; d=torch.load('algorithms/voiceprint_protection/weights/
 tar czf vpp_data.tgz -C D:/vpp/data audio16k train.txt val.txt test.txt spk2id.txt split_speakers.json
 scp vpp_data.tgz root@<EIP>:/root/
 
-# Stage 1 权重（★ Stage 2 训练的前提，约 358 MB）
+# Stage 1 权重（★ Stage 2 训练的前提）
 scp algorithms/voiceprint_protection/weights/stage1_model.pt \
     root@<EIP>:<仓库>/algorithms/voiceprint_protection/weights/
 
@@ -302,14 +333,21 @@ python algorithms/voiceprint_protection/evaluate.py --mode trained --protect-mod
 | 高斯噪声 | ≈ 0.85 | ≈ 0.35 | 45.2% |
 | **论文 · Ours** | **0.95** | **0.13** | **87.2%** |
 
+> ★ **这三条都走论文路线**（`--protect-mode stage2`），而且 Sim_prot / Sim_clone
+> 是在**微调后**的 E_spk 空间里算的（`embed_for_route` 自动用这条路线的 E_spk）——
+> **不要跟"用上游 E_spk 算出来的数"混着比**（那个口径会把所有指标压低，见 §1.4 的表）。
+>
+> ★ 好消息：A 的 Stage 1 重建质量是 **Sim_prot 0.999996**（同一口径）⇒
+> 论文路线上的 Sim_prot **不该被 Stage 1 拖后腿**了。
+
 **不对怎么办**：
 
 | 症状 | 原因 | 解法 |
 |---|---|---|
 | 三行的 Sim_prot 都 ≈ 0.8 出头 | 走的是 clone 路线 | 加 `--protect-mode stage2` |
+| Sim_prot 明显 < 0.9 | **口径错**（用了上游 E_spk）或 Stage 1 权重不对 | 确认 `--stage1-checkpoint` 指对了、且 `--protect-mode stage2` |
 | `sim_clone` 和无防御那行差不多 | δ 没生效 | 检查 `--mode trained` + checkpoint 路径；看训练时 `sim_clone` 有没有降 |
 | DSR 全 0 | Sim_clone 还很高（>0.5） | 同上；论文要 0.13 |
-| Sim_prot 明显 < 0.9 | **Stage 1 重建质量不够** | 回去找 A（这就是他说的 Sim_prot 0.459 那个问题） |
 
 ### 5.2 绝对 WER
 
