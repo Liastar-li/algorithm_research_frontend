@@ -26,7 +26,16 @@
 #   --steps N          训练步数（默认 config.STAGE2['iterations'] = 200000）
 #   --batch-size N     批大小（默认 config.STAGE2['batch_size'] = 8）
 #   --accum-steps N    梯度累积（默认 config.STAGE2['accum_steps']）
+#   --log-every N      每多少步打一行日志（默认 50；冒烟时设 1）
+#   --save-every N     每多少步存一次 checkpoint（默认 1000）
 #   --max-hours N      时长上限（小时）—— 到点自动存盘退出
+#   --outdir DIR       checkpoint 的输出目录（默认 <仓库>/algorithms/voiceprint_protection/weights/stage2）
+#                      ★ 消融实验要用不同的目录，否则会覆盖主实验的权重
+#   --lambda-de N      λ_de（论文 5.0；消融 w/o L_de 时设 0）
+#   --lambda-per N     λ_per（论文 15.0）
+#   --lambda-mask N    λ_mask（论文 0.1；消融 w/o L_mask 时设 0）
+#   --lambda-gan N     λ_GAN（论文 1.0；设 0 = 只训 L_per + L_de）
+#   --no-mel-loss      消融 w/o L_mel（L_per 里只留 L_mask）
 #   --stage1-ckpt PATH Stage 1 权重路径（必须）
 #   --session NAME     tmux 会话名（默认 vpp-stage2）
 #   --skip-data        跳过数据准备（数据已就位时）
@@ -46,7 +55,15 @@ SESSION="vpp-stage2"
 STEPS=""
 BATCH_SIZE=""
 ACCUM_STEPS=""
+LOG_EVERY=""
+SAVE_EVERY=""
 MAX_HOURS=""
+OUTDIR=""
+LAMBDA_DE=""
+LAMBDA_PER=""
+LAMBDA_MASK=""
+LAMBDA_GAN=""
+NO_MEL_LOSS=0
 STAGE1_CKPT=""
 SKIP_DATA=0
 ACTION=""
@@ -64,6 +81,14 @@ while [ $# -gt 0 ]; do
     --steps) STEPS="$2"; shift ;;
     --batch-size) BATCH_SIZE="$2"; shift ;;
     --accum-steps) ACCUM_STEPS="$2"; shift ;;
+    --log-every) LOG_EVERY="$2"; shift ;;
+    --save-every) SAVE_EVERY="$2"; shift ;;
+    --outdir) OUTDIR="$2"; shift ;;
+    --lambda-de) LAMBDA_DE="$2"; shift ;;
+    --lambda-per) LAMBDA_PER="$2"; shift ;;
+    --lambda-mask) LAMBDA_MASK="$2"; shift ;;
+    --lambda-gan) LAMBDA_GAN="$2"; shift ;;
+    --no-mel-loss) NO_MEL_LOSS=1 ;;
     --max-hours) MAX_HOURS="$2"; shift ;;
     --stage1-ckpt) STAGE1_CKPT="$2"; shift ;;
     --session) SESSION="$2"; shift ;;
@@ -190,7 +215,24 @@ start_training() {
   if [ -n "$STEPS" ]; then train_args+=(--steps "$STEPS"); fi
   if [ -n "$BATCH_SIZE" ]; then train_args+=(--batch-size "$BATCH_SIZE"); fi
   if [ -n "$ACCUM_STEPS" ]; then train_args+=(--accum-steps "$ACCUM_STEPS"); fi
+  if [ -n "$LOG_EVERY" ]; then train_args+=(--log-every "$LOG_EVERY"); fi
+  if [ -n "$SAVE_EVERY" ]; then train_args+=(--save-every "$SAVE_EVERY"); fi
   if [ -n "$MAX_HOURS" ]; then train_args+=(--max-hours "$MAX_HOURS"); fi
+  if [ -n "$OUTDIR" ]; then train_args+=(--outdir "$OUTDIR"); fi
+  if [ -n "$LAMBDA_DE" ]; then train_args+=(--lambda-de "$LAMBDA_DE"); fi
+  if [ -n "$LAMBDA_PER" ]; then train_args+=(--lambda-per "$LAMBDA_PER"); fi
+  if [ -n "$LAMBDA_MASK" ]; then train_args+=(--lambda-mask "$LAMBDA_MASK"); fi
+  if [ -n "$LAMBDA_GAN" ]; then train_args+=(--lambda-gan "$LAMBDA_GAN"); fi
+  if [ "$NO_MEL_LOSS" = "1" ]; then train_args+=(--no-mel-loss); fi
+
+  # ★ 消融实验：不同的 λ / 不同的 outdir —— 别把主实验的权重覆盖了
+  if [ -n "$OUTDIR" ]; then
+    mkdir -p "$OUTDIR"
+    echo "  输出目录   : $OUTDIR"
+  fi
+  if [ "$NO_MEL_LOSS" = "1" ]; then
+    echo "  ★ 消融：w/o L_mel（L_per 里只留 L_mask）"
+  fi
 
   local log_dir="$REPO_ROOT/logs"
   mkdir -p "$log_dir"

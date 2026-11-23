@@ -280,6 +280,8 @@ def compute_losses(batch, pipeline: Stage2Pipeline, generator, discriminator,
     perceptual = loss_module.perceptual_loss(
         original_mel, protected_mel, delta_waveform, thresholds,
         lambda_mask=args.lambda_mask,
+        # ★ 消融：论文 Table 2 的 "w/o L_mel" —— 只留 L_mask
+        use_mel_loss=not args.no_mel_loss,
     )
     defense = loss_module.defense_loss(
         _speak_fp32(cloned_waveform), original_embedding
@@ -358,6 +360,8 @@ def parse_args(argv=None) -> argparse.Namespace:
                         help="每条裁多少秒（默认 config.STAGE2['max_seconds']）")
     parser.add_argument("--num-workers", type=int, default=2,
                         help="DataLoader 的 worker 数（★ 本机内存小，最多 2）")
+    parser.add_argument("--no-mel-loss", action="store_true",
+                        help="★ 消融（论文 Table 2 的 'w/o L_mel'）：L_per 里只留 L_mask")
     return parser.parse_args(argv)
 
 

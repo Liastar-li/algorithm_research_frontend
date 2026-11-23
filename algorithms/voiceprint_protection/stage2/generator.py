@@ -106,6 +106,50 @@ class PerturbationGenerator(nn.Module):
         )
 
 
+def config_from_state(state: dict) -> dict:
+    """从生成器的权重里**反推**它的结构参数（`PerturbationGenerator` 的构造参数）。
+
+    为什么需要：checkpoint 里存了 `generator_config` 就直接用它；
+    万一没有（旧 checkpoint），也得能从权重形状把结构还原出来 ——
+    **结构差一点，`load_state_dict` 就报形状不符**；结构对但顺序错，
+    更糟的是能加载上、结果却全错。
+
+    形状（别搞反）：
+        trunk.<i>.weight : (hidden, dim)   ← Linear
+        trunk.<i>.weight : (hidden,)       ← LayerNorm（1 维，靠这个区分）
+        head.weight      : (dim, hidden)
+        skip.weight      : (dim, dim)
+
+    唯一真源：`infer.py` 与 `evaluate.py` 都用这个函数，
+    免得两处各写一份、慢慢跑偏。
+    """
+    settings = {"dim": config.SPEAKER_DIM, "hidden": 512, "layers": 2}
+    if not isinstance(state, dict):
+        return settings
+
+    linear_indices = set()
+    for key, value in state.items():
+        if not (key.startswith("trunk.") and key.endswith(".weight")):
+            continue
+        if value.dim() != 2:
+            continue                      # LayerNorm 的权重是 1 维，跳过
+        index = int(key.split(".")[1])
+        linear_indices.add(index)
+        if index == 0:
+            settings["hidden"] = int(value.shape[0])
+            settings["dim"] = int(value.shape[1])
+    if linear_indices:
+        settings["layers"] = len(linear_indices)
+
+    for key, value in state.items():
+        if key.endswith("head.weight") and value.dim() == 2:
+            settings["dim"] = int(value.shape[0])
+            settings["hidden"] = int(value.shape[1])
+
+    settings["use_skip"] = any(key.startswith("skip.") for key in state)
+    return settings
+
+
 class RandomPerturbationGenerator(nn.Module):
     """随机方向占位（L1 用）。
 

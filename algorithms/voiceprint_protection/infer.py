@@ -89,49 +89,14 @@ def perturb_embedding(embedding: np.ndarray, delta: np.ndarray,
 
 
 def _infer_generator_config(state: dict) -> dict:
-    """从生成器的权重里**反推**它的结构参数。
+    """从生成器的权重里反推它的结构参数。
 
-    为什么需要：早期的 Stage 2 checkpoint 没存 `generator_config`，
-    但生成器 G 的结构（隐层宽度、层数）必须与训练时**一模一样**，
-    否则 `load_state_dict` 会报形状不符 —— 那种错还算好，
-    怕的是结构相近但不同 silently 加载失败。
-
-    结构（见 stage2/generator.py）：
-        trunk = [Linear(dim→hidden), LayerNorm, GELU] × layers
-        head  = Linear(hidden→dim)
-        skip  = Linear(dim→dim)（可选）
+    ★ 唯一实现在 `stage2/generator.py::config_from_state` ——
+      这里只是薄薄一层包装，免得两处各写一份、慢慢跑偏。
     """
-    # ★ 局部变量不能叫 `config` —— 会把模块级的 `import config` 遮掉，
-    #   右边的 `config.SPEAKER_DIM` 就成了"引用未赋值的局部变量"。
-    settings = {"dim": config.SPEAKER_DIM, "hidden": 512, "layers": 2}
-    if not isinstance(state, dict):
-        return settings
+    from stage2.generator import config_from_state
 
-    # 形状（别搞反）：
-    #   trunk.<i>.weight : (hidden, dim)   ← Linear
-    #   trunk.<i>.weight : (hidden,)       ← LayerNorm（1 维，靠这个区分）
-    #   head.weight      : (dim, hidden)
-    linear_indices = set()
-    for key, value in state.items():
-        if not (key.startswith("trunk.") and key.endswith(".weight")):
-            continue
-        if value.dim() != 2:
-            continue                      # LayerNorm 的权重是 1 维，跳过
-        index = int(key.split(".")[1])
-        linear_indices.add(index)
-        if index == 0:
-            settings["hidden"] = int(value.shape[0])
-            settings["dim"] = int(value.shape[1])
-    if linear_indices:
-        settings["layers"] = len(linear_indices)
-
-    for key, value in state.items():
-        if key.endswith("head.weight") and value.dim() == 2:
-            settings["dim"] = int(value.shape[0])
-            settings["hidden"] = int(value.shape[1])
-
-    settings["use_skip"] = any(key.startswith("skip.") for key in state)
-    return settings
+    return config_from_state(state)
 
 
 # ---------------------------------------------------------------------------
@@ -316,6 +281,22 @@ class Protector:
             raise RuntimeError("未加载说话人编码器，无法提取嵌入。")
         return self.speaker.embed(wav, 16000)
 
+    def embed_for_route(self, wav: np.ndarray, route: str = "clone") -> np.ndarray:
+        """按**路线**取说话人嵌入 h。
+
+        为什么不能随便取：不同路线用的 E_spk 不一样
+        （stage1 路线用随 Stage 1 微调过的那个，stage2 路线用 checkpoint 指定的那个），
+        而生成器 G 是在**某个 E_spk 的嵌入空间上**学出来的 ——
+        用错 E_spk 算出来的 δ 是**离分布**的，防御会静默失效。
+
+        所以：**谁要算 δ，就用这条路线自己的嵌入。**
+        """
+        if route == "stage2":
+            return self._embed_for_stage2(wav)
+        if route == "stage1" and self.stage1_speaker is not None:
+            return self.stage1_speaker.embed_numpy(wav)
+        return self.embedding(wav)
+
     def protect_stage2(self, wav: np.ndarray, alpha: float = config.STAGE2["alpha"],
                        delta: np.ndarray | None = None,
                        seed: int = config.SEED, verbose: bool = True) -> dict:
@@ -324,6 +305,9 @@ class Protector:
         与 `protect_stage1` 的**唯一区别**是 δ 的来源：
           stage1 : δ = 随机高斯噪声（L1 占位，**没有防御效果**）
           stage2 : δ = G(h) —— Stage 2 训出来的方向，**这才是论文的防御**
+
+        ★ `delta` 给了就用给的（调用方自己算好的，例如评测时"同一批 δ 换路线对比"），
+          不给才用 G(h) 现算（E_spk 取 checkpoint 指定的那个，保证与训练一致）。
 
         其余步骤与论文 Figure 1 完全一致：
           1. h      = E_spk(x)              身份卡
@@ -336,12 +320,20 @@ class Protector:
         """
         import torch
 
-        if self.stage2_generator is None:
-            raise RuntimeError("Stage 2 生成器未加载 —— 先调 load_stage2()。")
         if self.stage1 is None:
             raise RuntimeError(
                 "Stage 2 路线需要 Stage 1 的重建器（D(c, h_adv)）—— 先调 load_stage1()。"
             )
+        if self.stage2_generator is None and delta is None:
+            if alpha == 0.0:
+                # α=0（"无防御"基线）⇒ δ 取什么都一样，用零向量占位。
+                # 这样"无防御基线"不需要 Stage 2 的 checkpoint 也能跑。
+                delta = np.zeros(config.SPEAKER_DIM, dtype=np.float32)
+            else:
+                raise RuntimeError(
+                    "Stage 2 生成器未加载 —— 先调 load_stage2()，"
+                    "或显式传入 delta（α=0 的无防御基线不需要生成器）。"
+                )
 
         device = next(self.stage1.parameters()).device
 
@@ -349,11 +341,22 @@ class Protector:
         with torch.no_grad():
             embedding = self._embed_for_stage2(wav)
 
-            # 2. 生成器出扰动（★ 这才是 Stage 2 训出来的东西）
-            embedding_tensor = torch.from_numpy(
-                np.asarray(embedding, dtype=np.float32)).unsqueeze(0).to(device)
-            delta_tensor = self.stage2_generator(embedding_tensor)
-            delta = delta_tensor[0].cpu().numpy()
+            # 2. 扰动方向
+            if delta is None:
+                # 用 G(h) 现算 —— E_spk 与训练时一致（checkpoint 里写着）
+                embedding_tensor = torch.from_numpy(
+                    np.asarray(embedding, dtype=np.float32)).unsqueeze(0).to(device)
+                delta_tensor = self.stage2_generator(embedding_tensor)
+                delta = delta_tensor[0].cpu().numpy()
+                delta_source = "G(h)"
+            else:
+                # 调用方自己给的（例如评测时"同一批 δ 换路线对比"）
+                delta = np.asarray(delta, dtype=np.float32).reshape(-1)
+                delta_source = "调用方给定"
+                if float(np.linalg.norm(delta)) == 0.0:
+                    # α=0 的"无防御"基线：δ 取零占位（乘上 α 还是零）
+                    delta_source = "零向量（α=0 基线）"
+
             # G 的输出是**单位长度**的方向，α 才是强度旋钮（见 stage2/generator.py）
             embedding_adv = perturb_embedding(embedding, delta, alpha)
 
@@ -389,9 +392,11 @@ class Protector:
         if verbose:
             print(f"  [1] 身份卡 h        {tuple(embedding.shape)}  "
                   f"L2 范数 {float(np.linalg.norm(embedding)):.4f}")
-            print(f"  [2] 生成器 G 的 δ   {tuple(delta.shape)}  "
-                  f"L2 范数 {float(np.linalg.norm(delta)):.4f}（应为 1）"
-                  f"  与原卡余弦 {float(np.dot(embedding, delta)):.4f}")
+            print(f"  [2] 扰动 δ          {tuple(delta.shape)}  "
+                  f"L2 范数 {float(np.linalg.norm(delta)):.4f}"
+                  f"{'（生成器输出应为 1）' if delta_source == 'G(h)' else ''}"
+                  f"  与原卡余弦 {float(np.dot(embedding, delta)):.4f}"
+                  f"  来源：{delta_source}")
             print(f"  [3] 扰动后身份卡    与原卡余弦 {float(np.dot(embedding, embedding_adv)):.4f}"
                   f"（α={alpha}）")
             print(f"  [4] 保护后语音      {tuple(protected.shape)}  "
@@ -407,6 +412,7 @@ class Protector:
             "embedding": embedding,
             "embedding_adv": embedding_adv,
             "delta": delta,
+            "delta_source": delta_source,
             "stolen_embedding": stolen,
             "protected_waveform": protected,
             "clone_baseline_waveform": baseline,

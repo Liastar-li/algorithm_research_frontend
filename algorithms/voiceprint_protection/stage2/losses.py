@@ -93,16 +93,21 @@ def mask_loss(delta_waveform: torch.Tensor,
 def perceptual_loss(original_mel: torch.Tensor, protected_mel: torch.Tensor,
                     delta_waveform: torch.Tensor,
                     threshold: torch.Tensor | None,
-                    lambda_mask: float = config.STAGE2["lambda_mask"]) -> torch.Tensor:
+                    lambda_mask: float = config.STAGE2["lambda_mask"],
+                    use_mel_loss: bool = True) -> torch.Tensor:
     """L_per = L_mel + λ_mask · L_mask （论文式 9）
 
     两个子项管两件不同的事：
       · L_mel ：整体频谱别乱动
       · L_mask：**人耳听不见的那些频点**上别有能量（哪怕 L_mel 看着还行）
+
+    ★ `use_mel_loss=False` 是**消融**用的（论文 Table 2 的 "w/o L_mel"）：
+      只留 L_mask。训练脚本用 `--no-mel-loss` 打开它。
     """
-    return mel_loss(original_mel, protected_mel) + lambda_mask * mask_loss(
-        delta_waveform, threshold
-    )
+    total = mask_loss(delta_waveform, threshold) * lambda_mask
+    if use_mel_loss:
+        total = total + mel_loss(original_mel, protected_mel)
+    return total
 
 
 # ---------------------------------------------------------------------------

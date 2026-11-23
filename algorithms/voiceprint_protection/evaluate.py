@@ -262,25 +262,47 @@ def evaluate(args) -> dict:
     if args.mode == "trained":
         if not args.generator_checkpoint:
             raise SystemExit("--mode trained 必须给 --generator-checkpoint")
-        from stage2.generator import PerturbationGenerator
-
         checkpoint = Path(args.generator_checkpoint)
         if not checkpoint.exists():
             raise SystemExit(f"找不到 checkpoint：{checkpoint}")
-        generator = PerturbationGenerator()
-        state = torch_load(checkpoint)
-        generator.load_state_dict(state["generator"])
-        generator.eval()
-        print(f"  生成器       : {checkpoint}（step {state.get('step', '?')}）")
+        if args.protect_mode == "stage2":
+            # ★ stage2 路线：δ 由 Protector 内部用 G(h) 算 ——
+            #   它用的是 **checkpoint 里指定的 E_spk**，与训练时一致
+            #   （自己在这儿算 δ 的话，嵌入空间可能对不上，防御会静默失效）。
+            print(f"  生成器       : {checkpoint.name}（由 Protector 内部加载，"
+                  f"δ = G(h)，E_spk 与训练时一致）")
+        else:
+            from stage2.generator import PerturbationGenerator, config_from_state
+
+            state = torch_load(checkpoint)
+            generator = PerturbationGenerator(**config_from_state(state["generator"]))
+            generator.load_state_dict(state["generator"])
+            generator.eval()
+            print(f"  生成器       : {checkpoint}（step {state.get('step', '?')}）")
 
     # -- 保护器（★ 整个评测只加载一次权重）--------------------------------
-    print("\n加载模型（encoder + synthesizer + vocoder，只加载一次）…")
-    protector = infer.Protector()
+    print("\n加载模型（只加载一次）…")
+    protector = infer.Protector(
+        stage1_checkpoint=args.stage1_checkpoint,
+        # stage2 路线：G 由 Protector 自己从 checkpoint 加载
+        stage2_checkpoint=((args.stage2_checkpoint or args.generator_checkpoint)
+                           if args.protect_mode == "stage2" else None),
+        # ★ clone 路线才需要上游合成器（370 MB）；stage1/stage2 路线用 Stage 1
+        #   的解码器 + HiFi-GAN ⇒ 不加载它，省内存也省时间。
+        with_cloner=(args.protect_mode == "clone"),
+    )
     alpha = 0.0 if args.mode == "none" else args.alpha
     if args.mode == "none":
         print("  mode=none：α=0，即不做任何防御（基线）")
     elif args.mode == "random":
         print("  mode=random：随机高斯扰动（论文 Table 1 的 Gaussian Noise 基线）")
+    print(f"  保护链       : {args.protect_mode}")
+    if args.protect_mode in ("stage1", "stage2") and not protector.has_stage1:
+        print("  [警告] 保护链要用 Stage 1 的重建器，但没加载到 Stage 1 权重 —— "
+              "用 --stage1-checkpoint 指定。")
+    if args.protect_mode == "stage2" and not protector.has_stage2 and args.mode != "none":
+        print("  [警告] stage2 路线但没加载到 Stage 2 的生成器 —— "
+              "δ 会退化成随机方向（用 --generator-checkpoint / --stage2-checkpoint 指定）。")
     print()
 
     sim_prot_values: list[float] = []
@@ -301,10 +323,17 @@ def evaluate(args) -> dict:
             if generator is not None:
                 import torch
 
-                embedding = protector.embedding(wav)
+                # ★ 用**这条路线自己的**嵌入算 δ ——
+                #   stage1 路线用微调过的 E_spk，clone 路线用上游的。
+                #   用错 E_spk ⇒ δ 离分布 ⇒ 防御静默失效。
+                embedding = protector.embed_for_route(wav, args.protect_mode)
                 with torch.no_grad():
                     tensor = torch.from_numpy(embedding).float()[None, :]
                     delta = generator(tensor).numpy()[0]
+            elif args.mode == "random" and args.protect_mode in ("stage1", "stage2"):
+                # 高斯噪声基线，但走**论文路线**（stage1/stage2）
+                # ⇒ 这才是论文 Table 1 里 "Gaussian Noise" 那一行的正确对照。
+                delta = infer.random_perturbation(seed=args.seed)
 
             # ★ 先把参考文本取出来：**保护时念的就该是这一句**。
             #   protect() 默认念固定的 "The quick brown fox jumps over the lazy dog."，
@@ -321,6 +350,7 @@ def evaluate(args) -> dict:
                 text=clone_text,
                 attack_mode="clone",
                 verbose=False,
+                mode=args.protect_mode,
             )
         except Exception as error:  # noqa: BLE001
             print(f"  [跳过] {path.name}：{error}")
@@ -335,11 +365,17 @@ def evaluate(args) -> dict:
         # Sim_prot：保护后语音 vs 原始语音（stolen 就是 E_spk(protected)）
         sim_prot = cosine(stolen, embedding)
 
+        # ★ 下面两个也用**这条路线自己的** E_spk 算 ——
+        #   否则会出现"用 A 的编码器训、用 B 的编码器测"的错配，
+        #   指标不可比（而且不会报错）。
+        def embed_of(some_waveform: np.ndarray) -> np.ndarray:
+            return protector.embed_for_route(some_waveform, args.protect_mode)
+
         # Sim_clone（论文口径）：攻击者克隆出来的**声音** vs 原始说话人
-        sim_clone = cosine(_embed(cloned, sample_rate), embedding)
+        sim_clone = cosine(embed_of(cloned), embedding)
 
         # 未防御时攻击者克隆音 vs 原始说话人（应当很接近 1）
-        sim_clone_baseline = cosine(_embed(baseline, sample_rate), embedding)
+        sim_clone_baseline = cosine(embed_of(baseline), embedding)
 
         sim_prot_values.append(sim_prot)
         sim_clone_values.append(sim_clone)
@@ -375,6 +411,7 @@ def evaluate(args) -> dict:
     # -- 汇总 --------------------------------------------------------------
     report = {
         "mode": args.mode,
+        "protect_mode": args.protect_mode,
         "split": args.split,
         "alpha": alpha,
         "seed": args.seed,
@@ -426,17 +463,11 @@ def torch_load(path: Path):
     return torch.load(path, map_location="cpu")
 
 
-_EMBEDDER = None
-
-
-def _embed(wav: np.ndarray, sample_rate: int) -> np.ndarray:
-    """算一条波形的说话人嵌入（进程内缓存一个编码器）。"""
-    global _EMBEDDER
-    if _EMBEDDER is None:
-        from bridge_speaker import SpeakerBridge
-
-        _EMBEDDER = SpeakerBridge(device="cpu")
-    return _EMBEDDER.embed(wav, sample_rate)
+# ★ 以前这里有一个进程内缓存的 `_embed()`（用上游 SpeakerBridge 算嵌入）。
+#   现在删掉了 —— 嵌入统一走 `protector.embed_for_route(wav, route)`：
+#   **每条路线用它自己的 E_spk**（stage1 路线用微调过的那个，stage2 路线用
+#   checkpoint 指定的那个，clone 路线用上游的）。
+#   原来的写法会让"用 A 的编码器训、用 B 的编码器测"，指标不可比而且不报错。
 
 
 # ---------------------------------------------------------------------------
@@ -453,7 +484,17 @@ def main() -> int:
     parser.add_argument("--alpha", type=float, default=config.STAGE2["alpha"])
     parser.add_argument("--seed", type=int, default=config.SEED)
     parser.add_argument("--taus", type=float, nargs="+", default=list(config.EVAL["taus"]))
-    parser.add_argument("--generator-checkpoint", default=None)
+    parser.add_argument("--generator-checkpoint", default=None,
+                        help="Stage 2 的 checkpoint（含 'generator' 那一段）")
+    parser.add_argument("--protect-mode", choices=("clone", "stage1", "stage2"), default="clone",
+                        help="★ 保护后语音怎么来："
+                             "clone=用克隆机重新合成（Sim_prot 上限 ≈0.82）；"
+                             "stage1=论文原版 D(c,h_adv)→HiFi-GAN（δ 随机）；"
+                             "stage2=论文原版 + 训练好的 G（**论文那组数字走这条**）")
+    parser.add_argument("--stage1-checkpoint", default=None,
+                        help="Stage 1 的权重（stage1 / stage2 路线需要）")
+    parser.add_argument("--stage2-checkpoint", default=None,
+                        help="Stage 2 的权重（stage2 路线用；不填则用 --generator-checkpoint）")
     parser.add_argument("--wer", action="store_true", help="算 WER（需要 faster-whisper）")
     parser.add_argument("--whisper-device", default="cpu")
     parser.add_argument("--whisper-model", default=None,

@@ -278,6 +278,8 @@ python algorithms/voiceprint_protection/scripts/smoke_test.py
 - [实验记录（与代码同 commit）](docs/experiments.md)
 - [两人接口契约（形状与签名）](docs/interface-contract.md)
 - [任务板与分工](algorithms/voiceprint_protection/TASKS.md)
+- [★ 成员 B 的逐步操作手册（Stage 2 → 交付）](docs/notes/member_b_runbook.md)
+- [★ 华为云 ECS 开台指南](docs/notes/cloud_ecs_stage2.md)
 - [Stage 2 的阻塞项与待决问题](docs/notes/stage2_blockers.md)
 - [GE2E 接口核实记录](docs/notes/ge2e_interface.md)
 - [VCTK 目录勘察结果](docs/notes/vctk_layout.md)

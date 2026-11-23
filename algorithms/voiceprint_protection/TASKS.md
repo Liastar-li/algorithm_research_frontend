@@ -686,6 +686,35 @@ checkpoint 里存了微调后的权重；而评测用的是**上游预训练**�
 
 ---
 
+---
+
+### 0.16 ★ 本轮进展（成员 B · 2026-11-23：把「A 交权重之后要干什么」写成手册）
+
+**背景**：A 说 Stage 1 还要一段时间。这一轮不训练，**把成员 B 剩下的全部任务
+写成一本可照抄的操作手册**，等 A 的正式权重一到手就能照着跑，不用临场想。
+
+> ★ **写完手册当天，A 就查清了那个 Sim_prot 0.459**：
+> 那是「用**上游预训练**的 E_spk 去评测**微调过**的模型」造成的**空间错配**，
+> 换成 checkpoint 里的微调 E2E 后 **Sim_prot = 0.999996，**M3 已通过（见 §0.15）。
+> ⇒ **Stage 1 不用重训，Stage 2 可以开训了**；
+> ⇒ E_spk 的问题也有了答案：**A 的 checkpoint 里有微调 E2E ⇒
+>    Stage 2 用 `--speaker-encoder stage1`**（B 侧的默认值就是它，见 §0.14 第 7 条）。
+
+| # | 事项 | 结论 |
+|---|---|---|
+| 1 | ★★ **新增 [`docs/notes/member_b_runbook.md`](../../docs/notes/member_b_runbook.md)** | 9 步操作手册：准备 → 云机 → 训练 → 评测 → 消融 → 收结果释放实例 → 样例 → 平台 → 交付。每步都有「**看什么数**」与「**不对怎么办**」，另有故障排查速查表 + 论文对照表 + 花钱预算 |
+| 2 | ★★ 补上 `evaluate.py` 的 **保护链开关** | 原来 `--mode trained` **只换 δ，保护链仍是 clone 路线** ⇒ Sim_prot 有 0.82 的结构性天花板 ⇒ 拿它跟论文的 0.95 比会得出错误结论。新增 `--protect-mode {clone,stage1,stage2}`（默认 clone ⇒ **现有行为完全不变**） |
+| 3 | ★ 评测的 E_spk 统一 | 删掉 `evaluate.py` 里那个进程内缓存的 `_embed()`（上游 SpeakerBridge），改成统一走 `protector.embed_for_route(wav, route)` —— **每条路线用它自己的 E_spk**。否则会「用 A 的编码器训、用 B 的编码器测」，指标不可比而且不报错 |
+| 4 | ★ `make_sample.py` 加 `--mode` | 平台样例要用**训练好的 G** 出（`--mode stage2`），否则样例展示的还是随机扰动、没有防御效果 |
+| 5 | ★ 消融能真跑了 | `stage2/losses.py::perceptual_loss` 加 `use_mel_loss`，`stage2/train.py` 加 `--no-mel-loss` ⇒ 论文 Table 2 的 "w/o L_mel" 这一行终于能训（之前 `config.ABLATION` 里写着 `use_mel_loss: False` 但**根本没实现**） |
+| 6 | ★ 云机脚本补参数 | `cloud_train_stage2.sh` 加 `--outdir` / `--lambda-de` / `--lambda-per` / `--lambda-mask` / `--lambda-gan` / `--no-mel-loss` / `--log-every` / `--save-every` ⇒ **消融的三组实验可以用同一条命令跑**（`--outdir` 一定要给，否则会覆盖主实验的权重） |
+| 7 | 生成器结构的反推逻辑收敛到一处 | `stage2/generator.py::config_from_state` 是唯一实现，`infer.py` 与 `evaluate.py` 都用它（之前两边各写一份，正是"慢慢跑偏"的典型） |
+
+> ★ **手册里最该记住的三条**：
+> ① 评测一定要加 `--protect-mode stage2`，否则走 clone 路线，数字不能跟论文比；
+> ② 训完要**释放实例**（不是关机）—— 关机只停算力费，硬盘和 EIP 照收；
+> ③ 消融要**重训**，不是改评测参数。
+
 ## 1. W2 详细分解：指南第 3 步 + 第 4 步
 
 > **W2 目标（M1）**：不训练任何东西，用公开预训练组件把论文的推理路径走通，产出 `protected.wav`。

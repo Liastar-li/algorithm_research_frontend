@@ -100,6 +100,14 @@ def main() -> int:
                         help="直接用这条音频做样例输入（VCTK 未下好时用上游 samples 里的 mp3）")
     parser.add_argument("--source-note", default=None, help="来源说明里要写的来源描述")
     parser.add_argument("--method-id", default=METHOD_ID)
+    parser.add_argument("--mode", choices=("clone", "stage1", "stage2"), default="clone",
+                        help="★ 保护链：clone=用克隆机重新合成（默认）；"
+                             "stage1=论文原版 D(c,h_adv)→HiFi-GAN（δ 随机）；"
+                             "stage2=论文原版 + 训练好的 G（**样例要展示防御效果就用这条**）")
+    parser.add_argument("--stage1-checkpoint", default=None,
+                        help="Stage 1 的权重（stage1 / stage2 路线需要）")
+    parser.add_argument("--stage2-checkpoint", default=None,
+                        help="Stage 2 的权重（stage2 路线需要）")
     args = parser.parse_args()
 
     print("=" * 64)
@@ -157,7 +165,10 @@ def main() -> int:
             if hasattr(infer, "protect"):
                 # 约定一：模块级 protect(wav_path, alpha=..., output_path=...)
                 result = infer.protect(
-                    str(input_path), alpha=args.alpha, output_path=str(output_path)
+                    str(input_path), alpha=args.alpha, output_path=str(output_path),
+                    mode=args.mode,
+                    stage1_checkpoint=args.stage1_checkpoint,
+                    stage2_checkpoint=args.stage2_checkpoint,
                 )
                 produced_output = True
                 print(f"  输出样例 : {result.get('protected_path', output_path)}")
@@ -193,7 +204,8 @@ def main() -> int:
     lines.append("|---|---|")
     lines.append("| `input.wav` | 原始语音（VCTK 测试集说话人） |")
     if produced_output:
-        lines.append(f"| `output.wav` | 保护后语音，由本项目推理链实际生成（α = {args.alpha}） |")
+        lines.append(f"| `output.wav` | 保护后语音，由本项目推理链实际生成"
+                     f"（α = {args.alpha}，保护链 = {args.mode}） |")
     else:
         lines.append("| `output.wav` | **待生成** —— 需要成员 A 的 `infer.py` 就位后重跑本脚本 |")
     lines.append("")
@@ -202,6 +214,11 @@ def main() -> int:
     lines.append("```json")
     lines.append(f'{{ "alpha": {args.alpha} }}')
     lines.append("```")
+    lines.append("")
+    lines.append(f"保护链：`{args.mode}`"
+                 + ("（论文原版：x_adv = D(c, h_adv) → HiFi-GAN，"
+                    "δ 来自训练好的生成器 G）"
+                    if args.mode == "stage2" else ""))
     lines.append("")
     lines.append(VCTK_LICENSE_NOTE)
     lines.append("## 具体条目")
