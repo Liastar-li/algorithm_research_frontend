@@ -1110,6 +1110,19 @@ embedding = speaker_encoder(mel40)     # ★ fine_tune=True，E_spk **正在被�
 2. **训完要释放实例**（不是关机）—— 关机只停算力费，云硬盘和 EIP 照收；
 3. **消融要重训**，不是改评测参数。
 
+### 4e.4 实测（本机 CPU，2026-11-23）
+
+| 检查 | 结果 |
+|---|---|
+| `MODE stage1`（论文原版 D(c,h_adv)→HiFi-GAN，δ 随机） | ✅ 11.3 s/条；保护后 (42752,)、攻击者克隆音 (42752,) |
+| `MODE stage2`（论文原版 + 训练好的 G） | ✅ 5.9 s/条；**δ 的来源 = `G(h)`** ✅ |
+| `MODE stage2` + α=0（**无防御基线，不需要** Stage 2 的 checkpoint） | ✅ sim_prot 0.4773 |
+| 回归 | verify_gradients **20/20**、verify_psychoacoustics **20/20**、verify_mel **4/4**、verify_hifigan ✅、verify_rtc_mel ✅、test_stage1 ✅、test_audio_utils ✅ |
+
+> ⚠️ 上面 sim_prot 只有 0.42–0.48，是因为这里用的是成员 A 的 **3 步冒烟** Stage 1 权重
+> （重建质量极差）。**换成正式权重后才是有意义的数字** —— 这也再次说明
+> 「Stage 1 的 Sim_prot 上不去，Stage 2 训得再好也没用」。
+
 ---
 
 ## 5. 已知坑（组内共享，别重复踩）
