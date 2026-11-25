@@ -488,6 +488,12 @@ D:/conda/envs/vpp/python.exe -u algorithms/voiceprint_protection/stage2/diagnose
 > ③ 先修 Stage 1 的放大链（`upstream_speaker_top1 rebuilt` 只有 **0.229** ⇒ 重建本身不够干净）。
 > 三条都不满足时，**本节的所有命令都不要执行**。
 > 替代交付路径见 §5.1（三条基线）+ §4.1.1 末尾（α–Sim_clone 曲线），两条都不花钱。
+>
+> ✅ **2026-11-25 决定（成员 B 与发起人确认）：不开台。** 上面三条闸门一条都没被满足
+> （oracle 等预算地板 0.42–0.45、没改 α、Stage 1 的 `rebuilt` 仍是 0.229），
+> 所以本节的 200k 命令**保持"不执行"状态**，交付改走 §5.1 三条基线 + α 曲线 +
+> experiments.md §4g 的负结果分析。留着这段是为了说明**为什么不烧这笔钱**，
+> 以及将来若有人把闸门①/②/③真做通了，按原命令开台即可。
 
 
 ```bash
