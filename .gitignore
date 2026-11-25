@@ -27,6 +27,8 @@ venv/
 algorithms/voiceprint_protection/weights/
 # 推理产物与中间结果
 algorithms/voiceprint_protection/results/
+# runbook §5.1 的评测报告（--output results/stage2_eval/*.json）落在仓库根
+/results/
 algorithms/voiceprint_protection/data/
 
 # --- 数据集 ---
