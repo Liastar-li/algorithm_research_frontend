@@ -1346,7 +1346,68 @@ embedding = speaker_encoder(mel40)     # ★ fine_tune=True，E_spk **正在被�
 
 ---
 
+## 4h. ★ §5.1 三条基线实测（论文路线 + upstream 口径，成员 B，2026-11-25）
+
+**命令**（三条只差 `--mode`，其余参数完全一致 ⇒ 严格配对）：
+
+```bash
+D:/conda/envs/vpp/python.exe -u algorithms/voiceprint_protection/evaluate.py \
+    --mode none|random|trained --protect-mode stage2 --alpha 0.1 \
+    --stage1-checkpoint algorithms/voiceprint_protection/weights/stage1_fresh_200k/stage1_step250000_wide_test_bn.pt \
+    --generator-checkpoint .tmpB/stage2_probe2/stage2_last.pt \
+    --split test --limit-per-speaker 5 --espk-space upstream \
+    --output results/stage2_eval/base_*.json
+```
+
+> **样本与可复现性**：test 清单 20 人 × 5 = **100 条**，`evaluate.py::load_test_items()`
+> 按说话人排序后**等间隔**取 5 条 ⇒ 三条跑的是**同一批语音**，可以直接配对相减；
+> 这条路径**不做随机裁剪**（整条读入），`--mode random` 的高斯 δ 由
+> `infer.random_perturbation(seed=args.seed)` 显式播种 ⇒ **三轮都是确定性的**，
+> 不像 §4g 那些诊断脚本有 ±0.05 的裁剪抖动。每轮 CPU **377 s**（3.8 s/条）。
+>
+> **⚠️ ③ 的权重身份**：`.tmpB/stage2_probe2/stage2_last.pt` 是**本机 150 步短训 G**
+> （α=0.1、λ_per=15、λ_de=5、λ_mask=0.1、λ_GAN=1、batch 4、`--de-space upstream`），
+> **不是**论文量级的 200k 步权重。这一行只能读作"短训 G 的方向性证据"，
+> **不能当最终交付的 Ours 数字**（要正式数字必须回到 §4.2 的开台闸门）。
+
+| 变体 | E_spk 口径 | Sim_prot ↑ | Sim_clone ↓ | DSR(0.3 / 0.4 / 0.5) ↑ |
+|---|---|---|---|---|
+| ① 无防御（α=0） | upstream | 0.6698 ±0.0812 | 0.6169 ±0.0797 | 0% / 0% / **9.0%** |
+| ② 高斯噪声（random） | upstream | 0.6650 | 0.6163 | 0% / 0% / **12.0%** |
+| ③ 我们的 G（**150 步短训**） | upstream | **0.7029** ±0.0747 | **0.6775** | 0% / 0% / **1.0%** |
+| —— 同一批波形，塌缩口径 `stage1_finetuned` —— | | 0.9243 / 0.9213 / 0.9444 | 0.9048 / 0.9041 / 0.9229 | 全 0% / 0% / 0% |
+| 论文 Table 1（可比口径 = 上游 GE2E） | | 0.91 / 0.85 / **0.95** | 0.91 / 0.35 / **0.13** | 0% / 45.2%（τ=0.5）/ **87.2%** |
+
+**三条结论**：
+
+1. **★ DSR 有"链路地板"，无防御也能拿 9%** —— `evaluate.py:452` 的定义是
+   `DSR(τ) = mean(Sim_clone < τ)`，而我们的 Stage 1 放大链自己就有 **9% 的克隆音**
+   掉到 0.5 以下（与 A 报的 `upstream_speaker_top1 rebuilt = 0.229` 同源）。
+   ⇒ **对外报 DSR 必须把"无防御 DSR"并列给出**，否则这 9% 会被误读成防御效果；
+   真正可比的量是 **ΔDSR（本方法 − 无防御）**，论文那一行的地板是 0%，不是我们的 9%。
+2. **高斯噪声与无防御不可区分**（Sim_clone 0.6163 vs 0.6169，差 **0.0006**）
+   —— 随机方向 + 5.71° 预算推不动身份相似度。论文 Table 1 的 Gaussian Noise 行能到
+   0.35，是因为它扰动的是**声纹空间本身**，而不是我们这种"嵌入 → 解码 → 声码 → 再被 GE2E 读回"的放大链。
+   这条与 §3i.5 的旧结论（clone 路线 0.6995 vs 0.7080）同号同量级
+   ⇒ **结论不依赖保护链怎么选**。
+3. **★★ 短训 G 的方向是反的** —— ③ 相对 ①：Sim_prot **+0.033**（保真更好）、
+   Sim_clone **+0.061**（克隆反而更像受害者）、DSR(0.5) **9% → 1%**。
+   也就是 **G 学到的 δ 在帮重建链"守住身份"，而不是破坏它**。
+   机理与 §4g 完全自洽：λ_per=15、λ_GAN=1、λ_mask 都在推"改动要小、要像自然语音"，
+   而 `L_de` 能借力的只有 5.71°，**等预算自由 δ 的地板也只到 0.42–0.50**
+   ⇒ 多目标博弈里 `L_de` 输给了保真项，G 顺手把重建质量抬了一点。
+   ⚠️ 严格说不能排除"200k 步翻正"，但翻正要 0.6775 → 0.13（降 **0.55**），
+   而逐条 256 维自由优化的上界都到不了 0.42 ⇒ **加步数补不上这 0.3**，
+   这正是 §4.2 决定不开台的量化依据。
+
+**怎么用**：M4 要求的"三条基线"到此齐了（含塌缩口径附列与 DSR 地板说明），
+写进报告时 ③ 那一行**必须注明"150 步短训 G"**，并把 ① 的 DSR 当作扣除基线。
+
+---
+
 ## 5. 已知坑（组内共享，别重复踩）
+
+
 | 坑 | 现象 | 出处 |
 |---|---|---|
 | ★★ **E_spk 的「空间错配」** | Stage 1 会**微调** E_spk（论文 §3.1 明写 "fine-tuned end-to-end"），checkpoint 里存了微调后的权重。**评测时若用上游预训练 E_spk**，两者嵌入只相关 **0.518** ⇒ Sim_prot 0.44（装上后是 **0.999996**）、RMS 差 10 倍。**不报错，只是数字偏低** | experiments.md §4e |
@@ -1356,6 +1417,7 @@ embedding = speaker_encoder(mel40)     # ★ fine_tune=True，E_spk **正在被�
 | **Windows 控制台 GBK** | 脚本打印中文或 `‖δ‖` 这类字符 → `UnicodeEncodeError`。加 `sys.stdout.reconfigure(encoding="utf-8", errors="replace")`；另外 Git Bash 里 `powershell` 命令串中的 `$_` 会被双引号展开，要么单引号要么换个写法 | .tmpB/*、evaluate.py |
 | **上游 GE2E 的分段前向是 4 倍开销** | `TorchSpeakerEncoder` 照抄上游 `embed_utterance`：160 帧一段、50% 重叠，外面再套 Python 逐条循环 ⇒ 一条 3.8 s 语音变成 ~4 个序列。`--de-space upstream` 每步多 2 趟这种前向 ⇒ 本机整句 batch 8 的步长从 ~33 s 涨到**分钟级**。预检的解法是裁短（`--max-seconds 2 --batch-size 4`）而不是砍步数；云机（T4）上不必裁 | stage2/models.py、runbook §4.1.1 |
 | **自由 δ 实验会把 α 的预算偷偷放大** | `perturb_embedding` = `normalize(h + α·δ)`，**δ 没归一化** ⇒ 优化器只要把 `‖δ‖` 从 1 涨到 3.4，实际偏移就从 5.73° 变成 ~19°，"目标可达"的结论就失去可比性。等预算对照必须强制 `‖δ‖ = 1`（`stage2/diagnose_delta_oracle.py --delta-mode unit`） | stage2/diagnose_delta_oracle.py（2026-11-25） |
+| ★★ **DSR 不是从 0 起算的** | `DSR(τ) = mean(Sim_clone < τ)` 只看克隆音的余弦掉没掉线，**重建链自己的失真也算掉线** ⇒ 本机 upstream 口径下**无防御就有 DSR(0.5)=9.0%**、高斯噪声 12.0%、150 步 G 反而只有 1.0%。**报 DSR 必须并列"无防御 DSR"，可比量是 ΔDSR** | experiments.md §4h（2026-11-25） |
 | **诊断脚本只固定 torch 种子 ≠ 实验可复现** | `stage2/dataset.py::_crop()` 的裁剪起点用 **Python 的 `random`**，只写 `torch.manual_seed()` 时每次启动读到的音频片段不同 ⇒ 同一 α 的"随机 δ"两发差 **0.045**，很容易被误读成"α 有效/无效"。凡是要跨发比数字的脚本，统一调 `stage2.common.set_seed()`（`random` + `np.random` + `torch` 三个一起） | stage2/diagnose_{gradient,delta_oracle,alpha_sweep}.py（2026-11-25 修） |
 | **冒烟训练覆盖正式权重** | `--smoke` 结束时把 `stage1_model.pt` 覆盖了 ⇒ 13.5 小时成果全丢。已加固：未跑满不覆盖 + 另存 `stage1_best.pt` | experiments.md §4e.5 |
 | **训练与推理的 E_spk 必须一致** | 论文说 E_spk 在 Stage 1 里被微调过。训练用**上游** GE2E、推理用**微调后**的那个 ⇒ 两个嵌入空间不同 ⇒ 生成器 G 的输出**离分布** ⇒ **防御静默失效**（不报错，只是指标全错）。现在把选择写进 checkpoint，推理照着做 | stage2/models.py + stage2/train.py + infer.py（2026-11-21） |
