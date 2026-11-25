@@ -1281,6 +1281,15 @@ embedding = speaker_encoder(mel40)     # ★ fine_tune=True，E_spk **正在被�
 | 0.5 | 26.57° | 0.5560 | 0.5106 | 0.046 | **0.6286** | **0.01125** | 0.06052 |
 | 1.0 | 45.00° | 0.4983 | 0.4724 | 0.026 | **0.5573** | **0.01448** | 0.06295 |
 
+> **★ 跨发对比的前提（2026-11-25 事后发现的坑，先说清再读表）**：
+> 上表的"随机 δ"与 §4g.7 那张表**不在同一条起点上**（α=0.1 的随机 δ 两发分别是
+> 0.5794 与 0.5348，差 **0.045**）。根因是 `stage2/dataset.py::_crop()` 用
+> **Python 的 `random.randint`** 选裁剪起点，而这三个诊断脚本原来只调
+> `torch.manual_seed()` ⇒ 每次启动实际读到的音频片段不同。
+> **同一次运行内部**各 α 共用同一个 batch，所以**列与列之间可比**；
+> **不同运行之间**的单点数字要按 **±0.05** 的抖动读，别把 0.53 与 0.58 的差异当成结论。
+> 已修：三个 `stage2/diagnose_*.py` 改用 `stage2.common.set_seed()`（连 `random`/`np.random` 一起固定）。
+>
 > **诚实的读法（这一版还不能定论）**：
 > ⓪ **口径**：表中 `Sim_clone` 与 `Sim_prot` 都是**上游 GE2E 口径**（脚本里键名
 > `sim_prot_upstream` / JSON 里同样），**不是** §4g.5 那种塌缩口径 —— 所以 α=0 行
@@ -1322,6 +1331,7 @@ embedding = speaker_encoder(mel40)     # ★ fine_tune=True，E_spk **正在被�
 | **Windows 控制台 GBK** | 脚本打印中文或 `‖δ‖` 这类字符 → `UnicodeEncodeError`。加 `sys.stdout.reconfigure(encoding="utf-8", errors="replace")`；另外 Git Bash 里 `powershell` 命令串中的 `$_` 会被双引号展开，要么单引号要么换个写法 | .tmpB/*、evaluate.py |
 | **上游 GE2E 的分段前向是 4 倍开销** | `TorchSpeakerEncoder` 照抄上游 `embed_utterance`：160 帧一段、50% 重叠，外面再套 Python 逐条循环 ⇒ 一条 3.8 s 语音变成 ~4 个序列。`--de-space upstream` 每步多 2 趟这种前向 ⇒ 本机整句 batch 8 的步长从 ~33 s 涨到**分钟级**。预检的解法是裁短（`--max-seconds 2 --batch-size 4`）而不是砍步数；云机（T4）上不必裁 | stage2/models.py、runbook §4.1.1 |
 | **自由 δ 实验会把 α 的预算偷偷放大** | `perturb_embedding` = `normalize(h + α·δ)`，**δ 没归一化** ⇒ 优化器只要把 `‖δ‖` 从 1 涨到 3.4，实际偏移就从 5.73° 变成 ~19°，"目标可达"的结论就失去可比性。等预算对照必须强制 `‖δ‖ = 1`（`stage2/diagnose_delta_oracle.py --delta-mode unit`） | stage2/diagnose_delta_oracle.py（2026-11-25） |
+| **诊断脚本只固定 torch 种子 ≠ 实验可复现** | `stage2/dataset.py::_crop()` 的裁剪起点用 **Python 的 `random`**，只写 `torch.manual_seed()` 时每次启动读到的音频片段不同 ⇒ 同一 α 的"随机 δ"两发差 **0.045**，很容易被误读成"α 有效/无效"。凡是要跨发比数字的脚本，统一调 `stage2.common.set_seed()`（`random` + `np.random` + `torch` 三个一起） | stage2/diagnose_{gradient,delta_oracle,alpha_sweep}.py（2026-11-25 修） |
 | **冒烟训练覆盖正式权重** | `--smoke` 结束时把 `stage1_model.pt` 覆盖了 ⇒ 13.5 小时成果全丢。已加固：未跑满不覆盖 + 另存 `stage1_best.pt` | experiments.md §4e.5 |
 | **训练与推理的 E_spk 必须一致** | 论文说 E_spk 在 Stage 1 里被微调过。训练用**上游** GE2E、推理用**微调后**的那个 ⇒ 两个嵌入空间不同 ⇒ 生成器 G 的输出**离分布** ⇒ **防御静默失效**（不报错，只是指标全错）。现在把选择写进 checkpoint，推理照着做 | stage2/models.py + stage2/train.py + infer.py（2026-11-21） |
 | **局部变量别叫 `config`** | 在 `infer.py` 里写 `config = {...}` 会把模块级的 `import config` 遮掉 ⇒ 右边 `config.SPEAKER_DIM` 变成"引用未赋值的局部变量" ⇒ `UnboundLocalError`。而且它**被 try/except 吞掉了**，只打印一句"加载失败" | infer.py::_infer_generator_config（2026-11-21） |

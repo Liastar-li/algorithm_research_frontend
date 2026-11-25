@@ -23,7 +23,7 @@ if hasattr(sys.stdout, "reconfigure"):
 import torch
 
 import config
-from stage2.common import cosine_similarity, perturb_embedding
+from stage2.common import cosine_similarity, perturb_embedding, set_seed
 from stage2.dataset import build_dataloader
 from stage2.models import Stage1SpeakerEncoder, TorchAutoVCStage1, TorchSpeakerEncoder, freeze
 from stage2.pipeline import HiFiGANVocoder, Stage2Pipeline
@@ -42,7 +42,9 @@ def main():
                         help="扫描结果 JSON（目录不存在会自动建；results/ 已在 .gitignore 里）")
     args = parser.parse_args()
 
-    torch.manual_seed(config.SEED)
+    # set_seed 而不是 torch.manual_seed：dataset 的随机裁剪用的是 Python 的 random，
+    # 只固定 torch 会让每次启动拿到不同的音频片段，整表数字跟着漂 ~0.05（2026-11-25 实测）。
+    set_seed(config.SEED)
     speaker = Stage1SpeakerEncoder(CKPT, device="cpu")
     stage1 = TorchAutoVCStage1(checkpoint=CKPT, device="cpu")
     vocoder = HiFiGANVocoder(device="cpu")

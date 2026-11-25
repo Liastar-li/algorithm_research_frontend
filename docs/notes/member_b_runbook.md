@@ -466,6 +466,14 @@ D:/conda/envs/vpp/python.exe -u algorithms/voiceprint_protection/stage2/diagnose
 > 也就是**自由 δ 是靠在可听度边缘做牺牲才换来 0.1 的下降** ——
 > 这正是 λ_per=15 在训练里禁止做的事。摘掉 λ_per 后 G 只降 10% 且回弹，
 > 和这个观察一致：**约束与目标在打架，而约束是论文的前提**。
+>
+> ⚠️ **复现这几张表之前先看这条**（2026-11-25 事后发现的坑）：
+> `stage2/dataset.py::_crop()` 的裁剪起点用的是 **Python 的 `random`**，
+> 而这三个 `diagnose_*.py` 原来只 `torch.manual_seed()` ⇒ **每次启动读到的音频片段不同**，
+> 同一个 α 的"随机 δ"两发实测差 **0.045**（0.5794 vs 0.5348）。
+> 同一次运行内部各 α 共用同一个 batch，**列之间可比**；
+> **跨运行的单点数字要按 ±0.05 抖动读**。现已改调 `stage2.common.set_seed()`，
+> 用当前代码重跑即可逐位复现。
 
 **因此 B 的替代交付路径（都不花钱）**：
 ① §5.1 三条基线（钉 `--espk-space upstream`）；

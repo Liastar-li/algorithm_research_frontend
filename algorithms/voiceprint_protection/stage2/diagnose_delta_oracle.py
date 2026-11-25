@@ -25,7 +25,7 @@ if hasattr(sys.stdout, "reconfigure"):
 import torch
 
 import config
-from stage2.common import cosine_similarity, perturb_embedding
+from stage2.common import cosine_similarity, perturb_embedding, set_seed
 from stage2.dataset import build_dataloader
 from stage2.models import Stage1SpeakerEncoder, TorchAutoVCStage1, TorchSpeakerEncoder, freeze
 from stage2.pipeline import HiFiGANVocoder, Stage2Pipeline
@@ -46,7 +46,7 @@ def main():
                              "unit=每条强制 ‖δ‖=1，与 G 随机初始化时的工作点完全同预算")
     args = parser.parse_args()
 
-    torch.manual_seed(config.SEED)
+    set_seed(config.SEED)  # 连 Python 的 random 一起固定，数据集裁剪才可复现
     speaker = Stage1SpeakerEncoder(CKPT, device="cpu")
     freeze(speaker)
     stage1 = TorchAutoVCStage1(checkpoint=CKPT, device="cpu")

@@ -18,6 +18,7 @@ if hasattr(sys.stdout, "reconfigure"):
 import torch
 
 import config
+from stage2.common import set_seed
 from stage2.dataset import build_dataloader
 from stage2.discriminator import MelDiscriminator
 from stage2.generator import PerturbationGenerator
@@ -45,7 +46,7 @@ def main():
     de_space = sys.argv[1] if len(sys.argv) > 1 else "upstream"
     ckpt = sys.argv[2] if len(sys.argv) > 2 else CKPT
     device = torch.device("cpu")
-    torch.manual_seed(config.SEED)
+    set_seed(config.SEED)  # 含 Python 的 random，否则数据集随机裁剪每次不同
 
     args = SimpleNamespace(alpha=0.10, lambda_de=5.0, lambda_per=0.0, lambda_mask=0.0,
                            lambda_gan=0.0, no_mel_loss=True, de_space=de_space,
