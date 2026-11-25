@@ -191,7 +191,7 @@ class Protector:
             #   而不是上游那个原始的 —— 契约 §7.5
             encoder = TrainableSpeakerEncoder(device=device, fine_tune=False)
             if "speaker_encoder" in state:
-                encoder.model.load_state_dict(state["speaker_encoder"])
+                encoder.load_checkpoint_state(state["speaker_encoder"])
             encoder.model.eval().to(device)
 
             from bridge_vocoder import VocoderBridge

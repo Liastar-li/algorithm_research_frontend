@@ -278,7 +278,7 @@ class Stage1SpeakerEncoder(nn.Module):
 
     def __init__(self, checkpoint: str | Path, device: str | None = None):
         super().__init__()
-        from stage1.speaker_encoder import TrainableSpeakerEncoder
+        from stage1.speaker_encoder import GE2EMel, TrainableSpeakerEncoder
 
         self.device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
         path = Path(checkpoint)
@@ -295,8 +295,9 @@ class Stage1SpeakerEncoder(nn.Module):
             )
 
         self.encoder = TrainableSpeakerEncoder(device=str(self.device), fine_tune=False)
-        self.encoder.model.load_state_dict(state["speaker_encoder"])
+        self.encoder.load_checkpoint_state(state["speaker_encoder"])
         self.encoder.model.eval().to(self.device)
+        self.mel = GE2EMel().to(self.device)
         for parameter in self.encoder.parameters():
             parameter.requires_grad_(False)
         self.checkpoint_path = path
@@ -304,8 +305,6 @@ class Stage1SpeakerEncoder(nn.Module):
     def forward(self, waveform: torch.Tensor,
                 lengths: torch.Tensor | None = None) -> torch.Tensor:
         """波形 (B, N) -> 嵌入 (B, 256)（已 L2 归一化）。"""
-        import audio_utils
-
         if waveform.dim() != 2:
             raise ValueError(f"期望 (B, N) 的波形，收到 {tuple(waveform.shape)}")
         batch = waveform.shape[0]
@@ -315,9 +314,16 @@ class Stage1SpeakerEncoder(nn.Module):
 
         rows = []
         for index in range(batch):
-            wav = waveform[index, : int(lengths[index])].detach().cpu().numpy()
-            mel = audio_utils.ge2e_mel(wav)
-            rows.append(self.encoder(torch.from_numpy(mel).unsqueeze(0).to(self.device))[0])
+            wav = waveform[index:index + 1, :int(lengths[index])].to(
+                device=self.device, dtype=torch.float32)
+            mel = self.mel(wav)
+            # cuDNN's eval-mode LSTM cannot backpropagate to its input.
+            if self.device.type == "cuda" and mel.requires_grad:
+                with torch.backends.cudnn.flags(enabled=False):
+                    embedding = self.encoder(mel)
+            else:
+                embedding = self.encoder(mel)
+            rows.append(embedding[0])
         return torch.stack(rows, dim=0)
 
 
@@ -521,7 +527,11 @@ class TorchAutoVCStage1(nn.Module):
             (code_expanded, embedding.unsqueeze(1).expand(-1, mel.size(1), -1)),
             dim=-1)                                     # (B, T, 64+256)
 
-        mel_outputs = self.model.decoder(decoder_input)                 # (B, T, 80)
+        if self.device.type == "cuda" and decoder_input.requires_grad:
+            with torch.backends.cudnn.flags(enabled=False):
+                mel_outputs = self.model.decoder(decoder_input)
+        else:
+            mel_outputs = self.model.decoder(decoder_input)             # (B, T, 80)
         mel_postnet = self.model.postnet(mel_outputs.transpose(2, 1))   # (B, 80, T)
         mel_postnet = mel_outputs + mel_postnet.transpose(2, 1)         # (B, T, 80)
         if mel_postnet.shape[1] != target_frames:

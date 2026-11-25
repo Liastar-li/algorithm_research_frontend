@@ -38,6 +38,28 @@ import torch.nn as nn
 import paths
 
 
+class GE2EMel(nn.Module):
+    """Differentiable equivalent of audio_utils.ge2e_mel for waveform batches."""
+
+    def __init__(self):
+        super().__init__()
+        from librosa.filters import mel
+        from audio_utils import GE2E_MEL
+
+        self.n_fft = GE2E_MEL["n_fft"]
+        self.hop_length = GE2E_MEL["hop_length"]
+        self.power = GE2E_MEL["power"]
+        basis = mel(sr=GE2E_MEL["sample_rate"], n_fft=self.n_fft,
+                    n_mels=GE2E_MEL["n_mels"], fmin=GE2E_MEL["fmin"], fmax=GE2E_MEL["fmax"])
+        self.register_buffer("basis", torch.from_numpy(basis), persistent=False)
+        self.register_buffer("window", torch.hann_window(self.n_fft), persistent=False)
+
+    def forward(self, waveform: torch.Tensor) -> torch.Tensor:
+        spectrum = torch.stft(waveform, self.n_fft, self.hop_length, window=self.window,
+                              pad_mode="constant", return_complex=True)
+        return (self.basis @ spectrum.abs().pow(self.power)).transpose(1, 2)
+
+
 class TrainableSpeakerEncoder(nn.Module):
     """可微的 GE2E 说话人编码器（Stage 1 训练用）。
 
@@ -96,6 +118,17 @@ class TrainableSpeakerEncoder(nn.Module):
             cleaned[key[7:] if key.startswith("module.") else key] = value
 
         self.model.load_state_dict(cleaned, strict=False)
+
+    def load_checkpoint_state(self, state: dict) -> None:
+        """Load Stage 1 weights across devices with strict forward-key checks."""
+        # Upstream registers these loss-only tensors differently on CPU and CUDA.
+        loss_keys = {"similarity_weight", "similarity_bias"}
+        target = self.model.state_dict()
+        merged = {key: value for key, value in state.items()
+                  if key in target or key not in loss_keys}
+        for key in loss_keys & target.keys():
+            merged.setdefault(key, target[key])
+        self.model.load_state_dict(merged)
 
     def forward(self, ge2e_mel: torch.Tensor) -> torch.Tensor:
         """

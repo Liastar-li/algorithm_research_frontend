@@ -199,7 +199,9 @@ def stage1_loss(mel: torch.Tensor,
                 codes_postnet: list[torch.Tensor],
                 classifier: SpeakerClassifier,
                 lambda_cd: float | None = None,
-                lambda_dis: float | None = None):
+                lambda_dis: float | None = None,
+                *,
+                return_metrics: bool = True):
     """L_S1 = L_rec + λ_cd·L_cd + λ_dis·L_dis    （论文式 6）
 
     返回 (total, dict of 各分项)，便于记录训练曲线。
@@ -212,6 +214,8 @@ def stage1_loss(mel: torch.Tensor,
     loss_dis = disentanglement_loss(codes, classifier)
 
     total = loss_rec + lambda_cd * loss_cd + lambda_dis * loss_dis
+    if not return_metrics:
+        return total, {}
     return total, {
         "loss_rec": float(loss_rec.detach()),
         "loss_cd": float(loss_cd.detach()),

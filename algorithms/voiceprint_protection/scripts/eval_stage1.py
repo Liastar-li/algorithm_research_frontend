@@ -129,7 +129,7 @@ def main() -> int:
     #      但**任何比较都必须在同一个空间里做**。
     speaker_encoder = TrainableSpeakerEncoder(device=str(device), fine_tune=False)
     if "speaker_encoder" in saved:
-        speaker_encoder.model.load_state_dict(saved["speaker_encoder"])
+        speaker_encoder.load_checkpoint_state(saved["speaker_encoder"])
         print("  [OK] 已装上 checkpoint 里的微调 GE2E（Sim_prot 用它，与训练时同一个）")
     else:
         print("  [警告] checkpoint 里没有 speaker_encoder —— Sim_prot 会偏低（不是模型的锅）")
@@ -171,6 +171,7 @@ def main() -> int:
     similarity_sum = 0.0
     rec_loss_sum = 0.0
     speaker_correct = 0
+    speaker_classified = 0
     content_correct = 0
     classified = 0
     records: list[dict] = []
@@ -179,22 +180,19 @@ def main() -> int:
         for batch in loader:
             if total >= args.num:
                 break
+            batch = {key: values[:args.num - total] for key, values in batch.items()}
             mel80 = batch["mel80"].to(device)
             mel40 = batch["mel40"].to(device)
 
             embedding = speaker_encoder(mel40)                      # (B, 256)
             mel_out, mel_postnet, codes = model(mel80, embedding, embedding)
 
-            rec_loss = float(torch.nn.functional.mse_loss(mel_postnet, mel80))
-            # ★ rec_loss 是**batch 均值**，累加时要乘 batch size ——
-            #   否则最后除以样本数，得到的数会小 batch_size 倍（看起来"重建很好"，其实没有）。
-            rec_loss_sum += rec_loss * mel80.shape[0]
+            rec_errors = (mel_postnet - mel80).square().mean(dim=(1, 2))
+            rec_loss_sum += float(rec_errors.sum())
 
             # 重建波形 -> 说话人嵌入
             if vocoder is not None:
                 for index in range(mel_postnet.shape[0]):
-                    if total >= args.num:
-                        break
                     mel_numpy = mel_postnet[index].detach().cpu().numpy()
                     rebuilt = vocoder.mel_to_wav(mel_numpy)
                     original = batch["wav"][index].numpy()
@@ -213,17 +211,18 @@ def main() -> int:
                     # W_s 从重建音里猜说话人 —— 猜得越准，说明音色保真越好
                     # ★ 用**预训练** E_spk 算嵌入：W_s 就是在它的空间里训出来的
                     #   （第 1 步 fine_tune=False）。用微调后的 E_spk 会空间错配 ⇒ 必然 0%。
-                    if classifier is not None:
+                    truth = int(batch["speaker_id"][index])
+                    if classifier is not None and truth >= 0:
                         logits = classifier(pretrained_embedding)
                         predicted = int(logits.argmax(-1))
-                        truth = int(batch["speaker_id"][index])
                         speaker_correct += int(predicted == truth)
+                        speaker_classified += 1
 
                     records.append({
                         "path": batch["path"][index],
                         "speaker": batch["speaker"][index],
                         "sim_prot": similarity,
-                        "l_rec": rec_loss,
+                        "l_rec": float(rec_errors[index]),
                         "rms_original": float(audio_utils.rms_energy(original)),
                         "rms_rebuilt": float(audio_utils.rms_energy(rebuilt)),
                     })
@@ -238,6 +237,8 @@ def main() -> int:
                                                rebuilt, 16000)
 
                     total += 1
+            else:
+                total += mel80.shape[0]
 
             # W_s 从**内容码**里猜说话人 —— 猜得越准，说明解耦越失败
             if classifier is not None:
@@ -246,8 +247,9 @@ def main() -> int:
                 logits = classifier(aggregated)
                 predicted = logits.argmax(-1)
                 truth = batch["speaker_id"].to(device).repeat(len(windows))
-                content_correct += int((predicted == truth).sum())
-                classified += truth.numel()
+                known = truth >= 0
+                content_correct += int(((predicted == truth) & known).sum())
+                classified += int(known.sum())
 
     # -- 汇总 --------------------------------------------------------------
     print("\n" + "-" * 70)
@@ -255,29 +257,28 @@ def main() -> int:
         print("  没有评测到任何样本（数据清单为空？）")
         return 1
 
-    mean_similarity = similarity_sum / total
+    mean_similarity = similarity_sum / total if vocoder is not None else None
     print(f"  样本数           : {total}")
     print(f"  平均 L_rec       : {rec_loss_sum / total:.5f}")
-    print(f"  平均 Sim_prot    : {mean_similarity:.4f}   "
-          f"（论文 0.95，M3 要求 > 0.9）")
-    print(f"  ★ M3 验收        : {'通过' if mean_similarity > 0.9 else '未通过'}"
-          f"（Sim_prot > 0.9）")
+    if mean_similarity is not None:
+        print(f"  平均 Sim_prot    : {mean_similarity:.4f}"
+              "（需结合异人基线及试听判定）")
     if classified:
         print(f"  内容码泄露率     : {content_correct / classified:.4f}   "
               f"（W_s 从内容码猜说话人的准确率，**越低越好** = 解耦成功）")
-    if classifier is not None:
-        print(f"  重建音说话人准确率: {speaker_correct / total:.4f}   "
+    if speaker_classified:
+        print(f"  重建音说话人准确率: {speaker_correct / speaker_classified:.4f}   "
               f"（越高说明音色保真越好）")
 
-    print("\n  前 5 条明细：")
+    if records:
+        print("\n  前 5 条明细：")
     for record in records[:5]:
         print(f"    {record['speaker']:<6} Sim_prot={record['sim_prot']:.4f}  "
               f"L_rec={record['l_rec']:.4f}  "
               f"RMS 原 {record['rms_original']:.4f} -> 重建 {record['rms_rebuilt']:.4f}")
 
-    print("\n  ★ 一定要**试听**一遍 results/stage1_eval/ 里的 *_original.wav 与 "
-          "*_rebuilt.wav：")
-    print("    指标好看不代表听起来正常（Postnet 权重没训好时 mel 看着正常、声音是糊的）。")
+    if records and args.save_audio:
+        print("\n  请试听 results/stage1_eval/ 中同一条音频的原音与重建音。")
 
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     report = {
@@ -287,7 +288,7 @@ def main() -> int:
         "mean_l_rec": rec_loss_sum / total,
         "mean_sim_prot": mean_similarity,
         "content_leak_accuracy": (content_correct / classified) if classified else None,
-        "rebuilt_speaker_accuracy": (speaker_correct / total) if classifier is not None else None,
+        "rebuilt_speaker_accuracy": (speaker_correct / speaker_classified) if speaker_classified else None,
         "records": records,
     }
     report_path = RESULTS_DIR / f"stage1_eval_{args.split}.json"

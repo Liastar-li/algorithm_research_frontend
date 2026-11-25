@@ -126,16 +126,17 @@ def make_writer(log_dir: Path):
 class Progress:
     """极简进度打印：平均每 step 多少秒 + 预计还剩多久。"""
 
-    def __init__(self, total: int, enabled: bool = True):
+    def __init__(self, total: int, enabled: bool = True, start_step: int = 0):
         self.total = total
         self.enabled = enabled
+        self.start_step = start_step
         self.start = time.time()
 
     def update(self, step: int) -> str:
         if not self.enabled:
             return ""
         elapsed = time.time() - self.start
-        speed = step / max(elapsed, 1e-6)
+        speed = (step - self.start_step) / max(elapsed, 1e-6)
         remaining = (self.total - step) / max(speed, 1e-9)
         return (f"  step {step:>7}/{self.total}  "
                 f"{speed:.2f} it/s  已用 {elapsed / 60:.1f} 分  预计还需 {remaining / 60:.1f} 分")
@@ -263,7 +264,9 @@ def _save_model_checkpoint(model, speaker_encoder, optimizer, scaler, step: int,
     if with_optimizer:
         payload["optimizer"] = optimizer.state_dict()
         payload["scaler"] = scaler.state_dict()
-    torch.save(payload, path)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    torch.save(payload, temporary)
+    temporary.replace(path)
 
 
 @torch.no_grad()
@@ -320,7 +323,7 @@ def train_model(args) -> int:
     print(f"  模型侧 mel 约定 = {config.STAGE1.get('mel_preset', config.DEFAULT_PRESET)}")
 
     # -- 分类器（第 1 步的产物）------------------------------------------
-    classifier_path = WEIGHTS_DIR / "stage1_speaker_classifier.pt"
+    classifier_path = args.classifier_checkpoint or (WEIGHTS_DIR / "stage1_speaker_classifier.pt")
     classifier = stage1_losses.SpeakerClassifier(
         num_speakers=config.STAGE1["num_speakers"],
         embedding_dim=config.SPEAKER_DIM,
@@ -339,12 +342,19 @@ def train_model(args) -> int:
     val_loader = None
     try:
         val_loader = build_dataloader("val", batch_size=args.batch_size,
-                                      num_workers=0, shuffle=False)
+                                      num_workers=0, shuffle=False, deterministic=True)
     except Exception as error:  # noqa: BLE001
         print(f"  [警告] 验证集不可用（{error}），跳过验证。")
 
     parameters = list(model.parameters()) + list(speaker_encoder.parameters())
-    optimizer = torch.optim.AdamW(parameters, lr=config.STAGE1["lr"])
+    base_lr = args.lr if args.lr is not None else config.STAGE1["lr"]
+    optimizer_parameters = parameters
+    if args.speaker_lr is not None:
+        optimizer_parameters = [
+            {"params": list(model.parameters())},
+            {"params": list(speaker_encoder.parameters()), "lr": args.speaker_lr},
+        ]
+    optimizer = torch.optim.AdamW(optimizer_parameters, lr=base_lr)
     scaler = make_scaler(use_amp)
 
     # -- 断点续训 ---------------------------------------------------------
@@ -353,6 +363,12 @@ def train_model(args) -> int:
     # 验证集最优（2026-11-19 加）：最优不一定在最后一步，要单独留一份
     best_total = float("inf")
     best_step = 0
+    if args.init_checkpoint:
+        initial = torch.load(args.init_checkpoint, map_location="cpu", weights_only=True)
+        model.load_state_dict(remap_to_official_keys(initial["model"]))
+        speaker_encoder.load_checkpoint_state(initial["speaker_encoder"])
+        print(f"  Warm start: {args.init_checkpoint}, source step {initial.get('step')}")
+        del initial
     if args.resume:
         checkpoint = _find_latest_checkpoint()
         if checkpoint is None:
@@ -360,17 +376,44 @@ def train_model(args) -> int:
         else:
             saved = torch.load(checkpoint, map_location="cpu", weights_only=False)
             model.load_state_dict(remap_to_official_keys(saved["model"]))
-            speaker_encoder.model.load_state_dict(saved["speaker_encoder"])
+            speaker_encoder.load_checkpoint_state(saved["speaker_encoder"])
             if "optimizer" in saved:
                 optimizer.load_state_dict(saved["optimizer"])
+                if args.override_resume_lr:
+                    optimizer.param_groups[0]["lr"] = base_lr
+                    if args.speaker_lr is not None:
+                        optimizer.param_groups[1]["lr"] = args.speaker_lr
             if "scaler" in saved and saved["scaler"]:
                 scaler.load_state_dict(saved["scaler"])
             start_step = int(saved.get("step", 0))
             history = list(saved.get("history", []))
+            best_path = WEIGHTS_DIR / "stage1_best.pt"
+            if best_path.exists():
+                previous_best = torch.load(best_path, map_location="cpu", weights_only=True)
+                best_checkpoint_step = previous_best.get("step")
+                # A periodic checkpoint is written before validation. The best
+                # snapshot may contain that step's completed validation.
+                if (best_checkpoint_step is not None and best_checkpoint_step <= start_step
+                        and previous_best.get("config") == saved.get("config")
+                        and not any(entry.get("val") and entry["step"] == best_checkpoint_step
+                                    for entry in history)):
+                    history.extend(entry for entry in previous_best.get("history", [])
+                                   if entry.get("val") and entry["step"] == best_checkpoint_step)
+                del previous_best
+            validation = [entry for entry in history if entry.get("val")]
+            if validation:
+                best = min(validation, key=lambda entry: entry["total"])
+                best_total, best_step = best["total"], best["step"]
             print(f"  已从 {checkpoint.name} 续训，起始 step = {start_step}")
 
+    print(f"  Learning rates: {[group['lr'] for group in optimizer.param_groups]}")
+    # Give resumed segments a distinct shuffle and crop stream.
+    data_seed = (args.seed + start_step) % (2**32)
+    loader.generator.manual_seed(data_seed)
+    np.random.seed(data_seed)
+
     writer = make_writer(WEIGHTS_DIR / "tb" / "stage1_model")
-    progress = Progress(args.iterations)
+    progress = Progress(args.iterations, start_step=start_step)
 
     step = start_step
     micro_step = 0
@@ -382,6 +425,11 @@ def train_model(args) -> int:
         for batch in loader:
             if step >= args.iterations:
                 break
+            if (args.stop_file and micro_step % args.accum_steps == 0
+                    and args.stop_file.exists()):
+                print(f"  Stop requested by {args.stop_file} at step {step}")
+                stopped_early = True
+                break
             if deadline is not None and time.time() > deadline:
                 print(f"\n  [到达 --max-hours 上限 {args.max_hours}h，停止训练]")
                 stopped_early = True
@@ -390,6 +438,10 @@ def train_model(args) -> int:
             mel80 = batch["mel80"].to(device, non_blocking=True)
             mel40 = batch["mel40"].to(device, non_blocking=True)
 
+            next_step = step + 1
+            collect_metrics = ((micro_step + 1) % args.accum_steps == 0
+                               and (next_step % max(1, args.log_every) == 0
+                                    or next_step == args.iterations))
             with autocast_context(device, use_amp):
                 embedding = speaker_encoder(mel40)                 # (B, 256)
 
@@ -399,7 +451,8 @@ def train_model(args) -> int:
 
                 total, parts = stage1_losses.stage1_loss(
                     mel80, mel_out, mel_postnet, codes, codes_out, codes_postnet, classifier,
-                    lambda_cd=args.lambda_cd, lambda_dis=args.lambda_dis)
+                    lambda_cd=args.lambda_cd, lambda_dis=args.lambda_dis,
+                    return_metrics=collect_metrics)
 
             # 梯度累积：把若干个 micro batch 的损失除以累积步数再回传
             scaler.scale(total / args.accum_steps).backward()
@@ -427,6 +480,10 @@ def train_model(args) -> int:
                     _save_model_checkpoint(model, speaker_encoder, optimizer, scaler,
                                            step, history,
                                            WEIGHTS_DIR / "stage1_last_ckpt.pt")
+                    if args.keep_step_weights:
+                        _save_model_checkpoint(
+                            model, speaker_encoder, optimizer, scaler, step, history,
+                            WEIGHTS_DIR / f"stage1_step{step}.pt", with_optimizer=False)
                     print(f"    [已保存断点] stage1_last_ckpt.pt（step {step}）")
 
                 if args.val_every and val_loader is not None and step % args.val_every == 0:
@@ -468,6 +525,9 @@ def train_model(args) -> int:
     #   `stage1_model.pt` 覆盖掉了，13.5 小时的训练成果全丢。
     target = WEIGHTS_DIR / "stage1_model.pt"
     if args.smoke or step < args.iterations:
+        if stopped_early:
+            _save_model_checkpoint(model, speaker_encoder, optimizer, scaler, step, history,
+                                   WEIGHTS_DIR / "stage1_last_ckpt.pt")
         backup = WEIGHTS_DIR / f"stage1_partial_step{step}.pt"
         _save_model_checkpoint(model, speaker_encoder, optimizer, scaler, step, history,
                                backup, with_optimizer=False)
@@ -505,6 +565,7 @@ def _find_latest_checkpoint() -> Path | None:
 # 入口
 # ---------------------------------------------------------------------------
 def main() -> int:
+    global WEIGHTS_DIR
     parser = argparse.ArgumentParser(description="Stage 1 训练")
     parser.add_argument("--stage", choices=["classifier", "model"], default="model",
                         help="classifier = 第 1 步（训 W_s）；model = 第 2 步（训解耦网络）")
@@ -531,10 +592,27 @@ def main() -> int:
                         help="最长训练小时数（0 = 不限）。云上建议设 3~4 小时一轮")
     parser.add_argument("--resume", action="store_true",
                         help="从最近的 checkpoint 续训")
+    parser.add_argument("--output-dir", type=Path, help="Write this run to a separate directory")
+    parser.add_argument("--stop-file", type=Path, help="Save a resumable checkpoint and exit when this file appears")
+    parser.add_argument("--init-checkpoint", type=Path, help="Warm start model and GE2E weights only")
+    parser.add_argument("--classifier-checkpoint", type=Path, help="Pretrained frozen speaker classifier")
+    parser.add_argument("--lr", type=float, help="AutoVC learning rate")
+    parser.add_argument("--speaker-lr", type=float, help="Separate GE2E learning rate")
+    parser.add_argument("--override-resume-lr", action="store_true",
+                        help="Set the requested LRs after loading optimizer moments")
+    parser.add_argument("--keep-step-weights", action="store_true", help="Keep each periodic model snapshot")
     parser.add_argument("--no-amp", dest="amp", action="store_false",
                         help="关闭混合精度")
     parser.add_argument("--smoke", action="store_true", help="只跑几步，验证流程")
     args = parser.parse_args()
+    if args.resume and args.init_checkpoint:
+        parser.error("--resume and --init-checkpoint are mutually exclusive")
+    if args.override_resume_lr and (not args.resume or args.lr is None):
+        parser.error("--override-resume-lr requires --resume and --lr")
+    if any(value is not None and value <= 0 for value in (args.lr, args.speaker_lr)):
+        parser.error("Learning rates must be positive")
+    if args.output_dir:
+        WEIGHTS_DIR = args.output_dir
 
     if args.iterations is None:
         args.iterations = 2000 if args.stage == "classifier" else config.STAGE1["iterations"]
