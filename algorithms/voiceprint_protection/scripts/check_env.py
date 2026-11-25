@@ -18,6 +18,9 @@ import platform
 import subprocess
 import sys
 
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
 
 def line(char="-", width=64):
     print(char * width)

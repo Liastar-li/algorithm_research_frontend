@@ -44,3 +44,7 @@ third_party/*/
 .claude/
 .vscode/
 .idea/
+
+# --- 成员 B 的本机诊断 scratch（日志 / 探针产物 / 过拟合中间权重，43 MB，不是交付物）---
+# 里面用到的三个探针脚本已经固化到 stage2/diagnose_*.py
+.tmpB/

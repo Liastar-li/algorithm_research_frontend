@@ -48,6 +48,9 @@ from pathlib import Path
 MODULE_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(MODULE_DIR))
 
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
 try:
     import numpy as np  # noqa: E402
 
@@ -305,13 +308,42 @@ def evaluate(args) -> dict:
               "δ 会退化成随机方向（用 --generator-checkpoint / --stage2-checkpoint 指定）。")
     print()
 
-    sim_prot_values: list[float] = []
-    sim_clone_values: list[float] = []
-    sim_clone_baseline_values: list[float] = []
     wer_values: list[float] = []
     wer_original_values: list[float] = []
     transcript_miss = 0
     per_speaker: dict[str, list[float]] = {}
+
+    # -- ★ E_spk 打分口径：**同一批波形，两把尺子都量** -----------------------
+    #   为什么要两把：Stage 1 把 GE2E 端到端微调之后，那个空间已经近乎塌缩
+    #   （成员 A 的 `stage1_step250000_wide_test_bn.json`：同一说话人均值 0.945，
+    #   **不同说话人也有 0.896**）⇒ 在它的口径里 DSR(τ≤0.5) 天然做不出来
+    #   （随便换个人还有 0.9），可"与论文同口径"又必须是它。两个都报才说得清。
+    #   ★★ 关键区分：**打分空间 ≠ δ 的生成空间**。δ 永远用路线自己的 E_spk
+    #   （用错 ⇒ δ 离分布 ⇒ 防御静默失效），这里选的只是"用哪把尺子量波形"。
+    #   三条基线（none / random / trained）必须给**同一个** --espk-space，
+    #   否则那张表里的数字没法横向比。
+    route_space = protector.route_encoder_space(args.protect_mode)
+    available = ["upstream"]
+    if protector.stage1_speaker is not None:
+        available.append("stage1_finetuned")
+    headline = route_space if args.espk_space == "auto" else args.espk_space
+    if headline not in available:
+        raise SystemExit(
+            f"没有 {headline} 口径可用（可用：{' / '.join(available)}）—— "
+            "stage1_finetuned 需要 --stage1-checkpoint 指向含 speaker_encoder 段的权重。")
+    secondary = next((s for s in available if s != headline), None) if args.dual_espk else None
+    score_spaces = [s for s in (headline, secondary) if s]
+    by_space = {s: {"sim_prot": [], "sim_clone": [], "sim_clone_no_defense": []}
+                for s in score_spaces}
+    # 顶层键仍是"主口径"的数，好让已有的报告脚本不用改
+    sim_prot_values = by_space[headline]["sim_prot"]
+    sim_clone_values = by_space[headline]["sim_clone"]
+    sim_clone_baseline_values = by_space[headline]["sim_clone_no_defense"]
+
+    print(f"  E_spk 打分口径: {headline}"
+          + (f"（同时报 {secondary}）" if secondary else "（--no-dual-espk：只报主口径）"))
+    print(f"  δ 的生成口径  : {route_space}（由保护链决定，不是打分口径）")
+    print()
 
     started = time.time()
     for index, (path, speaker) in enumerate(items):
@@ -362,25 +394,22 @@ def evaluate(args) -> dict:
         cloned = result["clone_protected_waveform"]
         baseline = result["clone_baseline_waveform"]
 
-        # Sim_prot：保护后语音 vs 原始语音（stolen 就是 E_spk(protected)）
-        sim_prot = cosine(stolen, embedding)
-
-        # ★ 下面两个也用**这条路线自己的** E_spk 算 ——
-        #   否则会出现"用 A 的编码器训、用 B 的编码器测"的错配，
-        #   指标不可比（而且不会报错）。
-        def embed_of(some_waveform: np.ndarray) -> np.ndarray:
-            return protector.embed_for_route(some_waveform, args.protect_mode)
-
-        # Sim_clone（论文口径）：攻击者克隆出来的**声音** vs 原始说话人
-        sim_clone = cosine(embed_of(cloned), embedding)
-
-        # 未防御时攻击者克隆音 vs 原始说话人（应当很接近 1）
-        sim_clone_baseline = cosine(embed_of(baseline), embedding)
-
-        sim_prot_values.append(sim_prot)
-        sim_clone_values.append(sim_clone)
-        sim_clone_baseline_values.append(sim_clone_baseline)
-        per_speaker.setdefault(speaker, []).append(sim_clone)
+        # ★ 每个打分口径各量一遍：同一批波形，只换 E_spk 这把尺子。
+        #   路线口径上能复用 protect() 已经算好的 embedding / stolen，省两次前向。
+        for space in score_spaces:
+            bucket = by_space[space]
+            if space == route_space:
+                reference, after = embedding, stolen
+            else:
+                reference = protector.embed_in_space(wav, space)
+                after = protector.embed_in_space(protected, space)
+            bucket["sim_prot"].append(cosine(after, reference))
+            bucket["sim_clone"].append(
+                cosine(protector.embed_in_space(cloned, space), reference))
+            # 未防御时攻击者克隆音 vs 原始说话人（应当很接近 1）
+            bucket["sim_clone_no_defense"].append(
+                cosine(protector.embed_in_space(baseline, space), reference))
+        per_speaker.setdefault(speaker, []).append(sim_clone_values[-1])
 
         # -- WER ----------------------------------------------------------
         if scorer is not None:
@@ -424,13 +453,28 @@ def evaluate(args) -> dict:
                 for tau in args.taus},
         "elapsed_seconds": round(time.time() - started, 1),
     }
+    report["espk_space"] = headline
+    report["delta_space"] = route_space
+    # G 训练时 L_de 在哪个空间考核 —— 与打分口径不一致时，这是解释数字的关键背景
+    report["de_space"] = getattr(protector, "stage2_de_space", None)
+    if secondary:
+        sec_values = by_space[secondary]
+        report["secondary_espk"] = {
+            "space": secondary,
+            "sim_prot": summarize(sec_values["sim_prot"], "sim_prot"),
+            "sim_clone": summarize(sec_values["sim_clone"], "sim_clone"),
+            "sim_clone_no_defense": summarize(sec_values["sim_clone_no_defense"],
+                                              "sim_clone_no_defense"),
+            "dsr": {f"tau_{tau}": defense_success_rate(sec_values["sim_clone"], tau)
+                    for tau in args.taus},
+        }
     if wer_values:
         report["wer"] = summarize(wer_values, "wer")
     if wer_original_values:
         report["wer_original"] = summarize(wer_original_values, "wer_original")
 
     print("\n" + "=" * 68)
-    print(f"  结果（mode={args.mode}）")
+    print(f"  结果（mode={args.mode}  E_spk 打分口径={headline}）")
     print("=" * 68)
     print(f"  Sim_prot            {report['sim_prot']['sim_prot_mean']:.4f}"
           f"  （论文 0.95，越高越好）")
@@ -441,6 +485,18 @@ def evaluate(args) -> dict:
     for tau in args.taus:
         print(f"  DSR(τ={tau})          {report['dsr'][f'tau_{tau}'] * 100:.1f}%"
               f"  （论文 79.8 / 83.5 / 87.2）")
+    if secondary:
+        sec = report["secondary_espk"]
+        print(f"\n  —— 同一批波形，换 E_spk = {secondary} 再量一遍 ——")
+        print(f"  Sim_prot            {sec['sim_prot']['sim_prot_mean']:.4f}")
+        print(f"  Sim_clone           {sec['sim_clone']['sim_clone_mean']:.4f}")
+        print(f"  Sim_clone(未防御克隆) {sec['sim_clone_no_defense']['sim_clone_no_defense_mean']:.4f}")
+        for tau in args.taus:
+            print(f"  DSR(τ={tau})          {sec['dsr'][f'tau_{tau}'] * 100:.1f}%")
+        print(f"  ★ 两套口径都报了：主 {headline} / 次 {secondary}。"
+              "\n    stage1_finetuned 那套已被 Stage 1 的端到端微调压塌"
+              "（不同说话人的余弦也≈0.9）⇒ DSR 在那个空间天然做不出来。"
+              "\n    三条基线务必给同一个 --espk-space，否则表里的数没法横向比。")
     if wer_values:
         print(f"  WER(保护后)         {report['wer']['wer_mean'] * 100:.2f}%"
               f"  （论文 5.30%）")
@@ -501,6 +557,15 @@ def main() -> int:
                         help="Whisper 模型名（默认 config.EVAL['whisper_model']，即 large-v3）。CPU 上想省时间可换 small/medium，但要写明偏离了论文设定")
     parser.add_argument("--transcript-dir", default=None,
                         help="VCTK 转写文本目录（有它才能算绝对 WER）")
+    parser.add_argument("--espk-space", choices=("auto", "upstream", "stage1_finetuned"),
+                        default="auto",
+                        help="★ 用哪把尺子打分（不影响 δ 的生成空间）。"
+                             "auto = 跟随保护链；三条基线要横向比就必须写同一个值。"
+                             "论文口径 = stage1_finetuned，可解释的 DSR = upstream")
+    parser.add_argument("--dual-espk", action=argparse.BooleanOptionalAction, default=True,
+                        help="★ 同时用**另一个 E_spk 空间**把 Sim_prot / Sim_clone / DSR 再报一遍"
+                             "（Stage 1 微调后的 GE2E 已近乎塌缩，单口径的 DSR 无法解释）。"
+                             "关掉用 --no-dual-espk")
     parser.add_argument("--output", default=None, help="报告 JSON 的输出路径")
     args = parser.parse_args()
 

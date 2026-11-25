@@ -69,6 +69,9 @@ from pathlib import Path
 MODULE_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(MODULE_DIR.parent))
 
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
 try:
     import torch  # noqa: E402
 
@@ -174,12 +177,25 @@ def build_pipeline(args, device) -> Stage2Pipeline:
             "详见 docs/notes/stage2_blockers.md"
         )
 
+    # -- L_de 的度量空间（可与上面的 E_spk 不同）---------------------------
+    de_speaker = None
+    de_space = getattr(args, "de_space", None)
+    if de_space and de_space != args.speaker_encoder:
+        print(f"L_de 改在 **{de_space}** 空间度量（δ 仍在 {args.speaker_encoder} 空间生成）…")
+        if de_space == "stage1":
+            de_speaker = Stage1SpeakerEncoder(args.stage1_checkpoint, device=str(device))
+        else:
+            de_speaker = TorchSpeakerEncoder(device=str(device))
+        freeze(de_speaker)
+        print(f"  {describe(de_speaker)}")
+
     return Stage2Pipeline(
         speaker_encoder=speaker,
         stage1=stage1,
         vocoder=vocoder,
         vocoder_convention=convention,
         device=device,
+        de_speaker=de_speaker,
     )
 
 
@@ -187,7 +203,8 @@ def build_pipeline(args, device) -> Stage2Pipeline:
 # 一步训练
 # ---------------------------------------------------------------------------
 def compute_losses(batch, pipeline: Stage2Pipeline, generator, discriminator,
-                   args, device, autocast_enabled: bool = False) -> dict:
+                   args, device, autocast_enabled: bool = False,
+                   measure_dual: bool = False) -> dict:
     """跑一遍前向，返回各项损失（**未 backward**）。
 
     拆成"算损失"与"更新参数"两步，是为了支持**梯度累积**：
@@ -211,7 +228,8 @@ def compute_losses(batch, pipeline: Stage2Pipeline, generator, discriminator,
                               dtype=torch.float16,
                               enabled=autocast_enabled and device_type == "cuda")
 
-    def _speak_fp32(waveform: torch.Tensor) -> torch.Tensor:
+    def _speak_fp32(waveform: torch.Tensor,
+                    encoder: torch.nn.Module | None = None) -> torch.Tensor:
         """★ E_spk 一律用 **fp32** 算。
 
         为什么单独拎出来：autocast 只覆盖卷积/矩阵乘这类算子，
@@ -219,9 +237,13 @@ def compute_losses(batch, pipeline: Stage2Pipeline, generator, discriminator,
         要是让 fp16 的波形进 GE2E，它的 LSTM 就在 fp16 里跑了，
         嵌入算出来就有可见误差，而 L_de 正是拿嵌入算的。
         所以这里显式关掉 autocast 并把输入转回 fp32。
+
+        `encoder` 不传就是 δ 生成用的那个（self.speaker）；传 `pipeline.de_speaker`
+        就在**攻击者那个空间**里算嵌入。
         """
+        model = encoder if encoder is not None else pipeline.speaker
         with torch.autocast(device_type=device_type, enabled=False):
-            return pipeline.speaker(waveform.float(), lengths)
+            return model(waveform.float(), lengths)
 
     # -- 1. 原始语音的 mel 与说话人嵌入（**不需要梯度**）------------------
     with torch.no_grad():
@@ -275,6 +297,16 @@ def compute_losses(batch, pipeline: Stage2Pipeline, generator, discriminator,
         cloned_waveform = pipeline.vocode(cloned_mel)
     cloned_waveform = cloned_waveform.float()
 
+    # -- 6b. L_de 在**哪个空间**度量 ---------------------------------------
+    #   δ 生成用的空间（pipeline.speaker）与防御考核用的空间（pipeline.de_speaker）
+    #   默认是同一个（= 论文原意）。用 --de-space 拆开时，参照嵌入要在目标空间重算。
+    de_encoder = pipeline.de_speaker
+    if de_encoder is pipeline.speaker:
+        de_reference = original_embedding
+    else:
+        with torch.no_grad():
+            de_reference = _speak_fp32(waveforms, de_encoder)
+
     # -- 7. 算损失 --------------------------------------------------------
     thresholds = pipeline.thresholds(original_waveform)
     perceptual = loss_module.perceptual_loss(
@@ -284,7 +316,7 @@ def compute_losses(batch, pipeline: Stage2Pipeline, generator, discriminator,
         use_mel_loss=not args.no_mel_loss,
     )
     defense = loss_module.defense_loss(
-        _speak_fp32(cloned_waveform), original_embedding
+        _speak_fp32(cloned_waveform, de_encoder), de_reference
     )
     gan = loss_module.generator_gan_loss(discriminator(protected_mel))
 
@@ -292,6 +324,15 @@ def compute_losses(batch, pipeline: Stage2Pipeline, generator, discriminator,
         gan, defense, perceptual,
         lambda_de=args.lambda_de, lambda_per=args.lambda_per, lambda_gan=args.lambda_gan,
     )
+
+    # 拆开两个空间时，另一口径的 Sim_clone 只在"要写日志那一步"算 —— 每次多一整趟
+    # GE2E 前向，本机纯 CPU 下不便宜（--log-every 50 时约多 3% 时间）。
+    sim_clone_de = None
+    if measure_dual and de_encoder is not pipeline.speaker:
+        with torch.no_grad():
+            sim_clone_de = cosine_similarity(
+                _speak_fp32(protected_waveform, de_encoder), de_reference
+            ).mean()
 
     return {
         "total": total,
@@ -305,6 +346,7 @@ def compute_losses(batch, pipeline: Stage2Pipeline, generator, discriminator,
         "original_mel": original_mel.detach(),
         # 指标
         "sim_clone": cosine_similarity(stolen_embedding, original_embedding).mean(),
+        "sim_clone_de_space": sim_clone_de,
     }
 
 
@@ -337,6 +379,12 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument("--speaker-encoder", choices=("stage1", "upstream"), default=None,
                         help="Stage 2 用哪个 E_spk：stage1=随 Stage 1 微调过的那个（论文原意）；"
                              "upstream=上游 GE2E。默认按 checkpoint 内容自动选。")
+    parser.add_argument("--de-space", choices=("stage1", "upstream"), default=None,
+                        help="★ L_de（以及日志里的 sim_clone_de_space）在**哪个空间**度量，"
+                             "默认跟 --speaker-encoder 一致。"
+                             "A 的 250k JSON 显示微调后的 GE2E 已塌缩（不同说话人余弦 0.896），"
+                             "在那个空间里 L_de 几乎没有梯度信号 ⇒ 需要 --de-space upstream："
+                             "δ 仍在 stage1 空间生成，但考核挪到攻击者真正用的上游空间。")
     parser.add_argument("--device", default=None)
 
     # ★★ 2026-11-21 新增（成员 B）：把"能真的跑完 20 万步"缺的东西补齐
@@ -356,12 +404,21 @@ def parse_args(argv=None) -> argparse.Namespace:
                         help="训练时长上限（小时）—— 云机按小时计费，到点自动存盘退出")
     parser.add_argument("--batch-size", type=int, default=None,
                         help="批大小（默认 config.STAGE2['batch_size']）")
+    parser.add_argument("--lr", type=float, default=None,
+                        help="学习率（默认 config.STAGE2['lr']）。"
+                             "过拟合诊断时会临时调大，正式训练保持论文值")
     parser.add_argument("--max-seconds", type=float, default=None,
                         help="每条裁多少秒（默认 config.STAGE2['max_seconds']）")
     parser.add_argument("--num-workers", type=int, default=2,
                         help="DataLoader 的 worker 数（★ 本机内存小，最多 2）")
     parser.add_argument("--no-mel-loss", action="store_true",
                         help="★ 消融（论文 Table 2 的 'w/o L_mel'）：L_per 里只留 L_mask")
+    parser.add_argument("--overfit", type=int, default=None, metavar="N",
+                        help="★ 诊断用：只取前 N 条、不打乱，反复训同几条。"
+                             "用来回答「G 到底能不能把 L_de 压下去」—— "
+                             "正式训练几十步才动一点，样本噪声会把答案盖掉；"
+                             "过拟合测试里如果 L_de 都不降，说明梯度链在这个空间里没用，"
+                             "开云机就是白烧钱。产物不是交付物。")
     return parser.parse_args(argv)
 
 
@@ -397,7 +454,13 @@ def main() -> int:
         print("  [提示] AMP 只在 CUDA 上有效，本机是 CPU —— 自动关掉。")
         args.amp = False
     batch_size = args.batch_size or config.STAGE2["batch_size"]
+    lr = args.lr or config.STAGE2["lr"]
     args.speaker_encoder = resolve_speaker_encoder(args)
+    args.de_space = args.de_space or args.speaker_encoder
+    if args.de_space == "stage1" and args.de_space != args.speaker_encoder \
+            and not args.stage1_checkpoint:
+        raise SystemExit("--de-space stage1 需要 --stage1-checkpoint"
+                         "（要用里面微调过的 GE2E）。")
 
     print("=" * 68)
     print("  Stage 2 训练 · 防御性扰动生成")
@@ -414,6 +477,9 @@ def main() -> int:
     print(f"  梯度裁剪    : {args.clip_grad}")
     print(f"  时长上限    : {args.max_hours or '不限'} 小时")
     print(f"  E_spk       : {args.speaker_encoder}")
+    print(f"  L_de 空间   : {args.de_space}"
+          + ("  ★ 与 δ 生成空间不同（考核挪到攻击者那侧）"
+             if args.de_space != args.speaker_encoder else ""))
     if args.speaker_encoder == "upstream":
         print("  ★ 注意：用的是**上游** GE2E。论文里 E_spk 是随 Stage 1 微调过的，")
         print("    所以推理时也必须用上游那个 —— 不然 G 的输入是离分布的，防御会失效。")
@@ -440,6 +506,7 @@ def main() -> int:
     #   训练与推理就不可能对不上 E_spk 或 G 的结构。
     checkpoint_meta = {
         "speaker_encoder": args.speaker_encoder,
+        "de_space": args.de_space,
         "alpha": args.alpha,
         "stage1_checkpoint": str(args.stage1_checkpoint) if args.stage1_checkpoint else None,
         "train_args": {
@@ -449,7 +516,7 @@ def main() -> int:
             "lambda_gan": args.lambda_gan,
             "batch_size": batch_size,
             "accum_steps": args.accum_steps,
-            "lr": config.STAGE2["lr"],
+            "lr": lr,
         },
     }
     if args.perturb == "train":
@@ -466,16 +533,31 @@ def main() -> int:
         max_seconds=args.max_seconds,
         num_workers=args.num_workers,
     )
-    print(f"\n数据：{describe_dataset(loader.dataset)}\n")
+    if args.overfit:
+        # ★ 诊断：固定前 N 条、不打乱（见 --overfit 的说明）
+        from torch.utils.data import DataLoader, Subset
+        if args.overfit > len(loader.dataset):
+            raise SystemExit(f"--overfit {args.overfit} 比数据集（{len(loader.dataset)} 条）还大")
+        base_dataset = loader.dataset
+        loader = DataLoader(
+            Subset(base_dataset, list(range(args.overfit))),
+            batch_size=args.overfit, shuffle=False, num_workers=0,
+            collate_fn=loader.collate_fn, drop_last=False,
+        )
+        print(f"  ★ 过拟合模式：只用前 {args.overfit} 条、不打乱、worker 归零 "
+              f"—— 指标是给诊断看的，不是交付数")
+        print(f"\n数据：{describe_dataset(base_dataset)}（过拟合只取前 {args.overfit} 条）\n")
+    else:
+        print(f"\n数据：{describe_dataset(loader.dataset)}\n")
 
     # -- 优化器 ------------------------------------------------------------
     optimizer_g = torch.optim.AdamW(
         [p for p in generator.parameters() if p.requires_grad],
-        lr=config.STAGE2["lr"],
+        lr=lr,
     )
     optimizer_d = torch.optim.AdamW(
         [p for p in discriminator.parameters() if p.requires_grad],
-        lr=config.STAGE2["lr"], betas=(0.5, 0.9),
+        lr=lr, betas=(0.5, 0.9),
     )
     scaler = make_scaler(args.amp)
 
@@ -489,10 +571,14 @@ def main() -> int:
 
     # -- 训练循环 ----------------------------------------------------------
     log_path = outdir / "train_log.jsonl"
+    split_spaces = args.de_space != args.speaker_encoder
     started = time.time()
     deadline = started + args.max_hours * 3600 if args.max_hours else None
-    print(f"{'步':>8}  {'total':>9} {'gan':>8} {'de':>8} {'per':>9} "
-          f"{'mel':>9} {'mask':>8} {'sim_clone':>10} {'it/s':>7} {'剩余':>8}")
+    header = (f"{'步':>8}  {'total':>9} {'gan':>8} {'de':>8} {'per':>9} "
+              f"{'mel':>9} {'mask':>8} {'sim_clone':>10}")
+    header += f"{'sim@de':>9} " if split_spaces else " "
+    header += f"{'it/s':>6} {'剩余':>8}"
+    print(header)
     print("-" * 68)
 
     generator.train()
@@ -511,9 +597,15 @@ def main() -> int:
 
             # ---- 前向 + 反向（可累积）----------------------------------
             last = None
-            for _ in range(max(1, args.accum_steps)):
+            # 只有"这一步要写日志"时才多算另一口径的 Sim_clone（多一次 GE2E 前向）
+            measure_dual = split_spaces and (
+                (step + 1) % args.log_every == 0 or (step + 1) == args.steps)
+            accum_total = max(1, args.accum_steps)
+            for accum_index in range(accum_total):
                 last = compute_losses(batch, pipeline, generator, discriminator,
-                                      args, device, autocast_enabled=args.amp)
+                                      args, device, autocast_enabled=args.amp,
+                                      measure_dual=measure_dual
+                                      and accum_index == accum_total - 1)
                 scaled = last["total"] / max(1, args.accum_steps)
                 if args.amp:
                     scaler.scale(scaled).backward()
@@ -568,6 +660,9 @@ def main() -> int:
                 "d": float(discriminator_loss_value.detach()),
                 "sim_clone": float(last["sim_clone"].detach()),
             }
+            if last["sim_clone_de_space"] is not None:
+                # ★ 这才是"攻击者那台机器"眼里的相似度 —— 预检要看的就是它有没有在降
+                metrics["sim_clone_de_space"] = float(last["sim_clone_de_space"])
             step += 1
 
             # -- 日志 --------------------------------------------------------
@@ -575,10 +670,12 @@ def main() -> int:
                 elapsed = time.time() - started
                 speed = step / max(elapsed, 1e-6)
                 remaining = (args.steps - step) / max(speed, 1e-9)
+                alt = (f"{metrics.get('sim_clone_de_space', float('nan')):>9.4f} "
+                       if split_spaces else " " * 10)
                 print(f"{step:>8}  {metrics['total']:>9.4f} {metrics['gan']:>8.4f} "
                       f"{metrics['de']:>8.4f} {metrics['per']:>9.4f} {metrics['mel']:>9.4f} "
-                      f"{metrics['mask']:>8.4f} {metrics['sim_clone']:>10.4f} "
-                      f"{speed:>7.2f} {_fmt_duration(remaining):>8}")
+                      f"{metrics['mask']:>8.4f} {metrics['sim_clone']:>10.4f}"
+                      f"{alt}{speed:>6.2f} {_fmt_duration(remaining):>8}")
                 metrics["step"] = step
                 metrics["elapsed"] = round(elapsed, 1)
                 metrics["it_per_s"] = round(speed, 3)

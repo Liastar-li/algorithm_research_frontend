@@ -41,6 +41,9 @@ MODULE_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(MODULE_DIR.parent))
 sys.path.insert(0, str(MODULE_DIR))
 
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
 try:
     import config  # noqa: E402
 except ImportError as error:  # 依赖缺失（多半是忘了 conda activate vpp）

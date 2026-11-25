@@ -36,6 +36,8 @@
 #   --lambda-mask N    λ_mask（论文 0.1；消融 w/o L_mask 时设 0）
 #   --lambda-gan N     λ_GAN（论文 1.0；设 0 = 只训 L_per + L_de）
 #   --no-mel-loss      消融 w/o L_mel（L_per 里只留 L_mask）
+#   --de-space NAME    ★ L_de 在哪个 E_spk 空间度量：upstream（默认，攻击者那侧）/ stage1（论文原口径）
+#                      δ 始终由 --speaker-encoder 选中的那个编码器生成，只有考核空间会换
 #   --stage1-ckpt PATH Stage 1 权重路径（必须）
 #   --session NAME     tmux 会话名（默认 vpp-stage2）
 #   --skip-data        跳过数据准备（数据已就位时）
@@ -63,6 +65,7 @@ LAMBDA_DE=""
 LAMBDA_PER=""
 LAMBDA_MASK=""
 LAMBDA_GAN=""
+DE_SPACE=""
 NO_MEL_LOSS=0
 STAGE1_CKPT=""
 SKIP_DATA=0
@@ -70,6 +73,10 @@ ACTION=""
 
 export VPP_DATA_ROOT="$DATA_ROOT"
 export HF_ENDPOINT="${HF_ENDPOINT:-https://hf-mirror.com}"
+# ★ Python 的 stdout 重定向到文件时是**块缓冲**（8 KB）—— 训练每 50 步才打一行，
+#   不关掉的话 --status 看到的日志能滞后几十分钟，云机跑了 1 小时还显示"正在加载模型"，
+#   会让人误判卡死然后去 kill 掉一个其实在正常跑的任务。（本机 2026-11-25 真实踩到）
+export PYTHONUNBUFFERED=1
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -89,12 +96,13 @@ while [ $# -gt 0 ]; do
     --lambda-mask) LAMBDA_MASK="$2"; shift ;;
     --lambda-gan) LAMBDA_GAN="$2"; shift ;;
     --no-mel-loss) NO_MEL_LOSS=1 ;;
+    --de-space) DE_SPACE="$2"; shift ;;
     --max-hours) MAX_HOURS="$2"; shift ;;
     --stage1-ckpt) STAGE1_CKPT="$2"; shift ;;
     --session) SESSION="$2"; shift ;;
     --skip-data) SKIP_DATA=1 ;;
     -h|--help)
-      sed -n '2,38p' "${BASH_SOURCE[0]}"
+      sed -n '2,44p' "${BASH_SOURCE[0]}"
       exit 0
       ;;
     *)
@@ -224,6 +232,10 @@ start_training() {
   if [ -n "$LAMBDA_MASK" ]; then train_args+=(--lambda-mask "$LAMBDA_MASK"); fi
   if [ -n "$LAMBDA_GAN" ]; then train_args+=(--lambda-gan "$LAMBDA_GAN"); fi
   if [ "$NO_MEL_LOSS" = "1" ]; then train_args+=(--no-mel-loss); fi
+  # ★ L_de 的度量空间（2026-11-25，B）：A 的 250k JSON 证明微调后的 GE2E 已塌缩
+  #   （不同说话人余弦 0.896），在那个空间里 L_de 没有梯度信号 ⇒ 默认挪到上游空间，
+  #   δ 仍由 stage1 那个 E2E 生成。要做论文原口径的消融就传 --de-space stage1。
+  train_args+=(--de-space "${DE_SPACE:-upstream}")
 
   # ★ 消融实验：不同的 λ / 不同的 outdir —— 别把主实验的权重覆盖了
   if [ -n "$OUTDIR" ]; then

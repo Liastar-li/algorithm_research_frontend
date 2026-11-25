@@ -153,6 +153,7 @@ class Protector:
         self.stage2_generator = None
         self.stage2_checkpoint = None
         self.stage2_speaker_encoder = "upstream"   # E_spk 用哪个，由 checkpoint 自己说
+        self.stage2_de_space = None                # L_de 训练时在哪个空间考核（仅用于报告）
         if with_stage2:
             self.load_stage2(stage2_checkpoint)
 
@@ -252,8 +253,10 @@ class Protector:
             self.stage2_generator = generator
             self.stage2_checkpoint = path
             self.stage2_speaker_encoder = state.get("speaker_encoder", "upstream")
+            self.stage2_de_space = state.get("de_space", self.stage2_speaker_encoder)
             print(f"  Stage 2 生成器 G：{path.name}"
-                  f"（E_spk = {self.stage2_speaker_encoder}）")
+                  f"（E_spk = {self.stage2_speaker_encoder}"
+                  f"，L_de 考核于 {self.stage2_de_space} 空间）")
             return True
         except Exception as error:  # noqa: BLE001
             print(f"  [警告] Stage 2 加载失败（{error}），退回随机扰动。")
@@ -281,6 +284,32 @@ class Protector:
             raise RuntimeError("未加载说话人编码器，无法提取嵌入。")
         return self.speaker.embed(wav, 16000)
 
+    def route_encoder_space(self, route: str = "clone") -> str:
+        """这条路线**实际**用的是哪个 E_spk 空间（"stage1_finetuned" / "upstream"）。
+
+        ★ 双口径评测要靠它算出「另一个空间」是谁 ——
+        同一批音频在两个空间里的余弦尺度完全不同（微调后已塌缩，见
+        `docs/notes/member_b_runbook.md` §1.4），报数时必须写清算的哪一套。
+        """
+        if route == "stage2":
+            return ("stage1_finetuned" if self.stage2_speaker_encoder == "stage1"
+                    else "upstream")
+        if route == "stage1" and self.stage1_speaker is not None:
+            return "stage1_finetuned"
+        return "upstream"
+
+    def embed_in_space(self, wav: np.ndarray, space: str) -> np.ndarray:
+        """波形 -> (256,)，**按指定的 E_spk 空间**算（只做度量，不改生成链路）。"""
+        if space == "stage1_finetuned":
+            if self.stage1_speaker is None:
+                raise RuntimeError(
+                    "要算「Stage 1 微调后 E_spk」口径，但 Stage 1 权重没加载 —— "
+                    "用 --stage1-checkpoint 指定。")
+            return self.stage1_speaker.embed_numpy(wav)
+        if space != "upstream":
+            raise ValueError(f"未知的 E_spk 空间：{space}")
+        return self.embedding(wav)
+
     def embed_for_route(self, wav: np.ndarray, route: str = "clone") -> np.ndarray:
         """按**路线**取说话人嵌入 h。
 
@@ -292,10 +321,10 @@ class Protector:
         所以：**谁要算 δ，就用这条路线自己的嵌入。**
         """
         if route == "stage2":
+            # 走 _embed_for_stage2 —— 它的报错会点名
+            # 「Stage 2 checkpoint 说用微调 E_spk，但 Stage 1 没加载」这种情况。
             return self._embed_for_stage2(wav)
-        if route == "stage1" and self.stage1_speaker is not None:
-            return self.stage1_speaker.embed_numpy(wav)
-        return self.embedding(wav)
+        return self.embed_in_space(wav, self.route_encoder_space(route))
 
     def protect_stage2(self, wav: np.ndarray, alpha: float = config.STAGE2["alpha"],
                        delta: np.ndarray | None = None,
@@ -773,4 +802,8 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    import sys
+
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     raise SystemExit(main())

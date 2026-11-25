@@ -91,8 +91,15 @@ class Stage2Pipeline:
                  device: torch.device | str = "cpu",
                  n_fft: int = 1024,
                  hop_length: int = 256,
-                 sample_rate: int = 16000):
+                 sample_rate: int = 16000,
+                 de_speaker=None):
         self.speaker = speaker_encoder
+        # ★ L_de 的**度量空间**（2026-11-25，B）。默认 None = 跟 self.speaker 同一个。
+        #   为什么允许拆开：δ = G(h) 必须作用在 Stage 1  conditioning 的那个空间，
+        #   但"防御有没有效"要看**攻击者那台机器**用的空间（上游 GE2E）。
+        #   A 的 250k JSON 显示微调后的 E2E 已塌缩（不同人余弦 0.896），
+        #   在塌缩空间里 L_de 几乎没有梯度信号 ⇒ 度量挪到 upstream，δ 仍生成于 stage1 空间。
+        self.de_speaker = de_speaker if de_speaker is not None else speaker_encoder
         self.stage1 = stage1
         self.vocoder = vocoder
         self.vocoder_convention = vocoder_convention
@@ -183,9 +190,13 @@ class Stage2Pipeline:
     # -- 自述 --------------------------------------------------------------
     def describe(self) -> str:
         vocoder_name = type(self.vocoder).__name__ if self.vocoder is not None else "（无）"
+        de_line = ""
+        if self.de_speaker is not self.speaker:
+            de_line = f"  L_de 度量  : {type(self.de_speaker).__name__}（≠ δ 生成用的 E_spk）\n"
         return (
             f"Stage 2 流水线\n"
             f"  E_spk      : {type(self.speaker).__name__}\n"
+            f"{de_line}"
             f"  Stage 1    : {type(self.stage1).__name__}\n"
             f"  声码器     : {vocoder_name}（mel 口径：{self.vocoder_convention}）\n"
             f"  模型侧 mel : {self.mel_preset_name}\n"

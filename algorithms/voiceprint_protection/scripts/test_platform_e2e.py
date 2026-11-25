@@ -41,6 +41,9 @@ MODULE_DIR = Path(__file__).resolve().parent
 PACKAGE_DIR = MODULE_DIR.parent
 REPO_ROOT = PACKAGE_DIR.parent.parent
 
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
 METHOD_ID = "group_n005_voiceprint_protection"
 METHOD_JSON = REPO_ROOT / "public" / "methods" / f"{METHOD_ID}.json"
 PUBLIC_DIR = REPO_ROOT / "public"

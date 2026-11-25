@@ -65,9 +65,9 @@
 | L1 推理链（体检 → 打疫苗 → 骗子行骗） | ✅ 已完成 | [`infer.py`](algorithms/voiceprint_protection/infer.py)；**已在本机用真权重跑通**（`encoder.pt` / `synthesizer.pt` / `vocoder.pt` 全部就位） |
 | 平台算法服务（FastAPI + CORS + 统一错误格式） | ✅ 已完成 | [`service.py`](algorithms/voiceprint_protection/service.py)；契约自测 **41/41**，另有可重复执行的端到端自检 `scripts/test_platform_e2e.py` |
 | 平台方法配置 + 索引登记 | ✅ 已完成 | [`public/methods/group_n005_voiceprint_protection.json`](public/methods/group_n005_voiceprint_protection.json) |
-| Stage 1（解耦-重建网络训练） | ⬜ 未完成 | 成员 A 主责；架构参考 AutoVC |
-| Stage 2（防御性扰动生成，**代码 + 训练器已就绪**） | 🟡 部分完成 | [`stage2/`](algorithms/voiceprint_protection/stage2/)；梯度通路自检 **20/20**；训练器已补齐**断点续训 / AMP / 梯度累积 / 梯度裁剪 / `--max-hours` / 吞吐 ETA**（2026-11-21）；★ 正式训练只缺**成员 A 的 Stage 1 权重**（可求导声码器 HiFi-GAN 16 kHz 已就位）⇒ 云机方案见 [`docs/notes/cloud_ecs_stage2.md`](docs/notes/cloud_ecs_stage2.md) |
-| 评测（Sim_prot / Sim_clone / DSR / WER） | 🟡 部分完成 | [`evaluate.py`](algorithms/voiceprint_protection/evaluate.py)；**基线与绝对 WER 已出**（见 [`docs/experiments.md`](docs/experiments.md) §3i）—— ⏳ 但「Ours」那一行仍缺训练好的 Stage 2 |
+| Stage 1（解耦-重建网络训练） | ✅ **已完成**（成员 A，2026-11-25 交付） | 权重挂在 GitHub Release `stage1-250k-bn`（250k 步 + BN 校准），本机按 **sha256 `14f7e07b…8832`** 与 A 的 JSON 对账通过、`step`/`speaker_encoder`/`model` 三段验真均 ✅。⚠️ **但它附带的评测口径要注意**：checkpoint 里微调过的 GE2E **空间已塌缩**（同人间 0.9453 / 异人间 0.8958），`Sim_prot ≈ 1` 在这个空间里没有意义 ⇒ 见 [`docs/experiments.md`](docs/experiments.md) §4g |
+| Stage 2（防御性扰动生成，**代码 + 训练器已就绪**） | 🟡 部分完成 | [`stage2/`](algorithms/voiceprint_protection/stage2/)；梯度通路自检 **20/20**；训练器已补齐**断点续训 / AMP / 梯度累积 / 梯度裁剪 / `--max-hours` / 吞吐 ETA**（2026-11-21）；✅ **成员 A 的 Stage 1 权重已到位**（可求导声码器 HiFi-GAN 16 kHz 已就位）；★ 新增 `--de-space`（δ 仍生成于微调空间、`L_de` 改考核**上游 GE2E**，梯度 **37.0 vs 7.34**）与 `--overfit N`（本机诊断用）；⏳ **200k 正式训练暂缓** —— 本机三连预检显示 α=0.1 的角度预算（**5.73°**）下 G 学不动，判据与实测见 [`docs/notes/member_b_runbook.md`](docs/notes/member_b_runbook.md) §4.1.1，云机方案见 [`docs/notes/cloud_ecs_stage2.md`](docs/notes/cloud_ecs_stage2.md) |
+| 评测（Sim_prot / Sim_clone / DSR / WER） | 🟡 部分完成 | [`evaluate.py`](algorithms/voiceprint_protection/evaluate.py)；**基线与绝对 WER 已出**（见 [`docs/experiments.md`](docs/experiments.md) §3i）；★ 加了**双口径 E_spk 报告**（`--espk-space {auto,upstream,stage1_finetuned}` + `--dual-espk`，报告落盘 `espk_space` / `de_space` / `secondary_espk`）—— ⏳ 但「Ours」那一行仍缺训练好的 Stage 2 |
 | 心理声学掩蔽 θ_x（MPEG-1 模型） | ✅ 已完成 | [`stage2/psychoacoustics.py`](algorithms/voiceprint_protection/stage2/psychoacoustics.py) |
 
 ### 3.2 相对 baseline 做了什么
@@ -262,6 +262,14 @@ python algorithms/voiceprint_protection/scripts/smoke_test.py
 5. **MOS 听测未做**（论文 50 人）——【待填：实际人数】。
 6. **黑盒迁移未做**（论文的 Figure 2 跨系统实验，最难，放最后）。
 7. VCTK 每人只取了 **100 句**（均匀抽样），不是全部 ~400–800 句 —— 为把 10.94 GiB 的下载压到 1.36 GiB。
+8. ★ **所有声纹类数字必须写明是哪个 E_spk 量的**（2026-11-25 新增，**报数前先看这条**）：
+   Stage 1 会端到端微调 GE2E，250k 步后那个空间**已经塌缩**（同人间 0.9453、异人间 0.8958，
+   B 本机独立复算 gap 只有 +0.013）—— 在塌缩空间里**任何两条语音都能拿到 ≈1 的余弦**，
+   所以 `Sim_prot = 0.999996` 证明的是"度量退化了"而不是"重建得好"。
+   与论文可比的是**上游预训练 GE2E** 口径（同一份权重：Sim_prot **0.6994**、
+   重建语音说话人识别 Top-1 只有 **0.229**）。
+   `evaluate.py --dual-espk` 两套一起报，`de_space` / `espk_space` 都会写进报告 JSON。
+   详见 [`docs/experiments.md`](docs/experiments.md) §4g 与 [`docs/notes/member_b_runbook.md`](docs/notes/member_b_runbook.md) §1.4.1。
 
 ### 耗时与资源
 
