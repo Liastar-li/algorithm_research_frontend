@@ -3,6 +3,7 @@
 import argparse
 import json
 import sys
+from collections import defaultdict
 from pathlib import Path
 
 import numpy as np
@@ -42,6 +43,30 @@ def sample_key(path):
     return "/".join(str(path).replace("\\", "/").split("/")[-2:])
 
 
+def select_samples(calibration, samples, speaker_count):
+    """Group held-out clips by manifest label before arranging enrollment and queries."""
+    by_path = {sample_key(path): (index, speaker)
+               for index, (path, speaker) in enumerate(samples)}
+    grouped = defaultdict(list)
+    seen = set()
+    for path in calibration["held_out_paths"]:
+        key = sample_key(path)
+        if key not in by_path or key in seen:
+            raise ValueError(f"missing or duplicate held-out clip: {path}")
+        seen.add(key)
+        index, speaker = by_path[key]
+        grouped[speaker].append((path, index))
+    utterances = calibration["held_out_utterances_per_speaker"]
+    if (len(grouped) != calibration["held_out_speakers"]
+            or any(len(items) != utterances for items in grouped.values())):
+        raise ValueError("held-out manifest labels do not match the calibration speaker counts")
+    speakers = list(grouped)[:speaker_count]
+    ordered = zip(*(grouped[speaker] for speaker in speakers))
+    selected = [item for row in ordered for item in row]
+    paths, indices = zip(*selected)
+    return list(paths), list(indices), speakers
+
+
 @torch.inference_mode()
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
@@ -67,12 +92,12 @@ def main():
     utterances = calibration["held_out_utterances_per_speaker"]
     if speaker_count < 2 or utterances < 2:
         parser.error("identity evaluation requires at least two speakers and two utterances per speaker")
-    ordered = np.asarray(calibration["held_out_paths"]).reshape(all_speakers, utterances)
-    selected_paths = ordered[:speaker_count].T.reshape(-1).tolist()
     dataset = build_dataloader(calibration["held_out_split"], num_workers=0,
                                deterministic=True).dataset
-    by_path = {sample_key(relative): index for index, (relative, _) in enumerate(dataset.samples)}
-    indices = [by_path[sample_key(path)] for path in selected_paths]
+    try:
+        selected_paths, indices, speakers = select_samples(calibration, dataset.samples, speaker_count)
+    except ValueError as exc:
+        parser.error(str(exc))
     batch = collate_stage1([dataset[index] for index in indices])
 
     saved = torch.load(args.checkpoint, map_location="cpu", weights_only=True)
@@ -118,6 +143,7 @@ def main():
                 "上游 GE2E 整段入口",
         "paths": selected_paths,
         "speaker_count": speaker_count,
+        "speakers": speakers,
         "utterances_per_speaker": utterances_per_speaker,
         "content_nearest_reference_top1": top1(content_features, content_features, speaker_count),
         "top1": {

@@ -1,0 +1,1532 @@
+{
+  "date": "2026-11-27",
+  "provenance": {
+    "evaluation_script_source": "0745c2a:algorithms/voiceprint_protection/scripts/diagnose_stage1_embedding_frontend.py",
+    "checkpoint": "algorithms\\voiceprint_protection\\weights\\stage1_fresh_200k\\stage1_step250000_wide_test_bn.pt",
+    "checkpoint_sha256": "14f7e07be7ab593de471ec9e3befaba44d8ac9af07debd0258a87ad002dd8832",
+    "classifier_audit": {
+      "step": 3000,
+      "classifier_sha256": "e816b556c65011f784b45b90fc931018d2278db1eb8ff9a6f46e6d69000281ae",
+      "encoder_sha256": "39373b86598fa3da9fcddee6142382efe09777e8d37dc9c0561f41f0070f134e",
+      "split": "train",
+      "speaker_count": 80,
+      "examples_per_speaker": 5,
+      "correct": 378,
+      "examples": 400,
+      "accuracy": 0.945,
+      "mean_entropy_nats": 3.4090264797210694
+    },
+    "training": {
+      "batch_size": 8,
+      "num_workers": 2,
+      "autovc_lr": 0.0001,
+      "ge2e_lr": 3e-07,
+      "lambda_cd": 1,
+      "lambda_dis": 0.01,
+      "amp": true,
+      "grad_accumulation": 1,
+      "mel_preset": "hifigan16k",
+      "freq": 32,
+      "crop_frames": 160,
+      "crop_samples": 40704,
+      "sample_rate": 16000,
+      "classifier_checkpoint": "algorithms\\voiceprint_protection\\weights\\stage1_speaker_classifier.pt",
+      "resume_step": 200000,
+      "bn_calibration_batches": 24,
+      "bn_calibration_batch_size": 8
+    },
+    "whisper_model_repository": "Systran/faster-whisper-small",
+    "runtime_versions": {
+      "torch": "2.4.1+cu121",
+      "faster-whisper": "1.1.0",
+      "ctranslate2": "4.5.0",
+      "librosa": "0.10.2.post1"
+    },
+    "b_comparison": {
+      "section": "4i.7",
+      "reference_words": 134,
+      "oracle_wer": 0.05970149253731343,
+      "rebuilt_wer": 0.7761194029850746
+    }
+  },
+  "relative_wer": {
+    "words": 134,
+    "decode": {
+      "language": "en",
+      "beam_size": 1,
+      "temperature": 0,
+      "max_new_tokens": 48
+    },
+    "rows": [
+      {
+        "clean": "Please call Stella.",
+        "oracle": "Please call Stella.",
+        "rebuilt": "Please play this style.",
+        "index": 0,
+        "path": "p228/p228_001_mic1.wav",
+        "oracle_wer": 0.0,
+        "rebuilt_wer": 1.0
+      },
+      {
+        "clean": "Please call Stella.",
+        "oracle": "Please call Stella.",
+        "rebuilt": "It is the worst time.",
+        "index": 1,
+        "path": "p258/p258_001_mic1.wav",
+        "oracle_wer": 0.0,
+        "rebuilt_wer": 1.6666666666666667
+      },
+      {
+        "clean": "Please call Stella.",
+        "oracle": "Please call Stella.",
+        "rebuilt": "Please kill Star.",
+        "index": 2,
+        "path": "p340/p340_001_mic1.wav",
+        "oracle_wer": 0.0,
+        "rebuilt_wer": 0.6666666666666666
+      },
+      {
+        "clean": "Hopefully it will be built by next",
+        "oracle": "Hopefully it will be built by next year.",
+        "rebuilt": "Thank you.",
+        "index": 3,
+        "path": "p240/p240_053_mic2.wav",
+        "oracle_wer": 0.14285714285714285,
+        "rebuilt_wer": 1.0
+      },
+      {
+        "clean": "Please call Stella.",
+        "oracle": "Please call Stella.",
+        "rebuilt": "Please call Stella.",
+        "index": 4,
+        "path": "p229/p229_001_mic1.wav",
+        "oracle_wer": 0.0,
+        "rebuilt_wer": 0.0
+      },
+      {
+        "clean": "Please call Stella.",
+        "oracle": "Please call Stella.",
+        "rebuilt": "Please call Stella.",
+        "index": 5,
+        "path": "p262/p262_001_mic1.wav",
+        "oracle_wer": 0.0,
+        "rebuilt_wer": 0.0
+      },
+      {
+        "clean": "Please call Stela.",
+        "oracle": "Please call Stella.",
+        "rebuilt": "Please call a speller.",
+        "index": 6,
+        "path": "p351/p351_001_mic1.wav",
+        "oracle_wer": 0.3333333333333333,
+        "rebuilt_wer": 0.6666666666666666
+      },
+      {
+        "clean": "We have got to deliver.",
+        "oracle": "We have got to deliver.",
+        "rebuilt": "They've lost a vehicle.",
+        "index": 7,
+        "path": "p244/p244_060_mic2.wav",
+        "oracle_wer": 0.0,
+        "rebuilt_wer": 1.0
+      },
+      {
+        "clean": "Please call Stella.",
+        "oracle": "Please call Stella.",
+        "rebuilt": "These girls still are.",
+        "index": 8,
+        "path": "p237/p237_001_mic1.wav",
+        "oracle_wer": 0.0,
+        "rebuilt_wer": 1.3333333333333333
+      },
+      {
+        "clean": "Ask her to bring these things with her.",
+        "oracle": "Ask her to bring these things with her.",
+        "rebuilt": "Thanks for watching.",
+        "index": 9,
+        "path": "p281/p281_002_mic1.wav",
+        "oracle_wer": 0.0,
+        "rebuilt_wer": 1.0
+      },
+      {
+        "clean": "Please call Stella.",
+        "oracle": "Please call Stella.",
+        "rebuilt": "He's called Stella.",
+        "index": 10,
+        "path": "p364/p364_001_mic1.wav",
+        "oracle_wer": 0.0,
+        "rebuilt_wer": 0.6666666666666666
+      },
+      {
+        "clean": "The whole of Southern Africa is in",
+        "oracle": "The whole of Southern Africa is in...",
+        "rebuilt": "similar state proper",
+        "index": 11,
+        "path": "p254/p254_057_mic1.wav",
+        "oracle_wer": 0.14285714285714285,
+        "rebuilt_wer": 1.0
+      },
+      {
+        "clean": "Please call Stella.",
+        "oracle": "Please cool stella.",
+        "rebuilt": "These call Stella.",
+        "index": 12,
+        "path": "p239/p239_001_mic1.wav",
+        "oracle_wer": 0.3333333333333333,
+        "rebuilt_wer": 0.3333333333333333
+      },
+      {
+        "clean": "Please call Stella.",
+        "oracle": "Please call Stella.",
+        "rebuilt": "Please call a sterile.",
+        "index": 13,
+        "path": "p300/p300_001_mic1.wav",
+        "oracle_wer": 0.0,
+        "rebuilt_wer": 0.6666666666666666
+      },
+      {
+        "clean": "Please call Stella.",
+        "oracle": "Please call Stella.",
+        "rebuilt": "Peace, Gloucester.",
+        "index": 14,
+        "path": "p374/p374_001_mic1.wav",
+        "oracle_wer": 0.0,
+        "rebuilt_wer": 1.0
+      },
+      {
+        "clean": "That's the truth.",
+        "oracle": "That's the truth.",
+        "rebuilt": "Thanks for suites.",
+        "index": 15,
+        "path": "p255/p255_054_mic1.wav",
+        "oracle_wer": 0.0,
+        "rebuilt_wer": 1.0
+      },
+      {
+        "clean": "Please call Stella.",
+        "oracle": "Please call Stella.",
+        "rebuilt": "Please call Stella.",
+        "index": 16,
+        "path": "p240/p240_001_mic1.wav",
+        "oracle_wer": 0.0,
+        "rebuilt_wer": 0.0
+      },
+      {
+        "clean": "Please call Stella.",
+        "oracle": "Please call Stella.",
+        "rebuilt": "He's called Stella.",
+        "index": 17,
+        "path": "p306/p306_001_mic1.wav",
+        "oracle_wer": 0.0,
+        "rebuilt_wer": 0.6666666666666666
+      },
+      {
+        "clean": "Here's a clue.",
+        "oracle": "Here's a clue.",
+        "rebuilt": "Feel to see.",
+        "index": 18,
+        "path": "p228/p228_053_mic1.wav",
+        "oracle_wer": 0.0,
+        "rebuilt_wer": 1.0
+      },
+      {
+        "clean": "It should be devolved.",
+        "oracle": "It should be devolved.",
+        "rebuilt": "It was a good life.",
+        "index": 19,
+        "path": "p258/p258_058_mic2.wav",
+        "oracle_wer": 0.0,
+        "rebuilt_wer": 1.0
+      },
+      {
+        "clean": "Please call Stella.",
+        "oracle": "Please call Stella.",
+        "rebuilt": "Please call Stella.",
+        "index": 20,
+        "path": "p244/p244_001_mic1.wav",
+        "oracle_wer": 0.0,
+        "rebuilt_wer": 0.0
+      },
+      {
+        "clean": "Please call Stella.",
+        "oracle": "Please call Stella.",
+        "rebuilt": "Please call Stella.",
+        "index": 21,
+        "path": "p313/p313_001_mic1.wav",
+        "oracle_wer": 0.0,
+        "rebuilt_wer": 0.0
+      },
+      {
+        "clean": "It has been a horrible, horrible time.",
+        "oracle": "It has been a horrible, horrible day.",
+        "rebuilt": "Yes, my violent plans.",
+        "index": 22,
+        "path": "p229/p229_055_mic1.wav",
+        "oracle_wer": 0.14285714285714285,
+        "rebuilt_wer": 1.0
+      },
+      {
+        "clean": "The succession wasn't just content.",
+        "oracle": "The succession wasn't just conti-",
+        "rebuilt": "This is sexy, this is sexy.",
+        "index": 23,
+        "path": "p262/p262_056_mic1.wav",
+        "oracle_wer": 0.2,
+        "rebuilt_wer": 1.2
+      },
+      {
+        "clean": "Please call Stella.",
+        "oracle": "Please call Stella.",
+        "rebuilt": "Please call Stella.",
+        "index": 24,
+        "path": "p254/p254_001_mic1.wav",
+        "oracle_wer": 0.0,
+        "rebuilt_wer": 0.0
+      },
+      {
+        "clean": "Please call Stella.",
+        "oracle": "Please call Stella.",
+        "rebuilt": "Please call Stella.",
+        "index": 25,
+        "path": "p318/p318_001_mic1.wav",
+        "oracle_wer": 0.0,
+        "rebuilt_wer": 0.0
+      },
+      {
+        "clean": "We're in the Premier Division and we intend",
+        "oracle": "We're in the Premier Division and we intend to",
+        "rebuilt": "We've been doing this in quite a while.",
+        "index": 26,
+        "path": "p237/p237_049_mic1.wav",
+        "oracle_wer": 0.125,
+        "rebuilt_wer": 1.0
+      },
+      {
+        "clean": "The tournament has now been cancelled.",
+        "oracle": "The tournament has now been cancelled.",
+        "rebuilt": "We shall not shy away from the past.",
+        "index": 27,
+        "path": "p281/p281_066_mic1.wav",
+        "oracle_wer": 0.0,
+        "rebuilt_wer": 1.3333333333333333
+      },
+      {
+        "clean": "Please call Stella.",
+        "oracle": "Please call Stella.",
+        "rebuilt": "Please call Stella.",
+        "index": 28,
+        "path": "p255/p255_001_mic1.wav",
+        "oracle_wer": 0.0,
+        "rebuilt_wer": 0.0
+      },
+      {
+        "clean": "Please call Stella.",
+        "oracle": "Please call Stella.",
+        "rebuilt": "Please call Stella.",
+        "index": 29,
+        "path": "p336/p336_001_mic1.wav",
+        "oracle_wer": 0.0,
+        "rebuilt_wer": 0.0
+      },
+      {
+        "clean": "Then they scored two goals to win.",
+        "oracle": "Then they scored two goals to win.",
+        "rebuilt": "I was the one who stole it.",
+        "index": 30,
+        "path": "p239/p239_071_mic1.wav",
+        "oracle_wer": 0.0,
+        "rebuilt_wer": 1.0
+      },
+      {
+        "clean": "It comes on like a tidal wave.",
+        "oracle": "It comes on like a tidal wave.",
+        "rebuilt": "It doesn't want to be balanced.",
+        "index": 31,
+        "path": "p300/p300_056_mic2.wav",
+        "oracle_wer": 0.0,
+        "rebuilt_wer": 0.8571428571428571
+      }
+    ],
+    "oracle_wer": 0.05223880597014925,
+    "rebuilt_wer": 0.7835820895522388
+  },
+  "identity": {
+    "speaker_count": 20,
+    "query_count": 140,
+    "small_actual_speaker_counts": {
+      "p228": 2,
+      "p258": 2,
+      "p340": 1,
+      "p240": 2,
+      "p229": 2,
+      "p262": 2,
+      "p351": 1,
+      "p244": 2,
+      "p237": 2,
+      "p281": 2,
+      "p364": 1,
+      "p254": 2,
+      "p239": 2,
+      "p300": 2,
+      "p374": 1,
+      "p255": 2,
+      "p306": 1,
+      "p313": 1,
+      "p318": 1,
+      "p336": 1
+    },
+    "paths": [
+      "p228/p228_001_mic1.wav",
+      "p258/p258_001_mic1.wav",
+      "p340/p340_001_mic1.wav",
+      "p240/p240_053_mic2.wav",
+      "p306/p306_049_mic1.wav",
+      "p228/p228_105_mic1.wav",
+      "p258/p258_117_mic2.wav",
+      "p340/p340_120_mic1.wav",
+      "p240/p240_159_mic1.wav",
+      "p306/p306_147_mic2.wav",
+      "p228/p228_208_mic2.wav",
+      "p258/p258_233_mic1.wav",
+      "p340/p340_238_mic2.wav",
+      "p240/p240_264_mic2.wav",
+      "p306/p306_252_mic2.wav",
+      "p228/p228_312_mic1.wav",
+      "p258/p258_348_mic2.wav",
+      "p340/p340_357_mic1.wav",
+      "p240/p240_377_mic1.wav",
+      "p306/p306_357_mic2.wav",
+      "p229/p229_001_mic1.wav",
+      "p262/p262_001_mic1.wav",
+      "p351/p351_001_mic1.wav",
+      "p244/p244_060_mic2.wav",
+      "p313/p313_059_mic2.wav",
+      "p229/p229_109_mic1.wav",
+      "p262/p262_111_mic1.wav",
+      "p351/p351_120_mic1.wav",
+      "p244/p244_178_mic1.wav",
+      "p313/p313_177_mic2.wav",
+      "p229/p229_216_mic1.wav",
+      "p262/p262_221_mic2.wav",
+      "p351/p351_238_mic1.wav",
+      "p244/p244_298_mic1.wav",
+      "p313/p313_295_mic2.wav",
+      "p229/p229_328_mic1.wav",
+      "p262/p262_331_mic2.wav",
+      "p351/p351_356_mic1.wav",
+      "p244/p244_420_mic2.wav",
+      "p313/p313_419_mic2.wav",
+      "p237/p237_001_mic1.wav",
+      "p281/p281_002_mic1.wav",
+      "p364/p364_001_mic1.wav",
+      "p254/p254_057_mic1.wav",
+      "p318/p318_062_mic1.wav",
+      "p237/p237_096_mic2.wav",
+      "p281/p281_130_mic2.wav",
+      "p364/p364_087_mic1.wav",
+      "p254/p254_170_mic1.wav",
+      "p318/p318_180_mic1.wav",
+      "p237/p237_195_mic2.wav",
+      "p281/p281_259_mic1.wav",
+      "p364/p364_173_mic2.wav",
+      "p254/p254_282_mic1.wav",
+      "p318/p318_298_mic1.wav",
+      "p237/p237_294_mic2.wav",
+      "p281/p281_387_mic2.wav",
+      "p364/p364_258_mic2.wav",
+      "p254/p254_400_mic1.wav",
+      "p318/p318_420_mic2.wav",
+      "p239/p239_001_mic1.wav",
+      "p300/p300_001_mic1.wav",
+      "p374/p374_001_mic1.wav",
+      "p255/p255_054_mic1.wav",
+      "p336/p336_059_mic2.wav",
+      "p239/p239_142_mic2.wav",
+      "p300/p300_112_mic1.wav",
+      "p374/p374_119_mic2.wav",
+      "p255/p255_161_mic1.wav",
+      "p336/p336_176_mic2.wav",
+      "p239/p239_283_mic1.wav",
+      "p300/p300_224_mic2.wav",
+      "p374/p374_238_mic1.wav",
+      "p255/p255_267_mic1.wav",
+      "p336/p336_294_mic2.wav",
+      "p239/p239_423_mic2.wav",
+      "p300/p300_336_mic1.wav",
+      "p374/p374_357_mic1.wav",
+      "p255/p255_378_mic1.wav",
+      "p336/p336_420_mic2.wav",
+      "p240/p240_001_mic1.wav",
+      "p306/p306_001_mic1.wav",
+      "p228/p228_053_mic1.wav",
+      "p258/p258_058_mic2.wav",
+      "p340/p340_061_mic1.wav",
+      "p240/p240_106_mic2.wav",
+      "p306/p306_097_mic2.wav",
+      "p228/p228_156_mic2.wav",
+      "p258/p258_175_mic1.wav",
+      "p340/p340_179_mic2.wav",
+      "p240/p240_212_mic1.wav",
+      "p306/p306_203_mic1.wav",
+      "p228/p228_260_mic1.wav",
+      "p258/p258_291_mic1.wav",
+      "p340/p340_298_mic1.wav",
+      "p240/p240_318_mic2.wav",
+      "p306/p306_302_mic2.wav",
+      "p228/p228_368_mic1.wav",
+      "p258/p258_410_mic2.wav",
+      "p340/p340_420_mic2.wav",
+      "p244/p244_001_mic1.wav",
+      "p313/p313_001_mic1.wav",
+      "p229/p229_055_mic1.wav",
+      "p262/p262_056_mic1.wav",
+      "p351/p351_060_mic1.wav",
+      "p244/p244_119_mic2.wav",
+      "p313/p313_118_mic2.wav",
+      "p229/p229_162_mic1.wav",
+      "p262/p262_166_mic1.wav",
+      "p351/p351_179_mic1.wav",
+      "p244/p244_238_mic1.wav",
+      "p313/p313_236_mic2.wav",
+      "p229/p229_269_mic1.wav",
+      "p262/p262_276_mic2.wav",
+      "p351/p351_297_mic1.wav",
+      "p244/p244_357_mic2.wav",
+      "p313/p313_356_mic2.wav",
+      "p229/p229_389_mic1.wav",
+      "p262/p262_391_mic1.wav",
+      "p351/p351_420_mic2.wav",
+      "p254/p254_001_mic1.wav",
+      "p318/p318_001_mic1.wav",
+      "p237/p237_049_mic1.wav",
+      "p281/p281_066_mic1.wav",
+      "p364/p364_043_mic1.wav",
+      "p254/p254_113_mic2.wav",
+      "p318/p318_121_mic1.wav",
+      "p237/p237_146_mic1.wav",
+      "p281/p281_194_mic2.wav",
+      "p364/p364_130_mic1.wav",
+      "p254/p254_225_mic2.wav",
+      "p318/p318_239_mic1.wav",
+      "p237/p237_245_mic1.wav",
+      "p281/p281_323_mic1.wav",
+      "p364/p364_216_mic2.wav",
+      "p254/p254_339_mic2.wav",
+      "p318/p318_357_mic1.wav",
+      "p237/p237_348_mic2.wav",
+      "p281/p281_456_mic1.wav",
+      "p364/p364_305_mic2.wav",
+      "p255/p255_001_mic1.wav",
+      "p336/p336_001_mic1.wav",
+      "p239/p239_071_mic1.wav",
+      "p300/p300_056_mic2.wav",
+      "p374/p374_060_mic1.wav",
+      "p255/p255_108_mic1.wav",
+      "p336/p336_118_mic1.wav",
+      "p239/p239_212_mic2.wav",
+      "p300/p300_169_mic1.wav",
+      "p374/p374_179_mic1.wav",
+      "p255/p255_214_mic1.wav",
+      "p336/p336_236_mic1.wav",
+      "p239/p239_353_mic1.wav",
+      "p300/p300_280_mic2.wav",
+      "p374/p374_297_mic2.wav",
+      "p255/p255_321_mic1.wav",
+      "p336/p336_356_mic1.wav",
+      "p239/p239_498_mic2.wav",
+      "p300/p300_397_mic1.wav",
+      "p374/p374_420_mic2.wav"
+    ],
+    "reference_indices": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      20,
+      21,
+      22,
+      23,
+      24,
+      40,
+      41,
+      42,
+      43,
+      44,
+      60,
+      61,
+      62,
+      63,
+      64
+    ],
+    "top1": {
+      "clean": {
+        "correct": 103,
+        "accuracy": 0.7357142857142858
+      },
+      "oracle": {
+        "correct": 101,
+        "accuracy": 0.7214285714285714
+      },
+      "rebuilt": {
+        "correct": 39,
+        "accuracy": 0.2785714285714286
+      }
+    }
+  },
+  "findings": {
+    "sample_order": "The calibration report interleaves speakers across held-out batches. Reshaping its path list as speaker-major produces incorrect labels. The 32-clip WER subset has 20 actual speakers.",
+    "wer_reference": "Whisper-small transcription of the matching cropped original. WER is calculated on paired clips and does not use speaker labels.",
+    "identity_protocol": "Upstream SpeakerBridge with VAD skipped. First clean clip per true speaker as enrollment, remaining 140 clips as queries.",
+    "classifier_provenance": "Training and resume logs confirm the path loaded. The file hash was recorded during this audit.",
+    "handoff_status": "Hold formal Stage 2 pending Stage 1 acceptance. The reconstruction failure was reproduced; its training root cause remains open."
+  },
+  "corrected_four_speaker_replay": {
+    "checkpoint": "algorithms/voiceprint_protection/weights/stage1_fresh_200k/stage1_step250000_wide_test_bn.pt",
+    "step": 250000,
+    "note": "同一批固定3秒音频；formal=SpeakerBridge.embed（音量归一化+分段平均，本机缺少 webrtcvad 所以跳过 VAD），whole_clip=GE2EMel + 上游 GE2E 整段入口",
+    "paths": [
+      "p228/p228_001_mic1.wav",
+      "p229/p229_001_mic1.wav",
+      "p237/p237_001_mic1.wav",
+      "p239/p239_001_mic1.wav",
+      "p228/p228_053_mic1.wav",
+      "p229/p229_055_mic1.wav",
+      "p237/p237_049_mic1.wav",
+      "p239/p239_071_mic1.wav",
+      "p228/p228_105_mic1.wav",
+      "p229/p229_109_mic1.wav",
+      "p237/p237_096_mic2.wav",
+      "p239/p239_142_mic2.wav",
+      "p228/p228_156_mic2.wav",
+      "p229/p229_162_mic1.wav",
+      "p237/p237_146_mic1.wav",
+      "p239/p239_212_mic2.wav",
+      "p228/p228_208_mic2.wav",
+      "p229/p229_216_mic1.wav",
+      "p237/p237_195_mic2.wav",
+      "p239/p239_283_mic1.wav",
+      "p228/p228_260_mic1.wav",
+      "p229/p229_269_mic1.wav",
+      "p237/p237_245_mic1.wav",
+      "p239/p239_353_mic1.wav",
+      "p228/p228_312_mic1.wav",
+      "p229/p229_328_mic1.wav",
+      "p237/p237_294_mic2.wav",
+      "p239/p239_423_mic2.wav",
+      "p228/p228_368_mic1.wav",
+      "p229/p229_389_mic1.wav",
+      "p237/p237_348_mic2.wav",
+      "p239/p239_498_mic2.wav"
+    ],
+    "speaker_count": 4,
+    "speakers": [
+      "p228",
+      "p229",
+      "p237",
+      "p239"
+    ],
+    "utterances_per_speaker": 8,
+    "content_nearest_reference_top1": 0.4285714328289032,
+    "top1": {
+      "formal_speaker_bridge": {
+        "clean": 0.9285714030265808,
+        "oracle": 1.0,
+        "rebuilt": 0.4642857015132904
+      },
+      "whole_clip_ge2e": {
+        "clean": 0.8928571343421936,
+        "oracle": 0.9285714030265808,
+        "rebuilt": 0.4642857015132904
+      }
+    },
+    "identity_gap": {
+      "formal_speaker_bridge": {
+        "clean": {
+          "same": 0.7899354696273804,
+          "different": 0.6187823414802551,
+          "gap": 0.17115312814712524
+        },
+        "oracle": {
+          "same": 0.7907541394233704,
+          "different": 0.615752100944519,
+          "gap": 0.17500203847885132
+        },
+        "rebuilt": {
+          "same": 0.743813693523407,
+          "different": 0.6687532067298889,
+          "gap": 0.07506048679351807
+        }
+      },
+      "whole_clip_ge2e": {
+        "clean": {
+          "same": 0.7601683735847473,
+          "different": 0.6066712141036987,
+          "gap": 0.15349715948104858
+        },
+        "oracle": {
+          "same": 0.7614862322807312,
+          "different": 0.6152762174606323,
+          "gap": 0.14621001482009888
+        },
+        "rebuilt": {
+          "same": 0.7265286445617676,
+          "different": 0.6539453864097595,
+          "gap": 0.07258325815200806
+        }
+      }
+    },
+    "original_rebuilt_cosine": {
+      "formal_speaker_bridge": 0.7095006704330444,
+      "whole_clip_ge2e": 0.6980082392692566
+    },
+    "original_oracle_cosine": {
+      "formal_speaker_bridge": 0.9683898687362671,
+      "whole_clip_ge2e": 0.9594096541404724
+    },
+    "relative_wer": {
+      "model": "small",
+      "decode_options": {
+        "temperature": 0.0,
+        "max_new_tokens": 48
+      },
+      "reference_transcripts": [
+        "Please call Stella.",
+        "Please call Stella.",
+        "Please call Stella.",
+        "Please call Stella.",
+        "Here's a clue.",
+        "It has been a horrible, horrible time.",
+        "We're in the Premier Division and we intend",
+        "Then they scored two goals to win.",
+        "Previously, they were raised...",
+        "before the game went for a pint.",
+        "We could not get any possession.",
+        "Absences should be carefully monitored.",
+        "The home side didn't stand a chance.",
+        "It's a problem but it cannot become an exception.",
+        "She hopes to study in Britain one day.",
+        "The protest will go ahead as planned.",
+        "I would think about the end of January.",
+        "It was worth a photograph.",
+        "I've got good news and bad news for you.",
+        "We've had great things in the past.",
+        "I have never been a close friend of...",
+        "That decision is for the British Parliament.",
+        "Of course, that is not the whole story.",
+        "What happened in that game?",
+        "We do the same.",
+        "It was no secret that I wanted to sign.",
+        "He has already suffered a good deal of...",
+        "It tells the story of a weapon who's proper-",
+        "I'm not willing to say anything.",
+        "That's the name of the game though.",
+        "Look at the witnesses.",
+        "Saturday's match was fairly straightforward."
+      ],
+      "reference_words": 199,
+      "empty_references": 0,
+      "oracle": 0.03015075376884422,
+      "rebuilt": 0.9798994974874372
+    }
+  },
+  "same_sample_checkpoint_comparison": {
+    "reference_words": 134,
+    "oracle_wer": 0.05223880597014925,
+    "release_250k_wer": 0.7835820895522388,
+    "variants": {
+      "stage1_step250000.pt": {
+        "wer": 0.8208955223880597,
+        "mel_mse": 0.005928663071244955,
+        "rows": [
+          {
+            "path": "p228/p228_001_mic1.wav",
+            "reference": "Please call Stella.",
+            "transcript": "Please play this, Stella.",
+            "wer": 0.6666666666666666
+          },
+          {
+            "path": "p258/p258_001_mic1.wav",
+            "reference": "Please call Stella.",
+            "transcript": "It is still a star.",
+            "wer": 1.6666666666666667
+          },
+          {
+            "path": "p340/p340_001_mic1.wav",
+            "reference": "Please call Stella.",
+            "transcript": "Please kill the star.",
+            "wer": 1.0
+          },
+          {
+            "path": "p240/p240_053_mic2.wav",
+            "reference": "Hopefully it will be built by next",
+            "transcript": "Thank you.",
+            "wer": 1.0
+          },
+          {
+            "path": "p229/p229_001_mic1.wav",
+            "reference": "Please call Stella.",
+            "transcript": "Please call Stella.",
+            "wer": 0.0
+          },
+          {
+            "path": "p262/p262_001_mic1.wav",
+            "reference": "Please call Stella.",
+            "transcript": "Please pull Stella.",
+            "wer": 0.3333333333333333
+          },
+          {
+            "path": "p351/p351_001_mic1.wav",
+            "reference": "Please call Stela.",
+            "transcript": "Frigga's called Spella.",
+            "wer": 1.0
+          },
+          {
+            "path": "p244/p244_060_mic2.wav",
+            "reference": "We have got to deliver.",
+            "transcript": "People are together.",
+            "wer": 1.0
+          },
+          {
+            "path": "p237/p237_001_mic1.wav",
+            "reference": "Please call Stella.",
+            "transcript": "Viz Rossella",
+            "wer": 1.0
+          },
+          {
+            "path": "p281/p281_002_mic1.wav",
+            "reference": "Ask her to bring these things with her.",
+            "transcript": "I have some feedback on such effects.",
+            "wer": 1.0
+          },
+          {
+            "path": "p364/p364_001_mic1.wav",
+            "reference": "Please call Stella.",
+            "transcript": "He's called Stella.",
+            "wer": 0.6666666666666666
+          },
+          {
+            "path": "p254/p254_057_mic1.wav",
+            "reference": "The whole of Southern Africa is in",
+            "transcript": "some of the state public",
+            "wer": 0.8571428571428571
+          },
+          {
+            "path": "p239/p239_001_mic1.wav",
+            "reference": "Please call Stella.",
+            "transcript": "Please call Stella.",
+            "wer": 0.0
+          },
+          {
+            "path": "p300/p300_001_mic1.wav",
+            "reference": "Please call Stella.",
+            "transcript": "Please call a sterile.",
+            "wer": 0.6666666666666666
+          },
+          {
+            "path": "p374/p374_001_mic1.wav",
+            "reference": "Please call Stella.",
+            "transcript": "Peace, Paul and Stella.",
+            "wer": 1.0
+          },
+          {
+            "path": "p255/p255_054_mic1.wav",
+            "reference": "That's the truth.",
+            "transcript": "Thanks for suites.",
+            "wer": 1.0
+          },
+          {
+            "path": "p240/p240_001_mic1.wav",
+            "reference": "Please call Stella.",
+            "transcript": "Please call the Stuller.",
+            "wer": 0.6666666666666666
+          },
+          {
+            "path": "p306/p306_001_mic1.wav",
+            "reference": "Please call Stella.",
+            "transcript": "But he's called Stella.",
+            "wer": 1.0
+          },
+          {
+            "path": "p228/p228_053_mic1.wav",
+            "reference": "Here's a clue.",
+            "transcript": "The old city.",
+            "wer": 1.0
+          },
+          {
+            "path": "p258/p258_058_mic2.wav",
+            "reference": "It should be devolved.",
+            "transcript": "It was a bit of a relief.",
+            "wer": 1.5
+          },
+          {
+            "path": "p244/p244_001_mic1.wav",
+            "reference": "Please call Stella.",
+            "transcript": "Please call Stella.",
+            "wer": 0.0
+          },
+          {
+            "path": "p313/p313_001_mic1.wav",
+            "reference": "Please call Stella.",
+            "transcript": "Please call Stella.",
+            "wer": 0.0
+          },
+          {
+            "path": "p229/p229_055_mic1.wav",
+            "reference": "It has been a horrible, horrible time.",
+            "transcript": "Yes, my lemon, prime.",
+            "wer": 1.0
+          },
+          {
+            "path": "p262/p262_056_mic1.wav",
+            "reference": "The succession wasn't just content.",
+            "transcript": "Which is such a nice idea.",
+            "wer": 1.2
+          },
+          {
+            "path": "p254/p254_001_mic1.wav",
+            "reference": "Please call Stella.",
+            "transcript": "Please call Stella.",
+            "wer": 0.0
+          },
+          {
+            "path": "p318/p318_001_mic1.wav",
+            "reference": "Please call Stella.",
+            "transcript": "Please call Stella.",
+            "wer": 0.0
+          },
+          {
+            "path": "p237/p237_049_mic1.wav",
+            "reference": "We're in the Premier Division and we intend",
+            "transcript": "we were going disinfluenced.",
+            "wer": 1.0
+          },
+          {
+            "path": "p281/p281_066_mic1.wav",
+            "reference": "The tournament has now been cancelled.",
+            "transcript": "You can't have a child in a car.",
+            "wer": 1.3333333333333333
+          },
+          {
+            "path": "p255/p255_001_mic1.wav",
+            "reference": "Please call Stella.",
+            "transcript": "Please call Stur.",
+            "wer": 0.3333333333333333
+          },
+          {
+            "path": "p336/p336_001_mic1.wav",
+            "reference": "Please call Stella.",
+            "transcript": "Please call Stella.",
+            "wer": 0.0
+          },
+          {
+            "path": "p239/p239_071_mic1.wav",
+            "reference": "Then they scored two goals to win.",
+            "transcript": "I will start with some RavSphere.",
+            "wer": 1.0
+          },
+          {
+            "path": "p300/p300_056_mic2.wav",
+            "reference": "It comes on like a tidal wave.",
+            "transcript": "It doesn't want to be balanced.",
+            "wer": 0.8571428571428571
+          }
+        ]
+      },
+      "stage1_step250000_wide_test_bn.pt": {
+        "wer": 0.7686567164179104,
+        "mel_mse": 0.005570283159613609,
+        "rows": [
+          {
+            "path": "p228/p228_001_mic1.wav",
+            "reference": "Please call Stella.",
+            "transcript": "Please play this style.",
+            "wer": 1.0
+          },
+          {
+            "path": "p258/p258_001_mic1.wav",
+            "reference": "Please call Stella.",
+            "transcript": "It is the worst time.",
+            "wer": 1.6666666666666667
+          },
+          {
+            "path": "p340/p340_001_mic1.wav",
+            "reference": "Please call Stella.",
+            "transcript": "Please kill Star.",
+            "wer": 0.6666666666666666
+          },
+          {
+            "path": "p240/p240_053_mic2.wav",
+            "reference": "Hopefully it will be built by next",
+            "transcript": "Thank you.",
+            "wer": 1.0
+          },
+          {
+            "path": "p229/p229_001_mic1.wav",
+            "reference": "Please call Stella.",
+            "transcript": "Please call Stella.",
+            "wer": 0.0
+          },
+          {
+            "path": "p262/p262_001_mic1.wav",
+            "reference": "Please call Stella.",
+            "transcript": "Please call Stella.",
+            "wer": 0.0
+          },
+          {
+            "path": "p351/p351_001_mic1.wav",
+            "reference": "Please call Stela.",
+            "transcript": "Please call a speller.",
+            "wer": 0.6666666666666666
+          },
+          {
+            "path": "p244/p244_060_mic2.wav",
+            "reference": "We have got to deliver.",
+            "transcript": "They're close if you go.",
+            "wer": 1.0
+          },
+          {
+            "path": "p237/p237_001_mic1.wav",
+            "reference": "Please call Stella.",
+            "transcript": "These girls still are.",
+            "wer": 1.3333333333333333
+          },
+          {
+            "path": "p281/p281_002_mic1.wav",
+            "reference": "Ask her to bring these things with her.",
+            "transcript": "Thanks for watching.",
+            "wer": 1.0
+          },
+          {
+            "path": "p364/p364_001_mic1.wav",
+            "reference": "Please call Stella.",
+            "transcript": "He's called Stella.",
+            "wer": 0.6666666666666666
+          },
+          {
+            "path": "p254/p254_057_mic1.wav",
+            "reference": "The whole of Southern Africa is in",
+            "transcript": "similar state proper privacy",
+            "wer": 1.0
+          },
+          {
+            "path": "p239/p239_001_mic1.wav",
+            "reference": "Please call Stella.",
+            "transcript": "These call Stella.",
+            "wer": 0.3333333333333333
+          },
+          {
+            "path": "p300/p300_001_mic1.wav",
+            "reference": "Please call Stella.",
+            "transcript": "Please call a sterile.",
+            "wer": 0.6666666666666666
+          },
+          {
+            "path": "p374/p374_001_mic1.wav",
+            "reference": "Please call Stella.",
+            "transcript": "Peace, Gold Star.",
+            "wer": 1.0
+          },
+          {
+            "path": "p255/p255_054_mic1.wav",
+            "reference": "That's the truth.",
+            "transcript": "Thanks for suites.",
+            "wer": 1.0
+          },
+          {
+            "path": "p240/p240_001_mic1.wav",
+            "reference": "Please call Stella.",
+            "transcript": "Please call Stella.",
+            "wer": 0.0
+          },
+          {
+            "path": "p306/p306_001_mic1.wav",
+            "reference": "Please call Stella.",
+            "transcript": "He's called Stella.",
+            "wer": 0.6666666666666666
+          },
+          {
+            "path": "p228/p228_053_mic1.wav",
+            "reference": "Here's a clue.",
+            "transcript": "He'll see.",
+            "wer": 1.0
+          },
+          {
+            "path": "p258/p258_058_mic2.wav",
+            "reference": "It should be devolved.",
+            "transcript": "It was a good life.",
+            "wer": 1.0
+          },
+          {
+            "path": "p244/p244_001_mic1.wav",
+            "reference": "Please call Stella.",
+            "transcript": "Please call Stella.",
+            "wer": 0.0
+          },
+          {
+            "path": "p313/p313_001_mic1.wav",
+            "reference": "Please call Stella.",
+            "transcript": "Please call Stella.",
+            "wer": 0.0
+          },
+          {
+            "path": "p229/p229_055_mic1.wav",
+            "reference": "It has been a horrible, horrible time.",
+            "transcript": "Yes, my violent plans.",
+            "wer": 1.0
+          },
+          {
+            "path": "p262/p262_056_mic1.wav",
+            "reference": "The succession wasn't just content.",
+            "transcript": "This is sexy, this is sexy.",
+            "wer": 1.2
+          },
+          {
+            "path": "p254/p254_001_mic1.wav",
+            "reference": "Please call Stella.",
+            "transcript": "Please call Stella.",
+            "wer": 0.0
+          },
+          {
+            "path": "p318/p318_001_mic1.wav",
+            "reference": "Please call Stella.",
+            "transcript": "Please call Stella.",
+            "wer": 0.0
+          },
+          {
+            "path": "p237/p237_049_mic1.wav",
+            "reference": "We're in the Premier Division and we intend",
+            "transcript": "We've been getting this in time to-",
+            "wer": 1.0
+          },
+          {
+            "path": "p281/p281_066_mic1.wav",
+            "reference": "The tournament has now been cancelled.",
+            "transcript": "We found an enchantment.",
+            "wer": 1.0
+          },
+          {
+            "path": "p255/p255_001_mic1.wav",
+            "reference": "Please call Stella.",
+            "transcript": "Please call Stella.",
+            "wer": 0.0
+          },
+          {
+            "path": "p336/p336_001_mic1.wav",
+            "reference": "Please call Stella.",
+            "transcript": "Please call Stella.",
+            "wer": 0.0
+          },
+          {
+            "path": "p239/p239_071_mic1.wav",
+            "reference": "Then they scored two goals to win.",
+            "transcript": "I was the one who stole it.",
+            "wer": 1.0
+          },
+          {
+            "path": "p300/p300_056_mic2.wav",
+            "reference": "It comes on like a tidal wave.",
+            "transcript": "It doesn't want to be balanced.",
+            "wer": 0.8571428571428571
+          }
+        ]
+      },
+      "stage1_step200000_wide_test_bn.pt": {
+        "wer": 0.8805970149253731,
+        "mel_mse": 0.005772553849965334,
+        "rows": [
+          {
+            "path": "p228/p228_001_mic1.wav",
+            "reference": "Please call Stella.",
+            "transcript": "Please, Paulista.",
+            "wer": 1.0
+          },
+          {
+            "path": "p258/p258_001_mic1.wav",
+            "reference": "Please call Stella.",
+            "transcript": "And it's Palestine.",
+            "wer": 1.0
+          },
+          {
+            "path": "p340/p340_001_mic1.wav",
+            "reference": "Please call Stella.",
+            "transcript": "I think it's still a star.",
+            "wer": 2.0
+          },
+          {
+            "path": "p240/p240_053_mic2.wav",
+            "reference": "Hopefully it will be built by next",
+            "transcript": "It was a big effort to say.",
+            "wer": 1.0
+          },
+          {
+            "path": "p229/p229_001_mic1.wav",
+            "reference": "Please call Stella.",
+            "transcript": "Please call Stella.",
+            "wer": 0.0
+          },
+          {
+            "path": "p262/p262_001_mic1.wav",
+            "reference": "Please call Stella.",
+            "transcript": "Please call Speller.",
+            "wer": 0.3333333333333333
+          },
+          {
+            "path": "p351/p351_001_mic1.wav",
+            "reference": "Please call Stela.",
+            "transcript": "Please call Stella.",
+            "wer": 0.3333333333333333
+          },
+          {
+            "path": "p244/p244_060_mic2.wav",
+            "reference": "We have got to deliver.",
+            "transcript": "We do not spoil the world.",
+            "wer": 1.0
+          },
+          {
+            "path": "p237/p237_001_mic1.wav",
+            "reference": "Please call Stella.",
+            "transcript": "Please, fall stiller.",
+            "wer": 1.0
+          },
+          {
+            "path": "p281/p281_002_mic1.wav",
+            "reference": "Ask her to bring these things with her.",
+            "transcript": "I'd say to you, baby, say to you, Thanks.",
+            "wer": 1.0
+          },
+          {
+            "path": "p364/p364_001_mic1.wav",
+            "reference": "Please call Stella.",
+            "transcript": "He's old Stella.",
+            "wer": 0.6666666666666666
+          },
+          {
+            "path": "p254/p254_057_mic1.wav",
+            "reference": "The whole of Southern Africa is in",
+            "transcript": "So we'll just stop talking about this.",
+            "wer": 1.0
+          },
+          {
+            "path": "p239/p239_001_mic1.wav",
+            "reference": "Please call Stella.",
+            "transcript": "Please call Stella.",
+            "wer": 0.0
+          },
+          {
+            "path": "p300/p300_001_mic1.wav",
+            "reference": "Please call Stella.",
+            "transcript": "Please call Estella.",
+            "wer": 0.3333333333333333
+          },
+          {
+            "path": "p374/p374_001_mic1.wav",
+            "reference": "Please call Stella.",
+            "transcript": "Please, Paul Stull.",
+            "wer": 1.0
+          },
+          {
+            "path": "p255/p255_054_mic1.wav",
+            "reference": "That's the truth.",
+            "transcript": "Thanks for watching, and I'll see you guys in the next video.",
+            "wer": 3.6666666666666665
+          },
+          {
+            "path": "p240/p240_001_mic1.wav",
+            "reference": "Please call Stella.",
+            "transcript": "Please call Stella.",
+            "wer": 0.0
+          },
+          {
+            "path": "p306/p306_001_mic1.wav",
+            "reference": "Please call Stella.",
+            "transcript": "at least call Stella.",
+            "wer": 0.6666666666666666
+          },
+          {
+            "path": "p228/p228_053_mic1.wav",
+            "reference": "Here's a clue.",
+            "transcript": "The answer to you.",
+            "wer": 1.3333333333333333
+          },
+          {
+            "path": "p258/p258_058_mic2.wav",
+            "reference": "It should be devolved.",
+            "transcript": "Peace, and good night.",
+            "wer": 1.0
+          },
+          {
+            "path": "p244/p244_001_mic1.wav",
+            "reference": "Please call Stella.",
+            "transcript": "Please call Stella.",
+            "wer": 0.0
+          },
+          {
+            "path": "p313/p313_001_mic1.wav",
+            "reference": "Please call Stella.",
+            "transcript": "Please call the...",
+            "wer": 0.3333333333333333
+          },
+          {
+            "path": "p229/p229_055_mic1.wav",
+            "reference": "It has been a horrible, horrible time.",
+            "transcript": "There's my violin, Brian.",
+            "wer": 1.0
+          },
+          {
+            "path": "p262/p262_056_mic1.wav",
+            "reference": "The succession wasn't just content.",
+            "transcript": "This is such a huge intercept.",
+            "wer": 1.2
+          },
+          {
+            "path": "p254/p254_001_mic1.wav",
+            "reference": "Please call Stella.",
+            "transcript": "Please call Stella.",
+            "wer": 0.0
+          },
+          {
+            "path": "p318/p318_001_mic1.wav",
+            "reference": "Please call Stella.",
+            "transcript": "Please call Stella.",
+            "wer": 0.0
+          },
+          {
+            "path": "p237/p237_049_mic1.wav",
+            "reference": "We're in the Premier Division and we intend",
+            "transcript": "Well, good day, English people.",
+            "wer": 1.0
+          },
+          {
+            "path": "p281/p281_066_mic1.wav",
+            "reference": "The tournament has now been cancelled.",
+            "transcript": "You're totally charged with taxes.",
+            "wer": 1.0
+          },
+          {
+            "path": "p255/p255_001_mic1.wav",
+            "reference": "Please call Stella.",
+            "transcript": "Please call a stellar.",
+            "wer": 0.6666666666666666
+          },
+          {
+            "path": "p336/p336_001_mic1.wav",
+            "reference": "Please call Stella.",
+            "transcript": "Please call a stroller.",
+            "wer": 0.6666666666666666
+          },
+          {
+            "path": "p239/p239_071_mic1.wav",
+            "reference": "Then they scored two goals to win.",
+            "transcript": "I was not the right story.",
+            "wer": 1.0
+          },
+          {
+            "path": "p300/p300_056_mic2.wav",
+            "reference": "It comes on like a tidal wave.",
+            "transcript": "It has some work to do with all this.",
+            "wer": 1.1428571428571428
+          }
+        ]
+      },
+      "stage1_step300000_wide_test_bn.pt": {
+        "wer": 0.7761194029850746,
+        "mel_mse": 0.005704158451408148,
+        "rows": [
+          {
+            "path": "p228/p228_001_mic1.wav",
+            "reference": "Please call Stella.",
+            "transcript": "Please pull, Stella.",
+            "wer": 0.3333333333333333
+          },
+          {
+            "path": "p258/p258_001_mic1.wav",
+            "reference": "Please call Stella.",
+            "transcript": "It is coming.",
+            "wer": 1.0
+          },
+          {
+            "path": "p340/p340_001_mic1.wav",
+            "reference": "Please call Stella.",
+            "transcript": "We just got a start.",
+            "wer": 1.6666666666666667
+          },
+          {
+            "path": "p240/p240_053_mic2.wav",
+            "reference": "Hopefully it will be built by next",
+            "transcript": "Thank you.",
+            "wer": 1.0
+          },
+          {
+            "path": "p229/p229_001_mic1.wav",
+            "reference": "Please call Stella.",
+            "transcript": "She is Col Stella.",
+            "wer": 1.0
+          },
+          {
+            "path": "p262/p262_001_mic1.wav",
+            "reference": "Please call Stella.",
+            "transcript": "Please call Stella.",
+            "wer": 0.0
+          },
+          {
+            "path": "p351/p351_001_mic1.wav",
+            "reference": "Please call Stela.",
+            "transcript": "Please call Stella.",
+            "wer": 0.3333333333333333
+          },
+          {
+            "path": "p244/p244_060_mic2.wav",
+            "reference": "We have got to deliver.",
+            "transcript": "That was it for you.",
+            "wer": 1.0
+          },
+          {
+            "path": "p237/p237_001_mic1.wav",
+            "reference": "Please call Stella.",
+            "transcript": "Please call Stella.",
+            "wer": 0.0
+          },
+          {
+            "path": "p281/p281_002_mic1.wav",
+            "reference": "Ask her to bring these things with her.",
+            "transcript": "Actually, the bonus will be fixed.",
+            "wer": 1.0
+          },
+          {
+            "path": "p364/p364_001_mic1.wav",
+            "reference": "Please call Stella.",
+            "transcript": "He's called Stella.",
+            "wer": 0.6666666666666666
+          },
+          {
+            "path": "p254/p254_057_mic1.wav",
+            "reference": "The whole of Southern Africa is in",
+            "transcript": "Sound of the state of the top of the",
+            "wer": 1.0
+          },
+          {
+            "path": "p239/p239_001_mic1.wav",
+            "reference": "Please call Stella.",
+            "transcript": "Please call Stella.",
+            "wer": 0.0
+          },
+          {
+            "path": "p300/p300_001_mic1.wav",
+            "reference": "Please call Stella.",
+            "transcript": "Please call Stella.",
+            "wer": 0.0
+          },
+          {
+            "path": "p374/p374_001_mic1.wav",
+            "reference": "Please call Stella.",
+            "transcript": "Please call Stur.",
+            "wer": 0.3333333333333333
+          },
+          {
+            "path": "p255/p255_054_mic1.wav",
+            "reference": "That's the truth.",
+            "transcript": "Thanks, please.",
+            "wer": 1.0
+          },
+          {
+            "path": "p240/p240_001_mic1.wav",
+            "reference": "Please call Stella.",
+            "transcript": "Please call Stella.",
+            "wer": 0.0
+          },
+          {
+            "path": "p306/p306_001_mic1.wav",
+            "reference": "Please call Stella.",
+            "transcript": "It is called Stella.",
+            "wer": 1.0
+          },
+          {
+            "path": "p228/p228_053_mic1.wav",
+            "reference": "Here's a clue.",
+            "transcript": "He'll see.",
+            "wer": 1.0
+          },
+          {
+            "path": "p258/p258_058_mic2.wav",
+            "reference": "It should be devolved.",
+            "transcript": "Here's some filigree.",
+            "wer": 1.0
+          },
+          {
+            "path": "p244/p244_001_mic1.wav",
+            "reference": "Please call Stella.",
+            "transcript": "Peace call, Stella.",
+            "wer": 0.6666666666666666
+          },
+          {
+            "path": "p313/p313_001_mic1.wav",
+            "reference": "Please call Stella.",
+            "transcript": "Please call Stella.",
+            "wer": 0.0
+          },
+          {
+            "path": "p229/p229_055_mic1.wav",
+            "reference": "It has been a horrible, horrible time.",
+            "transcript": "Best moment of my time.",
+            "wer": 0.8571428571428571
+          },
+          {
+            "path": "p262/p262_056_mic1.wav",
+            "reference": "The succession wasn't just content.",
+            "transcript": "I think it's time to listen to this thing.",
+            "wer": 1.8
+          },
+          {
+            "path": "p254/p254_001_mic1.wav",
+            "reference": "Please call Stella.",
+            "transcript": "Please call Stella.",
+            "wer": 0.0
+          },
+          {
+            "path": "p318/p318_001_mic1.wav",
+            "reference": "Please call Stella.",
+            "transcript": "Please call Stella.",
+            "wer": 0.0
+          },
+          {
+            "path": "p237/p237_049_mic1.wav",
+            "reference": "We're in the Premier Division and we intend",
+            "transcript": "We are tearing this country",
+            "wer": 1.0
+          },
+          {
+            "path": "p281/p281_066_mic1.wav",
+            "reference": "The tournament has now been cancelled.",
+            "transcript": "Which are unenchanted passions",
+            "wer": 1.0
+          },
+          {
+            "path": "p255/p255_001_mic1.wav",
+            "reference": "Please call Stella.",
+            "transcript": "So it's called Stella.",
+            "wer": 1.0
+          },
+          {
+            "path": "p336/p336_001_mic1.wav",
+            "reference": "Please call Stella.",
+            "transcript": "Please call Stella.",
+            "wer": 0.0
+          },
+          {
+            "path": "p239/p239_071_mic1.wav",
+            "reference": "Then they scored two goals to win.",
+            "transcript": "I will stand till the risk here",
+            "wer": 1.0
+          },
+          {
+            "path": "p300/p300_056_mic2.wav",
+            "reference": "It comes on like a tidal wave.",
+            "transcript": "It's not a waste of problems.",
+            "wer": 1.0
+          }
+        ]
+      }
+    }
+  }
+}
