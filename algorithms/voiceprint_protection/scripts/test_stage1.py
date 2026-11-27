@@ -21,9 +21,11 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import audio_utils  # noqa: E402
 import config  # noqa: E402
 from stage1 import losses as stage1_losses  # noqa: E402
 from stage1.model import Stage1Model, count_parameters  # noqa: E402
+from stage2.models import TorchAutoVCStage1  # noqa: E402
 
 FAILURES: list[str] = []
 
@@ -167,8 +169,17 @@ def test_padding() -> None:
         check(f"{frames} 帧 -> 补到 {padded.shape[0]}（freq={freq} 的倍数）",
               padded.shape[0] % freq == 0, f"实际 {padded.shape}")
         check(f"原始帧数被记住（{original}）", original == frames)
-        check("补齐是零填充，不改动原有帧",
-              np.array_equal(padded[:frames], mel))
+        check("补齐使用当前 mel 预设的真实静音值，不改动原有帧",
+              np.array_equal(padded[:frames], mel)
+              and np.allclose(padded[frames:], audio_utils.model_mel_padding_value()))
+        torch_padded = TorchAutoVCStage1._pad(
+            type("PadHolder", (), {"pad_base": freq})(),
+            torch.from_numpy(mel).unsqueeze(0),
+        )
+        check("Stage 2 torch 补齐使用同一个静音值",
+              torch.allclose(torch_padded[:, frames:],
+                             torch.full_like(torch_padded[:, frames:],
+                                             audio_utils.model_mel_padding_value())))
 
     # 关键回归：帧数不是 freq 的整数倍时，编码器**不能越界**
     torch.manual_seed(config.SEED)

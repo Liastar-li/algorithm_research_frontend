@@ -122,8 +122,8 @@ class WhisperScorer:
         print(f"加载 Whisper 模型：{self.model_name}（{device}/{compute_type}）…")
         self.model = WhisperModel(self.model_name, device=device, compute_type=compute_type)
 
-    def transcribe(self, wav: np.ndarray, sample_rate: int) -> str:
-        segments, _ = self.model.transcribe(wav, language="en", beam_size=1)
+    def transcribe(self, wav: np.ndarray, sample_rate: int, **decode_options) -> str:
+        segments, _ = self.model.transcribe(wav, language="en", beam_size=1, **decode_options)
         return " ".join(segment.text.strip() for segment in segments).strip()
 
 

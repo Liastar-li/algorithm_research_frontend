@@ -1,5 +1,89 @@
 # 成员 B 的逐步操作手册（Stage 2 → 交付）
 
+> ⚠️ **2026-11-25 论文复现路线更正，先读 `docs/experiments.md` §4i**。
+> Stage 2 的 `L_de` 参照已改为论文要求的 `E_spk(V(x))`，`h_adv` 已改回直接相加，
+> GAN 梯度隔离与静音 mel 填充也已修复。§4g 的旧 oracle 0.42–0.45 和旧 α 扫描是错误参照下的历史结果，
+> 不能继续作为开台依据。修正后的两条短音频 oracle 最低为 0.5836，仍未接近论文 0.13。
+> 正式 GE2E 入口复核 rebuilt Top-1 仍为 0.2143（4 人）与 A 的全量 0.229 一致，
+> 所以当前应先验证 `W_s`、做 Stage 1 学习率受控短训，再重训 Stage 2，不建议直接烧 200k。
+> 下文保留原操作步骤与历史数字，方便复查，不再执行旧闸门。
+
+### 当前路线的可复现实验命令
+
+在仓库根目录执行。为每个实验指定独立输出目录。以下是 Windows PowerShell 的 CPU 短训配置，种子为 42，三臂均从同一组随机初始化的 AutoVC 和上游预训练 GE2E 开始。
+
+```powershell
+$py = 'D:/conda/envs/vpp/python.exe'
+$env:VPP_DATA_ROOT = 'D:/vpp/data'
+$env:NUMBA_CACHE_DIR = "$PWD/results/member_b/numba"
+$env:OMP_NUM_THREADS = '3'
+$env:MKL_NUM_THREADS = '3'
+$env:OPENBLAS_NUM_THREADS = '1'
+$env:PYTHONIOENCODING = 'utf-8'
+$root = 'results/member_b'
+$train = 'algorithms/voiceprint_protection/stage1/train.py'
+$scripts = 'algorithms/voiceprint_protection/scripts'
+$ws = "$root/stage1_classifier/stage1_speaker_classifier.pt"
+
+& $py -u $train --stage classifier --iterations 2000 --batch-size 16 --num-workers 0 --device cpu --seed 42 --output-dir "$root/stage1_classifier"
+& $py "$scripts/verify_stage1_classifier.py" $ws --output "$root/classifier_audit.json"
+
+$common = @('--stage', 'model', '--iterations', '100', '--batch-size', '2', '--accum-steps', '1', '--seed', '42', '--lr', '0.0001', '--num-workers', '0', '--device', 'cpu', '--val-every', '0', '--save-every', '0', '--log-every', '10', '--classifier-checkpoint', $ws)
+& $py -u $train @common --freeze-speaker-encoder --output-dir "$root/stage1_frozen"
+& $py -u $train @common --speaker-lr 0.00001 --output-dir "$root/stage1_lr1e5"
+& $py -u $train @common --speaker-lr 0.0001 --output-dir "$root/stage1_lr1e4"
+
+# 用本地 faster-whisper 模型目录替换占位符；省略该参数时只测身份和内容码。
+$whisper = '<本地 faster-whisper 模型目录>'
+$werRef = "$root/release_identity_bounded.json"
+& $py "$scripts/diagnose_stage1_embedding_frontend.py" --speaker-count 4 --whisper-model $whisper --output $werRef
+foreach ($arm in 'frozen', 'lr1e5', 'lr1e4') {
+    & $py "$scripts/diagnose_stage1_embedding_frontend.py" --speaker-count 4 --checkpoint "$root/stage1_$arm/stage1_model.pt" --classifier-checkpoint $ws --whisper-model $whisper --wer-reference-report $werRef --output "$root/stage1_$arm/identity.json"
+}
+```
+
+分类器审计对固定裁剪的每个训练说话人抽 5 段，报告准确率、预测熵及两份权重的 SHA-256。短训评测沿用 Release 校准报告的固定样本清单，报告上游 GE2E 的同人/异人余弦差、重建 Top-1、Sim_prot，并将内容码最近参考样本的 Top-1 与分类器的内容窗口预测熵一起观察。相对 WER 统一采用 Whisper-small、temperature=0、每次解码最多 48 个新 token。三臂共用同一裁剪原音的转写及声码器参照结果。该短训用于排查和选学习率，正式比较需要更大训练预算及完整评测。
+
+修正后的 Stage 2 训练日志中，`sim_clone` 在 `--de-space` 指定的空间里用 `E_spk(V(x))` 作参照，`sim_prot` 使用生成扰动的编码器空间，拆分空间时 `prot@de` 记录防御考核空间的保护相似度。下文出现的 `sim@de` 均为旧日志字段。重训 G 请使用新目录开始，保留旧 checkpoint 用于回查历史结果。
+
+### 单卡云机的第一轮对照
+
+本地 `results/member_b/` 下的 `stage1_cloud_source.tar.gz` 包含本轮代码，`vctk_stage1_cloud.tar.gz` 包含 11,000 条已转 16 kHz 的音频、划分清单、上游 GE2E 和 HiFi-GAN。将这两个归档和 `stage1_classifier/stage1_speaker_classifier.pt` 上传到云机用户主目录。解包后使用本轮已验证的分类器，回传模型到本地做 Whisper 评测。
+
+```bash
+set -e
+mkdir -p "$HOME/vpp-b" "$HOME/vpp/data"
+tar -xzf "$HOME/stage1_cloud_source.tar.gz" -C "$HOME/vpp-b"
+tar -xzf "$HOME/vctk_stage1_cloud.tar.gz" -C "$HOME/vpp/data"
+cd "$HOME/vpp-b"
+export VPP_DATA_ROOT="$HOME/vpp/data"
+nvidia-smi
+bash scripts/cloud_train_stage1.sh --setup --skip-data --training-only
+py="$HOME/vpp-venv/bin/python"
+"$py" -c 'import torch; assert torch.cuda.is_available(); print(torch.cuda.get_device_name(0))'
+sha256sum "$HOME/stage1_speaker_classifier.pt" "$VPP_DATA_ROOT/models/default/encoder.pt"
+```
+
+分类器与上游 GE2E 的 SHA-256 应匹配 `results/member_b/classifier_audit.json`。在独立的 `tmux` 会话中从同一初始化各跑 1,000 步，先测吞吐、显存和验证趋势，再根据实际报价及评测结果决定是否扩大步数。
+
+```bash
+set -eo pipefail
+cd "$HOME/vpp-b"
+export VPP_DATA_ROOT="$HOME/vpp/data"
+py="$HOME/vpp-venv/bin/python"
+train=algorithms/voiceprint_protection/stage1/train.py
+root=results/member_b_cuda
+mkdir -p "$root"
+common=(--stage model --device cuda --iterations 1000 --batch-size 16 --seed 42
+  --lr 0.0001 --max-hours 0.5 --save-every 1000 --val-every 1000 --keep-step-weights
+  --classifier-checkpoint "$HOME/stage1_speaker_classifier.pt")
+"$py" -u "$train" "${common[@]}" --freeze-speaker-encoder --output-dir "$root/frozen" 2>&1 | tee "$root/frozen.log"
+"$py" -u "$train" "${common[@]}" --speaker-lr 0.00001 --output-dir "$root/lr1e5" 2>&1 | tee "$root/lr1e5.log"
+"$py" -u "$train" "${common[@]}" --speaker-lr 0.0001 --output-dir "$root/lr1e4" 2>&1 | tee "$root/lr1e4.log"
+```
+
+将每组 `stage1_step1000.pt`、`stage1_history.json` 和日志取回本地。若任一组触及时限，日志和部分权重仍可用于诊断，等各组步数对齐后再横向比较。训练时限只控制 Python 进程，云资源的计费以控制台状态为准。
+
 > **什么时候用这本手册**：成员 A 的**正式 Stage 1 checkpoint** 到手之后。
 > **开始条件**：
 > 1. A 交来的 `stage1_model.pt` 里 `step >= 1000`（3 步的冒烟产物会被代码直接拒绝）；
@@ -12,6 +96,8 @@
 >    （两者嵌入只相关 0.518）。装上 checkpoint 里的微调 E2E 后
 >    **Sim_prot = 0.999996，**M3 已通过（见 `docs/experiments.md` §4e）。
 >    ⇒ **Stage 1 不用重训，Stage 2 可以开训。**
+>    ⚠️ 这句话已被 §1.4.1 与 `docs/experiments.md` §4i 推翻，0.999996 是空间塌缩的产物，
+>    上游口径 rebuilt Top-1 仍只有 0.229，当前不能据此判定 Stage 1 已科学达标。
 >
 > **手册的用法**：从上往下按顺序做。每一步都有「**看什么数**」和「**不对怎么办**」。
 > 全程约 **3–4 天**（云机按小时计费，别让实例空开着）。
@@ -423,7 +509,8 @@ python -u algorithms/voiceprint_protection/stage2/train.py \
 · 剩下的解释按顺序查：**α 的角度预算**（见下）、Stage 1 解码链能不能把小扰动放大、
   以及"论文那个 0.13 到底是拿哪个 E_spk 量的"。
 
-> ★ **α 的角度预算是硬的**：`perturb_embedding()` 做的是 `h_adv = normalize(h + α·δ)`，
+> ★ **α 的角度预算是硬的**：这轮历史实验里的 `perturb_embedding()` 做的是
+> `h_adv = normalize(h + α·δ)`，当前代码已按论文改回 `h_adv = h + α·δ`。
 > 实测 `‖h‖ = 1`、随机初始化的 `‖δ‖ ≈ 1` ⇒ α=0.10 时 h_adv 只偏离 **5.73°**（cos ≥ 0.995）。
 > 也就是说防御全靠"5.7° 的嵌入偏移经 Stage 1 + 声码器之后，被**另一个** GE2E 读出大变化"。
 >
@@ -448,7 +535,9 @@ D:/conda/envs/vpp/python.exe -u algorithms/voiceprint_protection/stage2/diagnose
 | `L_de` 也压不动 | **α 预算 + 放大链根本到不了论文量级** | **不要开**，200k 步是白烧代金券 |
 | 要靠 `‖δ‖` 涨到远大于 1 才降得动 | 角度预算被偷偷放大，等于换了个方法 | 报告口径必须注明，且论文 α=0.1 不可比 |
 
-**实测（2026-11-25，本机 CPU，`--delta-mode unit`，4 条 × 2 s，Adam lr 0.05）**
+**实测（历史目标，2026-11-25，本机 CPU，`--delta-mode unit`，4 条 × 2 s，Adam lr 0.05）**
+> ⚠️ 下表参照实际取的是原始录音 `x`，不是论文式(12) 的 `V(x)`，所以 0.42–0.45 已作废。
+> 当前代码与修正后结果见 `docs/experiments.md` §4i.3。
 
 | 版本 | 步 1 | 10 | 20 | 30 | 40 | 50 | 角度预算 |
 |---|---|---|---|---|---|---|---|
@@ -475,7 +564,8 @@ D:/conda/envs/vpp/python.exe -u algorithms/voiceprint_protection/stage2/diagnose
 > **跨运行的单点数字要按 ±0.05 抖动读**。现已改调 `stage2.common.set_seed()`，
 > 用当前代码重跑即可逐位复现。
 
-**α 扫描（正式版：每档 40 步、等预算 `‖δ‖=1`，`stage2/diagnose_alpha_sweep.py`）**
+**α 扫描（历史目标，正式版为每档 40 步、等预算 `‖δ‖=1`，`stage2/diagnose_alpha_sweep.py`）**
+> ⚠️ 这张表也使用原始录音参照，只能保留作历史记录，修正目标后需要重跑。
 
 | α | 角度 | 优化后 Sim_clone | 相对随机 δ 学到 | Sim_prot@upstream | mel  MSE |
 |---|---|---|---|---|---|
@@ -500,22 +590,13 @@ D:/conda/envs/vpp/python.exe -u algorithms/voiceprint_protection/stage2/diagnose
 
 ### 4.2 正式训练（200k 步）
 
-> ★★ **2026-11-25 的开台闸门（先读这段再决定要不要花钱）**：
-> §4.1.1 的三连预检 + 自由 δ oracle 给出的结论是
-> **在 α=0.1 的角度预算内，上游口径的 `L_de` 地板 ≈ 0.42–0.45**（无防御 0.583，G 已训到 0.52），
-> 而论文目标是 0.13 ⇒ **200k 步最多只能再买 0.07，不值得烧代金券**。
-> 开台前必须满足其中一条：
-> ① oracle 在等预算（`‖δ‖=1`）下把 `L_de` 压到 **0.3 以下**（说明是 G 的优化问题，不是链路问题）；
-> ② 组里决定**偏离论文的 α**（比如 α=0.5，并同时在报告里给 α–Sim_clone 曲线与可听度）；
-> ③ 先修 Stage 1 的放大链（`upstream_speaker_top1 rebuilt` 只有 **0.229** ⇒ 重建本身不够干净）。
-> 三条都不满足时，**本节的所有命令都不要执行**。
-> 替代交付路径见 §5.1（三条基线）+ §4.1.1 末尾（α–Sim_clone 曲线），两条都不花钱。
->
-> ✅ **2026-11-25 决定（成员 B 与发起人确认）：不开台。** 上面三条闸门一条都没被满足
-> （oracle 等预算地板 0.42–0.45、没改 α、Stage 1 的 `rebuilt` 仍是 0.229），
-> 所以本节的 200k 命令**保持"不执行"状态**，交付改走 §5.1 三条基线 + α 曲线 +
-> experiments.md §4g 的负结果分析。留着这段是为了说明**为什么不烧这笔钱**，
-> 以及将来若有人把闸门①/②/③真做通了，按原命令开台即可。
+> ★★ **2026-11-25 修正后的开台闸门，旧 0.42–0.45 量化依据已作废**。
+> 当前仍决定**暂不开 Stage 2 的 200k 步**，但理由更新为，修正 `L_de=E_spk(V(x))` 后，
+> 两条短音频的等预算 oracle 最低仍为 **0.5836**，论文目标是 **0.13**，
+> 且 Stage 1 的 upstream rebuilt Top-1 只有 **0.229**、绝对 WER 超过 100%。
+> 开台前先完成 `docs/experiments.md` §4i.5 的 Stage 1 受控短训与 `W_s` 验证。
+> 只有 Stage 1 的身份 gap、rebuilt Top-1 和 WER 明显恢复，再用修正目标重跑 G 与更大样本 oracle，
+> 才重新评估本节命令。旧基线、旧 α 曲线继续作为保底交付，但不得标成论文复现结果。
 
 
 ```bash

@@ -306,13 +306,15 @@ def pad_mel_to_freq(mel: np.ndarray, freq: int | None = None) -> tuple[np.ndarra
     """
     import numpy as np
 
+    import audio_utils
+
     freq = freq or config.AUTOVC_MODEL["freq"]
     original = mel.shape[0]
     padding = (-original) % freq
     if padding == 0:
         return mel, original
     padded = np.pad(np.asarray(mel, dtype=np.float32), ((0, padding), (0, 0)),
-                    mode="constant")
+                    mode="constant", constant_values=audio_utils.model_mel_padding_value())
     return padded, original
 
 

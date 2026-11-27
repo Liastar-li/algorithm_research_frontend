@@ -60,8 +60,8 @@ def main():
     with torch.no_grad():
         original_mel = pipeline.mel(waveforms)
         h = speaker(waveforms.float(), lengths)
-        reference = de_encoder(waveforms.float(), lengths)
         original_waveform = pipeline.vocode(original_mel).float()
+        reference = de_encoder(original_waveform, lengths)
         content_codes = pipeline.content(original_mel, h)
     permutation = torch.tensor([(i + 1) % args.count for i in range(args.count)])
 
@@ -125,7 +125,7 @@ def main():
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(json.dumps({
-        "note": "等预算 ‖δ‖=1 的自由 δ 上界；L_de = 上游 GE2E 口径的 Sim_clone（要最小化）",
+        "note": "等预算 ‖δ‖=1 的自由 δ 上界；L_de = sim(E_spk(V(x_clone)), E_spk(V(x)))",
         "count": args.count, "max_seconds": args.max_seconds, "steps": args.steps,
         "lr": args.lr, "delta_mode": "unit", "rows": rows,
     }, ensure_ascii=False, indent=2), encoding="utf-8")

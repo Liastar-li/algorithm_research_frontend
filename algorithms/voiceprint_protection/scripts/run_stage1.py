@@ -111,8 +111,8 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Stage 1 一条龙")
     parser.add_argument("--steps", default="prepare,train_classifier,train_model,evaluate",
                         help="要跑哪几步（逗号分隔）")
-    parser.add_argument("--iterations", type=int, default=20000,
-                        help="第 2 步（解耦网络）的训练步数")
+    parser.add_argument("--iterations", type=int, default=500_000,
+                        help="第 2 步（解耦网络）的训练步数，默认与论文一致为 500k")
     parser.add_argument("--classifier-iterations", type=int, default=2000,
                         help="第 1 步（W_s）的训练步数")
     parser.add_argument("--smoke", action="store_true",
@@ -162,7 +162,7 @@ def main() -> int:
         print("        = 它越猜不出说话人 = ★解耦成功）")
         print("      ⚠️ 2026-11-20 修过一个符号 bug（实现多了一个负号，方向反了），")
         print("         现在 dis 的范围是 [−4.38, 0]，**越负越好**。")
-        print("  【别直接上 50 万步】先用 5k~20k 看曲线形状，形状对了再拉长。")
+        print("  【别直接上 50 万步】正式一条龙默认已对齐论文的 500k，先用 5k~20k 看曲线形状，形状对了再拉长。")
         print("  【断了怎么办】重跑加 --resume，从最近的断点接着跑。")
         code = run([PYTHON, str(train_script), "--stage", "model",
                     "--iterations", str(iterations),

@@ -298,14 +298,11 @@ def compute_losses(batch, pipeline: Stage2Pipeline, generator, discriminator,
     cloned_waveform = cloned_waveform.float()
 
     # -- 6b. L_de 在**哪个空间**度量 ---------------------------------------
-    #   δ 生成用的空间（pipeline.speaker）与防御考核用的空间（pipeline.de_speaker）
-    #   默认是同一个（= 论文原意）。用 --de-space 拆开时，参照嵌入要在目标空间重算。
     de_encoder = pipeline.de_speaker
-    if de_encoder is pipeline.speaker:
-        de_reference = original_embedding
-    else:
-        with torch.no_grad():
-            de_reference = _speak_fp32(waveforms, de_encoder)
+    with torch.no_grad():
+        # 论文式(12) 的参照是 E_spk(V(x))，不是 E_spk(x) 原始录音。
+        de_reference = _speak_fp32(original_waveform, de_encoder)
+    cloned_de_embedding = _speak_fp32(cloned_waveform, de_encoder)
 
     # -- 7. 算损失 --------------------------------------------------------
     thresholds = pipeline.thresholds(original_waveform)
@@ -315,9 +312,7 @@ def compute_losses(batch, pipeline: Stage2Pipeline, generator, discriminator,
         # ★ 消融：论文 Table 2 的 "w/o L_mel" —— 只留 L_mask
         use_mel_loss=not args.no_mel_loss,
     )
-    defense = loss_module.defense_loss(
-        _speak_fp32(cloned_waveform, de_encoder), de_reference
-    )
+    defense = loss_module.defense_loss(cloned_de_embedding, de_reference)
     gan = loss_module.generator_gan_loss(discriminator(protected_mel))
 
     total = loss_module.generator_loss(
@@ -325,12 +320,12 @@ def compute_losses(batch, pipeline: Stage2Pipeline, generator, discriminator,
         lambda_de=args.lambda_de, lambda_per=args.lambda_per, lambda_gan=args.lambda_gan,
     )
 
-    # 拆开两个空间时，另一口径的 Sim_clone 只在"要写日志那一步"算 —— 每次多一整趟
-    # GE2E 前向，本机纯 CPU 下不便宜（--log-every 50 时约多 3% 时间）。
-    sim_clone_de = None
+    sim_clone = cosine_similarity(cloned_de_embedding, de_reference).mean()
+    sim_prot = cosine_similarity(stolen_embedding, original_embedding).mean()
+    sim_prot_de_space = None
     if measure_dual and de_encoder is not pipeline.speaker:
         with torch.no_grad():
-            sim_clone_de = cosine_similarity(
+            sim_prot_de_space = cosine_similarity(
                 _speak_fp32(protected_waveform, de_encoder), de_reference
             ).mean()
 
@@ -345,8 +340,9 @@ def compute_losses(batch, pipeline: Stage2Pipeline, generator, discriminator,
         "protected_mel": protected_mel.detach(),
         "original_mel": original_mel.detach(),
         # 指标
-        "sim_clone": cosine_similarity(stolen_embedding, original_embedding).mean(),
-        "sim_clone_de_space": sim_clone_de,
+        "sim_clone": sim_clone,
+        "sim_prot": sim_prot,
+        "sim_prot_de_space": sim_prot_de_space,
     }
 
 
@@ -380,7 +376,7 @@ def parse_args(argv=None) -> argparse.Namespace:
                         help="Stage 2 用哪个 E_spk：stage1=随 Stage 1 微调过的那个（论文原意）；"
                              "upstream=上游 GE2E。默认按 checkpoint 内容自动选。")
     parser.add_argument("--de-space", choices=("stage1", "upstream"), default=None,
-                        help="★ L_de（以及日志里的 sim_clone_de_space）在**哪个空间**度量，"
+                        help="★ L_de（以及日志里的 sim_prot_de_space）在**哪个空间**度量，"
                              "默认跟 --speaker-encoder 一致。"
                              "A 的 250k JSON 显示微调后的 GE2E 已塌缩（不同说话人余弦 0.896），"
                              "在那个空间里 L_de 几乎没有梯度信号 ⇒ 需要 --de-space upstream："
@@ -420,6 +416,64 @@ def parse_args(argv=None) -> argparse.Namespace:
                              "过拟合测试里如果 L_de 都不降，说明梯度链在这个空间里没用，"
                              "开云机就是白烧钱。产物不是交付物。")
     return parser.parse_args(argv)
+
+
+def train_step(batch, pipeline, generator, discriminator,
+               optimizer_g, optimizer_d, scaler, args, device,
+               autocast_enabled: bool = False, measure_dual: bool = False):
+    optimizer_g.zero_grad(set_to_none=True)
+    optimizer_d.zero_grad(set_to_none=True)
+    discriminator.requires_grad_(False)
+
+    last = None
+    accum_total = max(1, args.accum_steps)
+    for accum_index in range(accum_total):
+        last = compute_losses(batch, pipeline, generator, discriminator,
+                              args, device, autocast_enabled=autocast_enabled,
+                              measure_dual=measure_dual and accum_index == accum_total - 1)
+        scaled = last["total"] / accum_total
+        if args.amp:
+            scaler.scale(scaled).backward()
+        else:
+            scaled.backward()
+
+    discriminator_loss_value = torch.zeros((), device=device)
+    update_discriminator = args.lambda_gan > 0 and last is not None
+    if update_discriminator:
+        discriminator.requires_grad_(True)
+        real_scores = discriminator(last["original_mel"])
+        fake_scores = discriminator(last["protected_mel"])
+        discriminator_loss_value = loss_module.discriminator_gan_loss(
+            real_scores, fake_scores
+        )
+        if args.amp:
+            scaler.scale(discriminator_loss_value).backward()
+        else:
+            discriminator_loss_value.backward()
+
+    if args.amp:
+        scaler.unscale_(optimizer_g)
+        if update_discriminator:
+            scaler.unscale_(optimizer_d)
+    if args.clip_grad and args.clip_grad > 0:
+        torch.nn.utils.clip_grad_norm_(
+            [p for p in generator.parameters() if p.requires_grad], args.clip_grad
+        )
+        if update_discriminator:
+            torch.nn.utils.clip_grad_norm_(
+                [p for p in discriminator.parameters() if p.requires_grad],
+                args.clip_grad,
+            )
+    if args.amp:
+        scaler.step(optimizer_g)
+        if update_discriminator:
+            scaler.step(optimizer_d)
+        scaler.update()
+    else:
+        optimizer_g.step()
+        if update_discriminator:
+            optimizer_d.step()
+    return last, discriminator_loss_value
 
 
 def make_scaler(enabled: bool):
@@ -507,6 +561,8 @@ def main() -> int:
     checkpoint_meta = {
         "speaker_encoder": args.speaker_encoder,
         "de_space": args.de_space,
+        "de_reference": "E_spk(V(x))",
+        "h_adv": "h + alpha * delta",
         "alpha": args.alpha,
         "stage1_checkpoint": str(args.stage1_checkpoint) if args.stage1_checkpoint else None,
         "train_args": {
@@ -575,8 +631,8 @@ def main() -> int:
     started = time.time()
     deadline = started + args.max_hours * 3600 if args.max_hours else None
     header = (f"{'步':>8}  {'total':>9} {'gan':>8} {'de':>8} {'per':>9} "
-              f"{'mel':>9} {'mask':>8} {'sim_clone':>10}")
-    header += f"{'sim@de':>9} " if split_spaces else " "
+              f"{'mel':>9} {'mask':>8} {'sim_prot':>10} {'sim_clone':>10}")
+    header += f"{'prot@de':>9} " if split_spaces else " "
     header += f"{'it/s':>6} {'剩余':>8}"
     print(header)
     print("-" * 68)
@@ -592,63 +648,15 @@ def main() -> int:
             if step >= args.steps:
                 break
 
-            optimizer_g.zero_grad(set_to_none=True)
-            optimizer_d.zero_grad(set_to_none=True)
-
-            # ---- 前向 + 反向（可累积）----------------------------------
-            last = None
-            # 只有"这一步要写日志"时才多算另一口径的 Sim_clone（多一次 GE2E 前向）
             measure_dual = split_spaces and (
                 (step + 1) % args.log_every == 0 or (step + 1) == args.steps)
-            accum_total = max(1, args.accum_steps)
-            for accum_index in range(accum_total):
-                last = compute_losses(batch, pipeline, generator, discriminator,
-                                      args, device, autocast_enabled=args.amp,
-                                      measure_dual=measure_dual
-                                      and accum_index == accum_total - 1)
-                scaled = last["total"] / max(1, args.accum_steps)
-                if args.amp:
-                    scaler.scale(scaled).backward()
-                else:
-                    scaled.backward()
 
-            # ---- 判别器的损失（x_adv 要 detach，否则会同时改生成器）--------
-            discriminator_loss_value = torch.zeros((), device=device)
-            update_discriminator = args.lambda_gan > 0 and last is not None
-            if update_discriminator:
-                real_scores = discriminator(last["original_mel"])
-                fake_scores = discriminator(last["protected_mel"])
-                discriminator_loss_value = loss_module.discriminator_gan_loss(
-                    real_scores, fake_scores
-                )
-                if args.amp:
-                    scaler.scale(discriminator_loss_value).backward()
-                else:
-                    discriminator_loss_value.backward()
-
-            # ---- 更新两个优化器（AMP 下要先 unscale 再裁剪）--------------
-            if args.amp:
-                scaler.unscale_(optimizer_g)
-                if update_discriminator:
-                    scaler.unscale_(optimizer_d)
-            if args.clip_grad and args.clip_grad > 0:
-                torch.nn.utils.clip_grad_norm_(
-                    [p for p in generator.parameters() if p.requires_grad], args.clip_grad
-                )
-                if update_discriminator:
-                    torch.nn.utils.clip_grad_norm_(
-                        [p for p in discriminator.parameters() if p.requires_grad],
-                        args.clip_grad,
-                    )
-            if args.amp:
-                scaler.step(optimizer_g)
-                if update_discriminator:
-                    scaler.step(optimizer_d)
-                scaler.update()          # ★ 一次更新里只调一次
-            else:
-                optimizer_g.step()
-                if update_discriminator:
-                    optimizer_d.step()
+            # ---- 前向、反向与更新 --------------------------------------
+            last, discriminator_loss_value = train_step(
+                batch, pipeline, generator, discriminator,
+                optimizer_g, optimizer_d, scaler, args, device,
+                autocast_enabled=args.amp, measure_dual=measure_dual,
+            )
 
             metrics = {
                 "total": float(last["total"].detach()),
@@ -659,10 +667,10 @@ def main() -> int:
                 "mask": float(last["mask"].detach()),
                 "d": float(discriminator_loss_value.detach()),
                 "sim_clone": float(last["sim_clone"].detach()),
+                "sim_prot": float(last["sim_prot"].detach()),
             }
-            if last["sim_clone_de_space"] is not None:
-                # ★ 这才是"攻击者那台机器"眼里的相似度 —— 预检要看的就是它有没有在降
-                metrics["sim_clone_de_space"] = float(last["sim_clone_de_space"])
+            if last["sim_prot_de_space"] is not None:
+                metrics["sim_prot_de_space"] = float(last["sim_prot_de_space"].detach())
             step += 1
 
             # -- 日志 --------------------------------------------------------
@@ -670,11 +678,12 @@ def main() -> int:
                 elapsed = time.time() - started
                 speed = step / max(elapsed, 1e-6)
                 remaining = (args.steps - step) / max(speed, 1e-9)
-                alt = (f"{metrics.get('sim_clone_de_space', float('nan')):>9.4f} "
+                alt = (f"{metrics.get('sim_prot_de_space', float('nan')):>9.4f} "
                        if split_spaces else " " * 10)
                 print(f"{step:>8}  {metrics['total']:>9.4f} {metrics['gan']:>8.4f} "
                       f"{metrics['de']:>8.4f} {metrics['per']:>9.4f} {metrics['mel']:>9.4f} "
-                      f"{metrics['mask']:>8.4f} {metrics['sim_clone']:>10.4f}"
+                      f"{metrics['mask']:>8.4f} {metrics['sim_prot']:>10.4f} "
+                      f"{metrics['sim_clone']:>10.4f}"
                       f"{alt}{speed:>6.2f} {_fmt_duration(remaining):>8}")
                 metrics["step"] = step
                 metrics["elapsed"] = round(elapsed, 1)

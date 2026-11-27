@@ -65,9 +65,9 @@
 | L1 推理链（体检 → 打疫苗 → 骗子行骗） | ✅ 已完成 | [`infer.py`](algorithms/voiceprint_protection/infer.py)；**已在本机用真权重跑通**（`encoder.pt` / `synthesizer.pt` / `vocoder.pt` 全部就位） |
 | 平台算法服务（FastAPI + CORS + 统一错误格式） | ✅ 已完成 | [`service.py`](algorithms/voiceprint_protection/service.py)；契约自测 **41/41**，另有可重复执行的端到端自检 `scripts/test_platform_e2e.py` |
 | 平台方法配置 + 索引登记 | ✅ 已完成 | [`public/methods/group_n005_voiceprint_protection.json`](public/methods/group_n005_voiceprint_protection.json) |
-| Stage 1（解耦-重建网络训练） | ✅ **已完成**（成员 A，2026-11-25 交付） | 权重挂在 GitHub Release `stage1-250k-bn`（250k 步 + BN 校准），本机按 **sha256 `14f7e07b…8832`** 与 A 的 JSON 对账通过、`step`/`speaker_encoder`/`model` 三段验真均 ✅。⚠️ **但它附带的评测口径要注意**：checkpoint 里微调过的 GE2E **空间已塌缩**（同人间 0.9453 / 异人间 0.8958），`Sim_prot ≈ 1` 在这个空间里没有意义 ⇒ 见 [`docs/experiments.md`](docs/experiments.md) §4g |
-| Stage 2（防御性扰动生成，**代码 + 训练器已就绪**） | 🟡 部分完成 | [`stage2/`](algorithms/voiceprint_protection/stage2/)；梯度通路自检 **20/20**；训练器已补齐**断点续训 / AMP / 梯度累积 / 梯度裁剪 / `--max-hours` / 吞吐 ETA**（2026-11-21）；✅ **成员 A 的 Stage 1 权重已到位**（可求导声码器 HiFi-GAN 16 kHz 已就位）；★ 新增 `--de-space`（δ 仍生成于微调空间、`L_de` 改考核**上游 GE2E**，梯度 **37.0 vs 7.34**）与 `--overfit N`（本机诊断用）；⛔ **200k 正式训练已决定不开台**（2026-11-25）—— 本机三连预检 + **等预算（`‖δ‖=1`）自由 δ oracle** 显示 α=0.1 的角度预算（**5.71°**）内上游口径 `L_de` 地板只有 **0.42–0.45**（G 已训到 0.52，论文 0.13）⇒ 200k 步期望收益 **≤ 0.07**，改走"负结果分析 + α–Sim_clone 曲线 + §5.1 三条基线"的不花钱路线；判据与实测见 [`docs/notes/member_b_runbook.md`](docs/notes/member_b_runbook.md) §4.1.1 与 [`docs/experiments.md`](docs/experiments.md) §4g，开台闸门与 200k 命令仍留在 runbook §4.2 / [`docs/notes/cloud_ecs_stage2.md`](docs/notes/cloud_ecs_stage2.md) 备用 |
-| 评测（Sim_prot / Sim_clone / DSR / WER） | 🟡 部分完成 | [`evaluate.py`](algorithms/voiceprint_protection/evaluate.py)；**基线与绝对 WER 已出**（见 [`docs/experiments.md`](docs/experiments.md) §3i）；★ 加了**双口径 E_spk 报告**（`--espk-space {auto,upstream,stage1_finetuned}` + `--dual-espk`，报告落盘 `espk_space` / `de_space` / `secondary_espk`）—— ✅ **2026-11-25 §5.1 三条基线已实测**（100 条 / upstream 口径：无防御 0.6698·0.6169·DSR(0.5) 9.0%，高斯噪声 0.6650·0.6163·12.0%，150 步短训 G 0.7029·0.6775·1.0%），两个必须知道的坑：**DSR 有无防御 9% 的链路地板**、**α=0.1 时短训 G 的净效果是负的**（Sim_clone 0.6169→0.6775），**同一份权重把 `--alpha` 提到 0.5 才转正**（0.5972，ΔDSR +4 个百分点，代价 Sim_prot −0.055），见 [`docs/experiments.md`](docs/experiments.md) §4h；⏳ 论文量级的「Ours」需要 200k 步权重，已按 §4.2 闸门决定不开台 |
+| Stage 1（解耦-重建网络） | 已交付 250k checkpoint，身份保持待改善 | 成员 A 在 `stage1-250k-bn` 发布了经 BN 校准的模型，SHA-256 已对账。上游 GE2E 口径下，全量测试的重建 Top-1 为 **0.229**。用同一批 4 名说话人复核正式 GE2E 波形入口后，重建 Top-1 为 **0.2143**，仍接近随机水平。见 [实验记录 §4i](docs/experiments.md)。 |
+| Stage 2（防御性扰动生成） | 训练器已通过真实模型冒烟，正式训练待启动 | 当前使用 `E_spk(V(x))` 作为防御损失参照，直接计算 `h + alpha * delta`。修正后的两条短音频 oracle 最低 **0.5836**。先验证分类器与 Stage 1 的重建身份、内容保持，再启动正式 Stage 2。见 [成员 B 操作手册](docs/notes/member_b_runbook.md)。 |
+| 评测（Sim_prot / Sim_clone / DSR / WER） | 基线与绝对 WER 已测，修正目标下的完整评测待完成 | 先前 100 条的上游 GE2E 评测中，无防御 DSR(0.5) 为 **9%**，高斯噪声为 **12%**，旧目标下 150 步短训 G 为 **1%**。相关数字及 α 扫描作为历史对照保存在 [实验记录 §4h–4i](docs/experiments.md)。 |
 | 心理声学掩蔽 θ_x（MPEG-1 模型） | ✅ 已完成 | [`stage2/psychoacoustics.py`](algorithms/voiceprint_protection/stage2/psychoacoustics.py) |
 
 ### 3.2 相对 baseline 做了什么
@@ -251,10 +251,7 @@ python algorithms/voiceprint_protection/scripts/smoke_test.py
    重新合成本身就会改变音色/韵律 —— **与扰动强弱无关**。
    论文的 0.95 需要 Stage 1 的解码器**重建原句**（内容码 c 保证"说了什么"不变，只换音色）。
    **→ 做到论文那组数字绕不开 Stage 1。**
-3. ~~**Stage 2 缺一个可求导的声码器**~~ → ✅ **已解决**（2026-11-19）：
-   `bridge_vocoder` 已换成 torch 版 HiFi-GAN（HF `speechbrain/tts-hifigan-libritts-16kHz`），
-   本身就可求导。剩下的阻塞只有**成员 A 的 Stage 1 权重**。
-   详见 [`docs/notes/stage2_blockers.md`](docs/notes/stage2_blockers.md)。
+3. **Stage 2 训练链路已跑通**。可求导 HiFi-GAN、成员 A 的 Stage 1 权重与修正后的损失已在真实 VCTK 音频上完成 3 步冒烟。正式训练前仍需复核 Stage 1 的重建身份与内容保持。详见[实验记录 §4i](docs/experiments.md)。
 4. **本机没有 NVIDIA GPU**（核显 + torch CPU 版）⇒ 论文量级必须上云机，
    流程见 [`docs/notes/cloud_ecs_stage2.md`](docs/notes/cloud_ecs_stage2.md)
    与 [`scripts/cloud_train_stage2.sh`](scripts/cloud_train_stage2.sh)。

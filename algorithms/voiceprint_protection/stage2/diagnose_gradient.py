@@ -76,13 +76,14 @@ def main():
     out["total"].backward()
     total_norm, per_layer = grad_norm(generator)
 
-    dual = out["sim_clone_de_space"]
+    sim_prot_de = out["sim_prot_de_space"]
     print("=" * 62)
     print(f"  L_de 在 **{de_space}** 空间  ⇒  ‖∂(λ_de·L_de)/∂θ_G‖ = {total_norm:.4e}")
     print("=" * 62)
     print(f"  de = {float(out['de'].detach()):.4f}   "
           f"sim_clone = {float(out['sim_clone'].detach()):.4f}   "
-          f"sim@de = {'—（两个空间同一个，不另算）' if dual is None else f'{float(dual.detach()):.4f}'}")
+          f"sim_prot = {float(out['sim_prot'].detach()):.4f}   "
+          f"prot@de = {'—（两个空间同一个，不另算）' if sim_prot_de is None else f'{float(sim_prot_de.detach()):.4f}'}")
     for name, value in per_layer.items():
         print(f"    {name:<22} {value:.4e}")
 

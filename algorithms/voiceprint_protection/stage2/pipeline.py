@@ -199,6 +199,7 @@ class Stage2Pipeline:
             f"{de_line}"
             f"  Stage 1    : {type(self.stage1).__name__}\n"
             f"  声码器     : {vocoder_name}（mel 口径：{self.vocoder_convention}）\n"
+            f"  L_de 参照  : E_spk(V(x))（论文式 12）\n"
             f"  模型侧 mel : {self.mel_preset_name}\n"
             f"  采样率     : {self.sample_rate} Hz\n"
             f"  STFT       : n_fft={self.n_fft} hop={self.hop_length}"

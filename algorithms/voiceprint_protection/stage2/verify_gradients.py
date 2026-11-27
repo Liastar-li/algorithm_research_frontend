@@ -97,7 +97,7 @@ def forward_pass(pipeline, generator, waveforms, lengths):
     cloned_waveform = pipeline.vocode(cloned_mel)
 
     defense = loss_module.defense_loss(pipeline.speaker(cloned_waveform, lengths),
-                                       original_embedding)
+                                       pipeline.speaker(original_waveform, lengths))
     perceptual = loss_module.perceptual_loss(original_mel, protected_mel,
                                               delta_waveform, None)
     return {

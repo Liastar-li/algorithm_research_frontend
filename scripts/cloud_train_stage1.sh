@@ -18,6 +18,7 @@
 #   --per-speaker N   每个说话人取几句（0 = 全部；调试 5，正式 0）
 #   --archive FILE    直接用现成数据包（.tar.gz），跳过下载与转换
 #   --skip-data       跳过数据准备（数据已就位时）
+#   --training-only   不下载 RTC 合成器、WaveRNN 和 Whisper（保持训练及本地验收所需权重）
 #   --batch-size N    批大小（默认用 config 里的值）
 #   --iterations N    训练步数（默认用 config 里的值）
 #   --stage NAME      classifier | model（默认 model）
@@ -49,9 +50,9 @@ ARCHIVE=""
 MAX_HOURS=""
 RESUME_CKPT=""
 SKIP_DATA=0
+TRAINING_ONLY=0
 ACTION=""
 
-export VPP_DATA_ROOT="$DATA_ROOT"
 export HF_ENDPOINT="${HF_ENDPOINT:-https://huggingface.co}"
 
 while [ $# -gt 0 ]; do
@@ -70,6 +71,7 @@ while [ $# -gt 0 ]; do
     --resume-ckpt) RESUME_CKPT="$2"; shift ;;
     --session) SESSION="$2"; shift ;;
     --skip-data) SKIP_DATA=1 ;;
+    --training-only) TRAINING_ONLY=1 ;;
     -h|--help)
       sed -n '2,40p' "${BASH_SOURCE[0]}"
       exit 0
@@ -81,6 +83,8 @@ while [ $# -gt 0 ]; do
   esac
   shift
 done
+
+export VPP_DATA_ROOT="$DATA_ROOT"
 
 say() {
   echo ""
@@ -136,11 +140,15 @@ fetch_weights() {
   #   比整个 --setup 挂掉好。
   #   ★ 三个脚本**都会跳过已存在的文件**（不联网），所以从本机传上来的权重不会重下。
   "$PY" "$pkg/download_encoder_weights.py" || echo "  [警告] encoder.pt 没下好（★ Stage 1 训练必需）"
-  "$PY" "$pkg/download_rtc_weights.py"    || echo "  [警告] synthesizer/vocoder 没下好（训练用不到；平台服务才需要）"
   "$PY" "$pkg/download_hifigan_weights.py" || echo "  [警告] hifigan_16k.ckpt 没下好（★ 验收 M3 要用）"
   echo "  权重目录：$DATA_ROOT/models/default"
   echo "  HF_ENDPOINT=$HF_ENDPOINT"
 
+  if [ "$TRAINING_ONLY" = "1" ]; then
+    echo "  [跳过] RTC 合成器、WaveRNN 和 Whisper"
+    return
+  fi
+  "$PY" "$pkg/download_rtc_weights.py" || echo "  [警告] synthesizer/vocoder 没下好（平台服务需要）"
   # WER 用的 Whisper（论文用 Whisper-large = faster-whisper 的 large-v3）。
   # 云机带宽通常比家里好；缺了也不影响训练，只是算不了 WER。
   local whisper_model="${VPP_WHISPER_MODEL:-large-v3}"

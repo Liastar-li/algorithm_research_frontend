@@ -14,6 +14,8 @@
 """
 
 import argparse
+import json
+import math
 import sys
 from pathlib import Path
 
@@ -44,6 +46,7 @@ def main():
     parser.add_argument("--delta-mode", choices=("free", "unit"), default="free",
                         help="free=δ 模长自由增长（会偷偷放大 α 的角度预算）；"
                              "unit=每条强制 ‖δ‖=1，与 G 随机初始化时的工作点完全同预算")
+    parser.add_argument("--output", default=None, help="可选，把本次 oracle 结果写成 JSON")
     args = parser.parse_args()
 
     set_seed(config.SEED)  # 连 Python 的 random 一起固定，数据集裁剪才可复现
@@ -64,9 +67,14 @@ def main():
     with torch.no_grad():
         original_mel = pipeline.mel(waveforms)
         h = pipeline.speaker(waveforms.float(), lengths)
-        reference = de_encoder(waveforms.float(), lengths)
         original_waveform = pipeline.vocode(original_mel).float()
+        reference = de_encoder(original_waveform, lengths)
         content_codes = pipeline.content(original_mel, h)
+        baseline_waveform = pipeline.vocode(
+            pipeline.stage1.decode(original_mel, h, content=content_codes)).float()
+        baseline_waveform, _ = pipeline.align(baseline_waveform, original_waveform)
+        baseline_de = float(cosine_similarity(
+            de_encoder(baseline_waveform, lengths), reference).mean())
     permutation = torch.tensor([(index + 1) % args.count for index in range(args.count)])
 
     delta = torch.nn.Parameter(torch.randn_like(h) * 0.1)
@@ -74,12 +82,12 @@ def main():
 
     print("=" * 70)
     print(f"  自由 δ oracle · α={args.alpha} · L_de 在 {args.space} 空间 · {args.count} 条"
-          f" · δ={args.delta_mode}")
+          f" · δ={args.delta_mode} · 参照=E_spk(V(x))")
     print("=" * 70)
-    print(f"{'步':>4} {'L_de':>8} {'sim_prot':>9} {'‖δ‖':>7} {'角度°':>7} "
+    print(f"{'步':>4} {'L_de':>8} {'sim_prot':>9} {'prot@de':>9} {'‖δ‖':>7} {'角度°':>7} "
           f"{'mel':>8} {'|Δwav|':>8}")
 
-    import math
+    history = []
     best = (float("inf"), None)
 
     for step in range(1, args.steps + 1):
@@ -108,14 +116,37 @@ def main():
                 if args.delta_mode == "unit":
                     eff = 1.0
                 angle = math.degrees(math.atan2(args.alpha * eff, 1.0))
+                sim_prot = float(cosine_similarity(stolen, h).mean())
+                sim_prot_de = float(cosine_similarity(
+                    de_encoder(protected_waveform, lengths), reference).mean())
+                mel_mse = float((protected_mel - original_mel).square().mean())
+                wave_mae = float((protected_waveform - trimmed).abs().mean())
+                history.append({"step": step, "l_de": value, "sim_prot": sim_prot,
+                                "sim_prot_de_space": sim_prot_de, "delta_norm": eff,
+                                "angle_degrees": angle, "mel_mse": mel_mse,
+                                "waveform_mae": wave_mae})
                 print(f"{step:>4} {value:>8.4f} "
-                      f"{float(cosine_similarity(stolen, h).mean()):>9.4f} {eff:>7.3f} "
-                      f"{angle:>7.2f} "
-                      f"{float((protected_mel - original_mel).square().mean()):>8.5f} "
-                      f"{float((protected_waveform - trimmed).abs().mean()):>8.5f}")
+                      f"{sim_prot:>9.4f} {sim_prot_de:>9.4f} {eff:>7.3f} "
+                      f"{angle:>7.2f} {mel_mse:>8.5f} {wave_mae:>8.5f}")
 
     print("-" * 70)
     print(f"  最低 L_de = {best[0]:.4f}（第 {best[1]} 步）  ‖δ‖ 约束 = {args.delta_mode}")
+    if args.output:
+        report = {
+            "checkpoint": CKPT,
+            "de_reference": "E_spk(V(x))",
+            "h_adv": "h + alpha * delta",
+            "args": vars(args),
+            "baseline_l_de": baseline_de,
+            "initial_l_de": history[0]["l_de"],
+            "best_l_de": best[0],
+            "best_step": best[1],
+            "history": history,
+        }
+        output = Path(args.output)
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(f"  写出 {output}")
 
 
 if __name__ == "__main__":

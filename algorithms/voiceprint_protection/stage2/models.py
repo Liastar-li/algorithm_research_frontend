@@ -40,6 +40,7 @@ import torch.nn as nn
 
 import config
 import paths
+import audio_utils
 
 
 # ---------------------------------------------------------------------------
@@ -461,7 +462,8 @@ class TorchAutoVCStage1(nn.Module):
         length = mel.shape[1]
         target = int(self.pad_base * np.ceil(float(length) / self.pad_base))
         if target > length:
-            mel = torch.nn.functional.pad(mel, (0, 0, 0, target - length))
+            value = audio_utils.model_mel_padding_value()
+            mel = torch.nn.functional.pad(mel, (0, 0, 0, target - length), value=value)
         return mel
 
     # -- 对外 -------------------------------------------------------------

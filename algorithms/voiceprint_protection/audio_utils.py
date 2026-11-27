@@ -475,6 +475,17 @@ def hifigan_mel_unnorm(mel: np.ndarray) -> np.ndarray:
         (mel - preset["norm_offset"]) / preset["norm_scale"], dtype=np.float32)
 
 
+def model_mel_padding_value(preset_name: str | None = None) -> float:
+    """返回模型侧 mel 的真实静音值，任意长度推理补齐时使用。"""
+    name = preset_name or config.STAGE1.get("mel_preset", config.DEFAULT_PRESET)
+    preset = config.MEL_PRESETS[name]
+    if name == "hifigan16k":
+        import math
+
+        return math.log(preset["clip_val"]) * preset["norm_scale"] + preset["norm_offset"]
+    return 0.0
+
+
 def model_mel(wav: np.ndarray, preset_name: str | None = None) -> np.ndarray:
     """**模型侧 mel 的统一入口**（Ec / D 的输入 + 损失的计算基准）。
 

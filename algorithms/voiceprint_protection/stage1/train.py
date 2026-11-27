@@ -307,6 +307,15 @@ def evaluate(model, speaker_encoder, classifier, loader, device, use_amp: bool,
 
 
 def train_model(args) -> int:
+    classifier_path = args.classifier_checkpoint or (WEIGHTS_DIR / "stage1_speaker_classifier.pt")
+    if not classifier_path.exists() and not args.smoke:
+        raise FileNotFoundError(
+            f"正式 Stage 1 训练缺少预训练说话人分类器 W_s：{classifier_path}。"
+            "请先运行 python algorithms/voiceprint_protection/stage1/train.py "
+            "--stage classifier --iterations 2000，或用 --classifier-checkpoint 指定。"
+            "随机 W_s 会让 L_dis 的约束失效。"
+        )
+
     print("=" * 70)
     print("  Stage 1 · 第 2 步：训练解耦-重建网络")
     print("=" * 70)
@@ -315,7 +324,9 @@ def train_model(args) -> int:
     device = resolve_device(args.device)
     use_amp = args.amp and device.type == "cuda"
 
-    speaker_encoder = TrainableSpeakerEncoder(device=str(device), fine_tune=True)
+    speaker_encoder = TrainableSpeakerEncoder(
+        device=str(device), fine_tune=not args.freeze_speaker_encoder,
+    )
     model = Stage1Model().to(device)
     print(f"  Stage 1 模型参数量：{count_parameters(model):,}")
     print(f"  说话人编码器：{speaker_encoder.describe().splitlines()[3]}")
@@ -323,7 +334,6 @@ def train_model(args) -> int:
     print(f"  模型侧 mel 约定 = {config.STAGE1.get('mel_preset', config.DEFAULT_PRESET)}")
 
     # -- 分类器（第 1 步的产物）------------------------------------------
-    classifier_path = args.classifier_checkpoint or (WEIGHTS_DIR / "stage1_speaker_classifier.pt")
     classifier = stage1_losses.SpeakerClassifier(
         num_speakers=config.STAGE1["num_speakers"],
         embedding_dim=config.SPEAKER_DIM,
@@ -346,13 +356,14 @@ def train_model(args) -> int:
     except Exception as error:  # noqa: BLE001
         print(f"  [警告] 验证集不可用（{error}），跳过验证。")
 
-    parameters = list(model.parameters()) + list(speaker_encoder.parameters())
+    speaker_parameters = [p for p in speaker_encoder.parameters() if p.requires_grad]
+    parameters = list(model.parameters()) + speaker_parameters
     base_lr = args.lr if args.lr is not None else config.STAGE1["lr"]
     optimizer_parameters = parameters
     if args.speaker_lr is not None:
         optimizer_parameters = [
             {"params": list(model.parameters())},
-            {"params": list(speaker_encoder.parameters()), "lr": args.speaker_lr},
+            {"params": speaker_parameters, "lr": args.speaker_lr},
         ]
     optimizer = torch.optim.AdamW(optimizer_parameters, lr=base_lr)
     scaler = make_scaler(use_amp)
@@ -598,6 +609,8 @@ def main() -> int:
     parser.add_argument("--classifier-checkpoint", type=Path, help="Pretrained frozen speaker classifier")
     parser.add_argument("--lr", type=float, help="AutoVC learning rate")
     parser.add_argument("--speaker-lr", type=float, help="Separate GE2E learning rate")
+    parser.add_argument("--freeze-speaker-encoder", action="store_true",
+                        help="Freeze GE2E for the Stage 1 control arm")
     parser.add_argument("--override-resume-lr", action="store_true",
                         help="Set the requested LRs after loading optimizer moments")
     parser.add_argument("--keep-step-weights", action="store_true", help="Keep each periodic model snapshot")
@@ -607,6 +620,8 @@ def main() -> int:
     args = parser.parse_args()
     if args.resume and args.init_checkpoint:
         parser.error("--resume and --init-checkpoint are mutually exclusive")
+    if args.freeze_speaker_encoder and (args.stage != "model" or args.speaker_lr is not None):
+        parser.error("--freeze-speaker-encoder requires --stage model without --speaker-lr")
     if args.override_resume_lr and (not args.resume or args.lr is None):
         parser.error("--override-resume-lr requires --resume and --lr")
     if any(value is not None and value <= 0 for value in (args.lr, args.speaker_lr)):

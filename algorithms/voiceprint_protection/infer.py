@@ -76,16 +76,9 @@ def random_perturbation(dimension: int = config.SPEAKER_DIM,
 
 def perturb_embedding(embedding: np.ndarray, delta: np.ndarray,
                       alpha: float = config.STAGE2["alpha"]) -> np.ndarray:
-    """h_adv = h + α·δ，然后重新 L2 归一化。
-
-    归一化是必要的：说话人编码器的输出是单位向量，
-    加了扰动后模长会变大，不归一化会让下游模型跑到没见过的输入区域。
-    """
-    advanced = np.asarray(embedding, dtype=np.float32) + alpha * np.asarray(delta, dtype=np.float32)
-    norm = float(np.linalg.norm(advanced))
-    if norm > 0:
-        advanced = advanced / norm
-    return advanced.astype(np.float32)
+    """论文式 h_adv = h + α·δ。"""
+    return (np.asarray(embedding, dtype=np.float32)
+            + alpha * np.asarray(delta, dtype=np.float32)).astype(np.float32)
 
 
 def _infer_generator_config(state: dict) -> dict:

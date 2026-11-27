@@ -32,30 +32,13 @@ def set_seed(seed: int) -> None:
 
 
 def perturb_embedding(embedding: torch.Tensor, delta: torch.Tensor,
-                      alpha: float) -> torch.Tensor:
-    """h_adv = h + α·δ，然后重新 L2 归一化。
-
-    参数
-    ----
-    embedding : (..., 256) 原始说话人嵌入 h
-    delta     : (..., 256) 扰动 δ（生成器 G 的输出）
-    alpha     : 扰动强度（论文 0.10）
-
-    返回
-    ----
-    (..., 256) 被污染的嵌入 h_adv
-
-    【为什么加了扰动还要再归一化】
-    说话人编码器的输出是**单位向量**（上游 GE2E 出口做了 L2 归一化）。
-    直接 h + α·δ 会让模长变大（‖h + αδ‖ = √(1 + α²) > 1），
-    下游解码器就会跑到它没见过的输入区域 —— 出来的音频会明显跑偏。
-    所以必须重新归一化，让 h_adv 仍然落在单位球面上。
-
-    ★ 与 `infer.py::perturb_embedding` 的公式**逐字一致**（只是这里支持 batch）。
-    """
+                      alpha: float, renormalize: bool = False) -> torch.Tensor:
+    """论文式 h_adv = h + α·δ，默认不重新归一化。"""
     advanced = embedding + alpha * delta
-    norm = torch.linalg.vector_norm(advanced, dim=-1, keepdim=True)
-    return advanced / norm.clamp_min(1e-12)
+    if renormalize:
+        norm = torch.linalg.vector_norm(advanced, dim=-1, keepdim=True)
+        advanced = advanced / norm.clamp_min(1e-12)
+    return advanced
 
 
 def cosine_similarity(a: torch.Tensor, b: torch.Tensor,
